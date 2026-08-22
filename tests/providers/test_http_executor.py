@@ -96,7 +96,7 @@ async def test_http_executor_request_text_returns_exact_body_without_json_decode
             "POST",
             "https://endpoint-user:ENDPOINT_MARKER@provider.example.test/fetch?q=QUERY_MARKER#fragment",
             stage="fetch",
-            headers={"Authorization": "Bearer [REDACTED_SECRET]"},
+            headers={"Authorization": "Bearer HEADER_CREDENTIAL_MARKER"},
             json_body={"url": "TARGET_MARKER"},
         )
 
@@ -111,6 +111,7 @@ async def test_http_executor_request_text_returns_exact_body_without_json_decode
         "ENDPOINT_MARKER",
         "QUERY_MARKER",
         "TARGET_MARKER",
+        "HEADER_CREDENTIAL_MARKER",
         "Request(",
     ):
         assert marker not in logged
