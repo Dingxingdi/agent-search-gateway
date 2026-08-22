@@ -76,6 +76,198 @@ async def test_http_executor_retries_retryable_status_and_hides_sensitive_payloa
     assert "Request(" not in logged
 
 
+async def test_http_executor_request_text_returns_exact_body_without_json_decode_or_payload_logging(
+) -> None:
+    body = "# fetched\n<div>TEXT_RESPONSE_MARKER</div>"
+    logger, stream = structured_test_logger("tests.http.text-success")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=body, request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        result = await executor.request_text(
+            "POST",
+            "https://endpoint-user:ENDPOINT_MARKER@provider.example.test/fetch?q=QUERY_MARKER#fragment",
+            stage="fetch",
+            headers={"Authorization": "Bearer [REDACTED_SECRET]"},
+            json_body={"url": "TARGET_MARKER"},
+        )
+
+    assert result == body
+    logged = stream.getvalue()
+    lines = logged.splitlines()
+    assert sum("event=http_attempt_started" in line for line in lines) == 1
+    assert sum("event=http_attempt_completed" in line for line in lines) == 1
+    assert all("endpoint=https://provider.example.test/fetch" in line for line in lines)
+    for marker in (
+        "TEXT_RESPONSE_MARKER",
+        "ENDPOINT_MARKER",
+        "QUERY_MARKER",
+        "TARGET_MARKER",
+        "Request(",
+    ):
+        assert marker not in logged
+
+
+async def test_http_executor_request_text_retries_retryable_statuses() -> None:
+    attempts = 0
+    response_bodies = ["ERROR_ONE_MARKER", "ERROR_TWO_MARKER", "FINAL_TEXT_MARKER"]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        status = (500, 429, 200)[attempts]
+        body = response_bodies[attempts]
+        attempts += 1
+        return httpx.Response(status, text=body, request=request)
+
+    logger, stream = structured_test_logger("tests.http.text-retry-status")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        result = await executor.request_text(
+            "GET",
+            "https://provider.example.test/fetch",
+            stage="fetch",
+        )
+
+    assert result == "FINAL_TEXT_MARKER"
+    assert attempts == 3
+    logged = stream.getvalue()
+    retry_lines = [line for line in logged.splitlines() if "event=http_retrying" in line]
+    assert len(retry_lines) == 2
+    assert "category=status" in retry_lines[0] and "status=500" in retry_lines[0]
+    assert "category=status" in retry_lines[1] and "status=429" in retry_lines[1]
+    assert "delay_ms=10" in retry_lines[0]
+    assert "delay_ms=20" in retry_lines[1]
+    for body in response_bodies:
+        assert body not in logged
+
+
+async def test_http_executor_request_text_maps_non_retryable_status_without_retry() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(401, text="TERMINAL_BODY_MARKER", request=request)
+
+    logger, stream = structured_test_logger("tests.http.text-terminal-status")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        with pytest.raises(ExecutionFailure) as caught:
+            await executor.request_text(
+                "GET",
+                "https://provider.example.test/fetch",
+                stage="fetch",
+            )
+
+    assert attempts == 1
+    assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert "HTTP status 401" in caught.value.message
+    assert "TERMINAL_BODY_MARKER" not in caught.value.message
+    logged = stream.getvalue()
+    assert "category=status" in logged and "status=401" in logged
+    assert "TERMINAL_BODY_MARKER" not in logged
+
+
+async def test_http_executor_request_text_retries_transport_failure() -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("TRANSPORT_MARKER", request=request)
+        return httpx.Response(200, text="FETCHED_TEXT", request=request)
+
+    logger, stream = structured_test_logger("tests.http.text-transport")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        result = await executor.request_text(
+            "GET",
+            "https://provider.example.test/fetch",
+            stage="fetch",
+        )
+
+    assert result == "FETCHED_TEXT"
+    assert attempts == 2
+    logged = stream.getvalue()
+    assert "event=http_retrying" in logged
+    assert "category=transport" in logged
+    assert "TRANSPORT_MARKER" not in logged
+    assert "FETCHED_TEXT" not in logged
+
+
+async def test_http_executor_request_text_redacts_userinfo_query_and_fragment() -> None:
+    logger, stream = structured_test_logger("tests.http.text-redaction")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="ok", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        await executor.request_text(
+            "GET",
+            "https://name:USERINFO_MARKER@provider.example.test/path?q=QUERY_MARKER&url=TARGET_MARKER#FRAGMENT_MARKER",
+            stage="fetch",
+        )
+
+    logged = stream.getvalue()
+    assert "endpoint=https://provider.example.test/path" in logged
+    for marker in ("USERINFO_MARKER", "QUERY_MARKER", "TARGET_MARKER", "FRAGMENT_MARKER"):
+        assert marker not in logged
+
+
+async def test_http_executor_request_text_allows_empty_success_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="", request=request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            sleep=_no_sleep,
+        )
+        result = await executor.request_text(
+            "GET",
+            "https://provider.example.test/fetch",
+            stage="fetch",
+        )
+
+    assert result == ""
+
+
 async def test_http_executor_classifies_invalid_json_as_protocol_failure_without_retry() -> None:
     attempts = 0
     times = iter([0.0, 10.0, 11.0, 12.0])

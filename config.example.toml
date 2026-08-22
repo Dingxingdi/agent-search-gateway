@@ -61,6 +61,62 @@ max_age_seconds = 600
 timeout_seconds = 30
 disable_cache_fallback = true
 
+[web_providers.brightdata]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.brightdata.com"
+api_key_env = "[REDACTED]"
+search_zone = "example_serp_zone"
+fetch_zone = "example_unlocker_zone"
+
+[web_providers.scrape_do]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.scrape.do"
+api_key_env = "[REDACTED]"
+
+[web_providers.zenrows]
+enable_search = false
+enable_fetch = true
+api_url = "https://api.zenrows.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.decodo]
+enable_search = true
+enable_fetch = true
+api_url = "https://scraper-api.decodo.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.scrapingdog]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.scrapingdog.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.scrapegraphai]
+enable_search = true
+enable_fetch = true
+api_url = "https://v2-api.scrapegraphai.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.scraperapi]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.scraperapi.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.scrapingant]
+enable_search = false
+enable_fetch = true
+api_url = "https://api.scrapingant.com"
+api_key_env = "[REDACTED]"
+
+[web_providers.serpapi]
+enable_search = true
+enable_fetch = false
+api_url = "https://serpapi.com"
+api_key_env = "[REDACTED]"
+
 [academic_providers]
 default_max_concurrency = 3
 

@@ -19,8 +19,30 @@ class JsonRequester(Protocol):
     ) -> object: ...
 
 
+class TextRequester(Protocol):
+    async def request_text(
+        self,
+        method: str,
+        url: str,
+        *,
+        stage: str,
+        headers: Mapping[str, str] | None = None,
+        json_body: object | None = None,
+    ) -> str: ...
+
+
+class HttpRequester(JsonRequester, TextRequester, Protocol):
+    pass
+
+
 def endpoint(base_url: str, suffix: str) -> str:
     return f"{base_url.rstrip('/')}/{suffix.lstrip('/')}"
+
+
+def configured_string(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise TypeError(f"{label} must be a non-empty string")
+    return value.strip()
 
 
 def failure(provider: str, stage: str, reason: str) -> ExecutionFailure:

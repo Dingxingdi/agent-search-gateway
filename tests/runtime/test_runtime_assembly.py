@@ -13,6 +13,7 @@ from agent_search_gateway.providers.academic.defaults import (
 from agent_search_gateway.providers.contracts import ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.registry import WebProviderRegistration
+from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.parallel import ParallelAdapter
 from agent_search_gateway.runtime import Runtime
 from tests.support.logging import structured_test_logger
@@ -129,6 +130,15 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
         ("anysearch", True, False),
         ("tinyfish", True, True),
         ("parallel", True, True),
+        ("brightdata", True, True),
+        ("scrape_do", True, True),
+        ("zenrows", False, True),
+        ("decodo", True, True),
+        ("scrapingdog", True, True),
+        ("scrapegraphai", True, True),
+        ("scraperapi", True, True),
+        ("scrapingant", False, True),
+        ("serpapi", True, False),
     ]
     parallel_registration = registry.get("parallel")
     assert parallel_registration is not None
@@ -200,6 +210,107 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     brave["enable_fetch"] = True
     with pytest.raises(ConfigFailure):
         resolve_config(bad, registry, environment)
+
+
+async def test_runtime_assembles_brightdata_with_one_shared_dual_adapter(
+    tmp_path: Path,
+) -> None:
+    registry = build_default_registry()
+    raw = _config()
+    raw["web_providers"] = {
+        "default_max_concurrency": 3,
+        "brightdata": {
+            "enable_search": True,
+            "enable_fetch": True,
+            "api_key_env": "ENV_BRIGHT",
+            "api_url": "https://bright.example.test",
+            "search_zone": "search-zone",
+            "fetch_zone": "fetch-zone",
+            "max_concurrency": 7,
+        },
+    }
+    environment = _environment()
+    environment["ENV_BRIGHT"] = "BRIGHT_CREDENTIAL_SENTINEL"
+    resolved = resolve_config(raw, registry, environment)
+    clients: list[_CountingAsyncClient] = []
+
+    def client_factory() -> httpx.AsyncClient:
+        client = _CountingAsyncClient()
+        clients.append(client)
+        return client
+
+    _logger, stream = structured_test_logger("agent_search_gateway.runtime")
+    runtime = Runtime.build(
+        resolved,
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=client_factory,
+    )
+
+    [search_provider] = runtime.web_search_providers
+    [fetch_provider] = runtime.web_fetch_providers
+    assert isinstance(search_provider, BrightDataAdapter)
+    assert search_provider is fetch_provider
+    assert runtime.quotas.get_web("brightdata").limit == 7
+    assert search_provider._api_url == "https://bright.example.test"
+    assert search_provider._search_zone == "search-zone"
+    assert search_provider._fetch_zone == "fetch-zone"
+
+    [executor] = runtime._web_http_executors
+    assert callable(executor.request_json)
+    assert callable(executor.request_text)
+    assert executor._client is clients[0]
+    assert "BRIGHT_CREDENTIAL_SENTINEL" not in repr(runtime)
+
+    logged = stream.getvalue()
+    assert "web_providers=brightdata" in logged
+    assert "web_limits=brightdata:7" in logged
+    assert "BRIGHT_CREDENTIAL_SENTINEL" not in logged
+    assert "ENV_BRIGHT" not in logged
+
+    await runtime.aclose()
+    assert len(clients) == 3
+    assert all(client.close_calls == 1 for client in clients)
+
+
+async def test_runtime_maps_invalid_brightdata_zone_to_config_failure(
+    tmp_path: Path,
+) -> None:
+    registry = build_default_registry()
+    raw = _config()
+    raw["web_providers"] = {
+        "brightdata": {
+            "enable_search": True,
+            "enable_fetch": True,
+            "api_key_env": "ENV_BRIGHT",
+            "api_url": "https://bright.example.test",
+            "search_zone": "   ",
+            "fetch_zone": "fetch-zone",
+        }
+    }
+    environment = _environment()
+    environment["ENV_BRIGHT"] = "x"
+    resolved = resolve_config(raw, registry, environment)
+    clients: list[_CountingAsyncClient] = []
+
+    def client_factory() -> httpx.AsyncClient:
+        client = _CountingAsyncClient()
+        clients.append(client)
+        return client
+
+    with pytest.raises(
+        ConfigFailure,
+        match="Invalid configuration for web provider brightdata",
+    ):
+        Runtime.build(
+            resolved,
+            RuntimePaths.from_home(tmp_path),
+            registry=registry,
+            http_client_factory=client_factory,
+        )
+
+    for client in clients:
+        await client.aclose()
 
 
 async def test_runtime_maps_invalid_parallel_adapter_config_to_config_failure(

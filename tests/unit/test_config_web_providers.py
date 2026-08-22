@@ -161,3 +161,118 @@ def test_disabled_parallel_still_rejects_unknown_top_level_option() -> None:
         resolve_web_provider_config(data, build_default_registry(), {})
 
     assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "unsupported_flag"),
+    [
+        ("zenrows", "enable_search"),
+        ("scrapingant", "enable_search"),
+        ("serpapi", "enable_fetch"),
+    ],
+)
+def test_new_provider_capabilities_are_enforced_by_generic_config_resolution(
+    provider_name: str,
+    unsupported_flag: str,
+) -> None:
+    data = {
+        "web_providers": {
+            provider_name: {
+                unsupported_flag: True,
+                "api_key_env": "KEY",
+                "api_url": "https://provider.example.test",
+            }
+        }
+    }
+
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(data, build_default_registry(), {"KEY": "secret"})
+
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+def test_new_provider_allowed_options_flow_through_generic_resolution() -> None:
+    data = {
+        "web_providers": {
+            "brightdata": {
+                "enable_search": True,
+                "enable_fetch": True,
+                "api_key_env": "BRIGHT_KEY",
+                "api_url": "https://bright.example.test",
+                "search_zone": "search-zone",
+                "fetch_zone": "fetch-zone",
+                "max_concurrency": 7,
+            },
+            "scrape_do": {
+                "enable_search": True,
+                "enable_fetch": True,
+                "api_key_env": "SCRAPE_KEY",
+                "api_url": "https://scrape.example.test",
+            },
+        }
+    }
+
+    resolved = resolve_web_provider_config(
+        data,
+        build_default_registry(),
+        {"BRIGHT_KEY": "bright-secret", "SCRAPE_KEY": "scrape-secret"},
+    )
+    brightdata, scrape_do = resolved.providers
+
+    assert dict(brightdata.options) == {
+        "api_url": "https://bright.example.test",
+        "search_zone": "search-zone",
+        "fetch_zone": "fetch-zone",
+    }
+    assert brightdata.max_concurrency == 7
+    assert brightdata.secret is not None
+    assert brightdata.secret.reveal() == "bright-secret"
+    assert "bright-secret" not in repr(brightdata.secret)
+    for shared_key in ("enable_search", "enable_fetch", "api_key_env", "max_concurrency"):
+        assert shared_key not in brightdata.options
+
+    assert dict(scrape_do.options) == {"api_url": "https://scrape.example.test"}
+    assert scrape_do.secret is not None
+    assert scrape_do.secret.reveal() == "scrape-secret"
+
+
+def test_new_provider_unknown_option_is_rejected_generically() -> None:
+    data = {
+        "web_providers": {
+            "scraperapi": {
+                "enable_search": True,
+                "api_key_env": "KEY",
+                "api_url": "https://scraperapi.example.test",
+                "country": "us",
+            }
+        }
+    }
+
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(data, build_default_registry(), {"KEY": "secret"})
+
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+def test_disabled_new_provider_needs_no_credential_or_constructor_validation() -> None:
+    data = {
+        "web_providers": {
+            "brightdata": {
+                "enable_search": False,
+                "enable_fetch": False,
+                "api_url": " ",
+                "search_zone": " ",
+                "fetch_zone": " ",
+            }
+        }
+    }
+
+    resolved = resolve_web_provider_config(data, build_default_registry(), {})
+
+    [brightdata] = resolved.providers
+    assert brightdata.secret is None
+    assert dict(brightdata.options) == {
+        "api_url": " ",
+        "search_zone": " ",
+        "fetch_zone": " ",
+    }

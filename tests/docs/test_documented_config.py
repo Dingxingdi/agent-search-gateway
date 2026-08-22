@@ -116,3 +116,77 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
     parser = build_parser()
     action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
     assert set(action.choices) == documented
+
+
+def test_example_config_and_readme_document_all_new_provider_contracts() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    registry = build_default_registry()
+    resolved = resolve_config(data, registry, _stub_environment(data))
+    web = data.get("web_providers")
+    assert isinstance(web, dict)
+
+    new_names = {
+        "brightdata",
+        "scrape_do",
+        "zenrows",
+        "decodo",
+        "scrapingdog",
+        "scrapegraphai",
+        "scraperapi",
+        "scrapingant",
+        "serpapi",
+    }
+    assert new_names <= set(web)
+    assert "apify" not in web
+    assert "scrape" not in web
+
+    by_name = {item.name: item for item in resolved.web.providers}
+    assert dict(by_name["brightdata"].options) == {
+        "api_url": "https://api.brightdata.com",
+        "search_zone": "example_serp_zone",
+        "fetch_zone": "example_unlocker_zone",
+    }
+    assert dict(by_name["scrape_do"].options) == {"api_url": "https://api.scrape.do"}
+
+    expected_capabilities = {
+        "brightdata": (True, True),
+        "scrape_do": (True, True),
+        "zenrows": (False, True),
+        "decodo": (True, True),
+        "scrapingdog": (True, True),
+        "scrapegraphai": (True, True),
+        "scraperapi": (True, True),
+        "scrapingant": (False, True),
+        "serpapi": (True, False),
+    }
+    for name, (search, fetch) in expected_capabilities.items():
+        configured = by_name[name]
+        assert (configured.enable_search, configured.enable_fetch) == (search, fetch)
+        registration = registry.get(name)
+        assert registration is not None
+        assert (
+            registration.capabilities.search,
+            registration.capabilities.fetch,
+        ) == (search, fetch)
+
+    for name in new_names:
+        raw = web[name]
+        assert isinstance(raw, dict)
+        api_key_env = raw.get("api_key_env")
+        assert api_key_env == "[REDACTED]"
+
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    expected_rows = {
+        "Bright Data": ("yes", "yes"),
+        "Scrape.do": ("yes", "yes"),
+        "ZenRows": ("no", "yes"),
+        "Decodo": ("yes", "yes"),
+        "ScrapingDog": ("yes", "yes"),
+        "ScrapeGraphAI": ("yes", "yes"),
+        "ScraperAPI": ("yes", "yes"),
+        "ScrapingAnt": ("no", "yes"),
+        "SerpApi": ("yes", "no"),
+    }
+    for display_name, (search_label, fetch_label) in expected_rows.items():
+        assert f"| {display_name} | {search_label} | {fetch_label} |" in readme
+    assert "| Apify |" not in readme

@@ -4,12 +4,21 @@ from .contracts import ProviderCapabilities
 from .registry import ProviderRegistry, WebProviderRegistration
 from .web.anysearch import AnySearchAdapter
 from .web.brave import BraveAdapter
+from .web.brightdata import BrightDataAdapter
+from .web.decodo import DecodoAdapter
 from .web.exa import ExaAdapter
 from .web.firecrawl import FirecrawlAdapter
 from .web.linkup import LinkupAdapter
 from .web.parallel import ParallelAdapter
+from .web.scrape_do import ScrapeDoAdapter
+from .web.scrapegraphai import ScrapeGraphAIAdapter
+from .web.scraperapi import ScraperAPIAdapter
+from .web.scrapingant import ScrapingAntAdapter
+from .web.scrapingdog import ScrapingDogAdapter
+from .web.serpapi import SerpApiAdapter
 from .web.tavily import TavilyAdapter
 from .web.tinyfish import TinyFishAdapter
+from .web.zenrows import ZenRowsAdapter
 
 
 def build_default_registry() -> ProviderRegistry:
@@ -64,6 +73,60 @@ def build_default_registry() -> ProviderRegistry:
             frozenset(
                 {"api_url", "mode", "search_fetch_policy", "extract_fetch_policy"}
             ),
+        ),
+        WebProviderRegistration(
+            "brightdata",
+            ProviderCapabilities(search=True, fetch=True),
+            BrightDataAdapter,
+            frozenset({"api_url", "search_zone", "fetch_zone"}),
+        ),
+        WebProviderRegistration(
+            "scrape_do",
+            ProviderCapabilities(search=True, fetch=True),
+            ScrapeDoAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "zenrows",
+            ProviderCapabilities(search=False, fetch=True),
+            ZenRowsAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "decodo",
+            ProviderCapabilities(search=True, fetch=True),
+            DecodoAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "scrapingdog",
+            ProviderCapabilities(search=True, fetch=True),
+            ScrapingDogAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "scrapegraphai",
+            ProviderCapabilities(search=True, fetch=True),
+            ScrapeGraphAIAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "scraperapi",
+            ProviderCapabilities(search=True, fetch=True),
+            ScraperAPIAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "scrapingant",
+            ProviderCapabilities(search=False, fetch=True),
+            ScrapingAntAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "serpapi",
+            ProviderCapabilities(search=True, fetch=False),
+            SerpApiAdapter,
+            frozenset({"api_url"}),
         ),
     )
     for registration in registrations:

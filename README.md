@@ -59,6 +59,15 @@ The results directory is created by the daemon as needed. The debug log is creat
 | AnySearch | yes | no |
 | TinyFish | yes | yes |
 | Parallel | yes | yes |
+| Bright Data | yes | yes |
+| Scrape.do | yes | yes |
+| ZenRows | no | yes |
+| Decodo | yes | yes |
+| ScrapingDog | yes | yes |
+| ScrapeGraphAI | yes | yes |
+| ScraperAPI | yes | yes |
+| ScrapingAnt | no | yes |
+| SerpApi | yes | no |
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
