@@ -65,7 +65,7 @@ disable_cache_fallback = true
 enable_search = true
 enable_fetch = true
 api_url = "https://api.brightdata.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_BRIGHTDATA"
 search_zone = "example_serp_zone"
 fetch_zone = "example_unlocker_zone"
 
@@ -73,49 +73,49 @@ fetch_zone = "example_unlocker_zone"
 enable_search = true
 enable_fetch = true
 api_url = "https://api.scrape.do"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SCRAPE_DO"
 
 [web_providers.zenrows]
 enable_search = false
 enable_fetch = true
 api_url = "https://api.zenrows.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_ZENROWS"
 
 [web_providers.decodo]
 enable_search = true
 enable_fetch = true
 api_url = "https://scraper-api.decodo.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_DECODO"
 
 [web_providers.scrapingdog]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.scrapingdog.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SCRAPINGDOG"
 
 [web_providers.scrapegraphai]
 enable_search = true
 enable_fetch = true
 api_url = "https://v2-api.scrapegraphai.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SCRAPEGRAPHAI"
 
 [web_providers.scraperapi]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.scraperapi.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SCRAPERAPI"
 
 [web_providers.scrapingant]
 enable_search = false
 enable_fetch = true
 api_url = "https://api.scrapingant.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SCRAPINGANT"
 
 [web_providers.serpapi]
 enable_search = true
 enable_fetch = false
 api_url = "https://serpapi.com"
-api_key_env = "[REDACTED]"
+api_key_env = "ASG_SERPAPI"
 
 [academic_providers]
 default_max_concurrency = 3

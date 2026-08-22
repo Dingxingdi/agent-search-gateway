@@ -169,11 +169,21 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
             registration.capabilities.fetch,
         ) == (search, fetch)
 
-    for name in new_names:
+    expected_api_key_envs = {
+        "brightdata": "ASG_BRIGHTDATA",
+        "scrape_do": "ASG_SCRAPE_DO",
+        "zenrows": "ASG_ZENROWS",
+        "decodo": "ASG_DECODO",
+        "scrapingdog": "ASG_SCRAPINGDOG",
+        "scrapegraphai": "ASG_SCRAPEGRAPHAI",
+        "scraperapi": "ASG_SCRAPERAPI",
+        "scrapingant": "ASG_SCRAPINGANT",
+        "serpapi": "ASG_SERPAPI",
+    }
+    for name, expected_api_key_env in expected_api_key_envs.items():
         raw = web[name]
         assert isinstance(raw, dict)
-        api_key_env = raw.get("api_key_env")
-        assert api_key_env == "[REDACTED]"
+        assert raw.get("api_key_env") == expected_api_key_env
 
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     expected_rows = {
