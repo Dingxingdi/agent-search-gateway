@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pages: read
+      pages: read # required to query the repository's Pages configuration
     outputs:
       enabled: ${{ steps.pages.outputs.enabled }}
     steps:
@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      pages: read
+      pages: read # required by actions/configure-pages to read Pages settings
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
