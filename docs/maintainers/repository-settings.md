@@ -2,18 +2,19 @@
 
 Several open-source safeguards live in GitHub settings rather than the Git tree. Apply and periodically review this checklist with repository administrator access.
 
-## Pre-release security audit record
+## Open-source security and public-surface audit record
 
-The open-source readiness audit performed on 2026-09-02 covered:
+The open-source readiness audit performed and refreshed on 2026-09-02 used a snapshot taken immediately after pull request #66 merged (`main` at `6add30c`) and covered:
 
 - the complete Git history with TruffleHog 3.97.1;
-- all 59 available issue and pull-request records, 97 issue comments, 132 review comments, and 117 review summaries, with every paginated API page included;
-- all 35 available GitHub Actions run logs;
-- Actions artifacts and GitHub Releases.
+- all 66 available issue and pull-request records, 115 issue comments, 132 review comments, and 121 review summaries, with every paginated API page included;
+- all 74 available GitHub Actions run logs, comprising 1,265 extracted log files;
+- both unexpired Actions artifacts, comprising four extracted files; and
+- the `v0.1.0` GitHub Release, its release text, and both attached assets, comprising 157 extracted files.
 
-No verified credential was found. Eight URI-detector candidates in Git history and four candidates in GitHub review text were manually confirmed as reserved example-domain fixtures or explicit test sentinels. There were no Actions artifacts and no GitHub Releases to inspect.
+No credential requiring remediation was found. The full-history scan produced only URI-detector occurrences at eight unique locations. Across the refreshed public-surface material, TruffleHog reported zero non-URI credential findings; a separate structural scan examined 13,598 URL occurrences, including 345 URLs with user information, and confirmed that every one used a reserved example domain or an explicit scanner test sentinel.
 
-The repository setting allowed a Wiki, but the corresponding Wiki Git repository did not exist, so there were no Wiki pages or revisions to inspect. Disable the unused Wiki entry point.
+The repository setting allowed a Wiki, but the corresponding Wiki Git repository still did not exist, so there were no Wiki pages or revisions to inspect. Disable the unused Wiki entry point.
 
 A technical scan cannot prove that the project never handled customer-confidential material or real credentials. The repository owner must make that determination. If real secrets or confidential data ever entered a commit, issue, pull request, log, artifact, release, or Wiki revision, rotate credentials and prefer a new clean repository while archiving the old one privately.
 
