@@ -8,6 +8,10 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Security
+
+- Raised the pytest floor to 9.0.3, upgraded the locked test stack, and added locked dependency auditing to CI and release verification to remediate CVE-2025-71176.
+
 ## [0.1.0] - 2026-09-02
 
 ### Added
@@ -20,4 +24,3 @@ The first public release is `v0.1.0`.
 ### Security
 
 - Audited the complete Git history, fully paginated issue and pull-request text, review comments, Actions logs, artifacts, releases, and Wiki state before the open-source readiness change.
-- Raised the pytest floor to 9.0.3, upgraded the locked test stack, and added locked dependency auditing to CI and release verification to remediate CVE-2025-71176.
