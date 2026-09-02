@@ -43,6 +43,7 @@ def test_ci_preserves_locked_verification_and_smokes_built_wheel() -> None:
     workflow = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "uv sync --locked" in workflow
+    assert "uv audit --locked --preview-features audit-command" in workflow
     assert "uv run ruff check ." in workflow
     assert "uv run mypy src tests" in workflow
     assert "uv run pytest -v" in workflow

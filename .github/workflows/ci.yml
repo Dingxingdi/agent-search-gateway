@@ -33,6 +33,8 @@ jobs:
           enable-cache: true
       - name: Sync locked environment
         run: uv sync --locked --group dev
+      - name: Audit locked dependencies
+        run: uv audit --locked --preview-features audit-command
       - name: Check formatting
         run: uv run ruff format --check src tests scripts
       - name: Lint

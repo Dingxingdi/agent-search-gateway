@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
-      pages: write
+      pages: read
     outputs:
       enabled: ${{ steps.pages.outputs.enabled }}
     steps:
@@ -43,7 +43,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      pages: write
+      pages: read
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,8 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      id-token: write
-      pages: write
+      id-token: write # required for OIDC authentication to GitHub Pages
+      pages: write # required to publish the Pages deployment
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

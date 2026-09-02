@@ -44,6 +44,8 @@ jobs:
         run: python scripts/verify_release_version.py "$TAG_NAME"
       - name: Sync locked environment
         run: uv sync --locked --all-groups
+      - name: Audit locked dependencies
+        run: uv audit --locked --preview-features audit-command
       - name: Check formatting
         run: uv run ruff format --check src tests scripts
       - name: Lint
@@ -70,9 +72,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      attestations: write
+      attestations: write # required to publish build provenance attestations
       contents: read
-      id-token: write
+      id-token: write # required for OIDC-backed provenance generation
     steps:
       - name: Download verified distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -90,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
+      contents: write # required to create the GitHub Release and upload assets
     steps:
       - name: Download attested distributions
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

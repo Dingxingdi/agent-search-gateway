@@ -30,7 +30,7 @@ The runtime dependency chain uses BSD-3-Clause, MIT, and MPL-2.0 licenses. Those
 - [ ] Set the description to: `Local daemon and CLI for aggregated web and academic search plus admitted-URL fetching.`
 - [ ] Add relevant topics such as `python`, `cli`, `search`, `web-search`, `academic-search`, `llm`, and `unix-socket`.
 - [ ] Set the website field to `https://dingxingdi.github.io/agent-search-gateway/` after the first successful Pages deployment.
-- [ ] Keep Issues enabled.
+- [x] Keep Issues enabled.
 - [ ] Disable Projects and Wiki unless they have an intentional maintainer workflow and reviewed content.
 - [ ] Enable automatic deletion of head branches after merge.
 
@@ -50,6 +50,7 @@ The CI workflow also runs TruffleHog for verified and unknown non-URI detections
 
 - [ ] Enable GitHub Pages and select **GitHub Actions** as the build and deployment source.
 - [ ] Run the `documentation` workflow once and verify the landing page and generated Python reference.
+- [ ] Change `[project.urls].Documentation` in `pyproject.toml` to the Pages URL and update the README wording after the first successful deployment.
 - [ ] Confirm the Pages environment allows deployment only from the default branch.
 
 The workflow probes whether Pages is enabled before attempting deployment. Until an administrator enables it, default-branch runs succeed with deployment safely skipped; documentation still has a mandatory build check in CI.
@@ -71,9 +72,9 @@ Prefer squash or rebase merges and disable merge commits if linear history is de
 
 ## Releases
 
-- [ ] Merge the open-source readiness pull request and verify `main` CI.
-- [ ] Review `CHANGELOG.md` and create the first annotated `v0.1.0` tag.
-- [ ] Confirm that the release workflow attaches the wheel, source distribution, and build-provenance attestations.
+- [x] Merge the open-source readiness pull request and verify `main` CI.
+- [x] Review `CHANGELOG.md` and create the first annotated `v0.1.0` tag.
+- [x] Confirm that the release workflow attaches the wheel, source distribution, and build-provenance attestations.
 - [ ] Do not enable PyPI publishing until a project and Trusted Publisher are configured. Do not store a PyPI API token in repository secrets.
 
 ## Periodic review

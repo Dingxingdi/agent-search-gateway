@@ -97,5 +97,10 @@ def test_release_and_pages_workflows_preserve_privilege_separation() -> None:
     assert "actions/attest-build-provenance@" in release
     assert "contents: write" in release
     assert "enable-cache: false" in release
+    assert "uv audit --locked --preview-features audit-command" in release
+    assert "workflow_dispatch:" in release
+    assert "tag_name:" in release
+    assert "GH_REPO: ${{ github.repository }}" in release
+    assert "ref: ${{ inputs.tag_name || github.ref }}" in release
     assert "Check whether Pages is enabled" in pages
     assert "GitHub Pages is not enabled; documentation deployment is skipped." in pages
