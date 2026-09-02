@@ -4,15 +4,15 @@ Several open-source safeguards live in GitHub settings rather than the Git tree.
 
 ## Open-source security and public-surface audit record
 
-The open-source readiness audit performed and refreshed on 2026-09-02 used a snapshot taken immediately after pull request #66 merged (`main` at `6add30c`) and covered:
+The open-source readiness audit performed and refreshed on 2026-09-02 used a snapshot taken immediately after pull request #68 merged (`main` at `a10228e`) and covered:
 
-- the complete Git history with TruffleHog 3.97.1;
-- all 66 available issue and pull-request records, 115 issue comments, 132 review comments, and 121 review summaries, with every paginated API page included;
-- all 74 available GitHub Actions run logs, comprising 1,265 extracted log files;
-- both unexpired Actions artifacts, comprising four extracted files; and
-- the `v0.1.0` GitHub Release, its release text, and both attached assets, comprising 157 extracted files.
+- the complete remote Git history with TruffleHog 3.97.1, plus a redacting structural scan of all 74 commit snapshots reachable in the local audit clone;
+- all 68 available issue and pull-request records, 119 issue comments, 132 review comments, and 123 review summaries, with every paginated API page included;
+- all 82 available GitHub Actions run logs, comprising 1,250 extracted log files;
+- both unexpired Actions artifacts, comprising four top-level files and 314 recursively extracted package files; and
+- the `v0.1.0` GitHub Release, its release text, and both attached assets, comprising 157 extracted package files.
 
-No credential requiring remediation was found. The full-history scan produced only URI-detector occurrences at eight unique locations. Across the refreshed public-surface material, TruffleHog reported zero non-URI credential findings; a separate structural scan examined 13,598 URL occurrences, including 345 URLs with user information, and confirmed that every one used a reserved example domain or an explicit scanner test sentinel.
+No credential requiring remediation was found. The complete-remote-history scan produced 12 unverified URI-detector findings and zero verified findings; the redacting 74-snapshot scan found no credential-bearing HTTP URL outside reserved example domains. Across 46,511,907 bytes of refreshed public-surface material, TruffleHog examined 5,021 chunks and reported four unverified URI findings, zero verified findings, and zero non-URI findings. A separate structural scan examined 15,237 URL occurrences across 1,883 text files, including 387 URLs with user information, and confirmed that every one used a reserved example domain, an explicit scanner test sentinel, or a redacted CI placeholder.
 
 The repository setting allowed a Wiki, but the corresponding Wiki Git repository still did not exist, so there were no Wiki pages or revisions to inspect. Disable the unused Wiki entry point.
 
