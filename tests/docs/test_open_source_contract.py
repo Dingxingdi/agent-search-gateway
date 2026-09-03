@@ -63,8 +63,18 @@ def test_python_package_metadata_is_open_source_ready() -> None:
     assert project["license-files"] == ["LICENSE"]
     assert project["readme"] == "README.md"
     assert project["requires-python"] == ">=3.11"
+    assert project["urls"]["Documentation"] == (
+        "https://dingxingdi.github.io/agent-search-gateway/"
+    )
     assert project["urls"]["Repository"].endswith("agent-search-gateway.git")
     assert project["urls"]["Security"].endswith("/security/policy")
+
+
+def test_readme_links_to_the_published_documentation() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "https://dingxingdi.github.io/agent-search-gateway/" in readme
+    assert "After a repository administrator enables GitHub Pages" not in readme
 
 
 def test_workflow_actions_are_pinned_and_checkout_does_not_persist_credentials() -> None:

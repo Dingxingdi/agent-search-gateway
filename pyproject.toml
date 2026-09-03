@@ -41,7 +41,7 @@ agent-search-gateway = "agent_search_gateway.cli:main"
 
 [project.urls]
 Changelog = "https://github.com/Dingxingdi/agent-search-gateway/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/Dingxingdi/agent-search-gateway#readme"
+Documentation = "https://dingxingdi.github.io/agent-search-gateway/"
 Homepage = "https://github.com/Dingxingdi/agent-search-gateway"
 Issues = "https://github.com/Dingxingdi/agent-search-gateway/issues"
 Repository = "https://github.com/Dingxingdi/agent-search-gateway.git"

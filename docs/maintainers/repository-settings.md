@@ -14,7 +14,7 @@ The open-source readiness audit performed and refreshed on 2026-09-02 used a sna
 
 No credential requiring remediation was found. The complete-remote-history scan produced 12 unverified URI-detector findings and zero verified findings; the redacting 74-snapshot scan found no credential-bearing HTTP URL outside reserved example domains. Across 46,511,907 bytes of refreshed public-surface material, TruffleHog examined 5,021 chunks and reported four unverified URI findings, zero verified findings, and zero non-URI findings. A separate structural scan examined 15,237 URL occurrences across 1,883 text files, including 387 URLs with user information, and confirmed that every one used a reserved example domain, an explicit scanner test sentinel, or a redacted CI placeholder.
 
-The repository setting allowed a Wiki, but the corresponding Wiki Git repository still did not exist, so there were no Wiki pages or revisions to inspect. Disable the unused Wiki entry point.
+The repository setting allowed a Wiki, but the corresponding Wiki Git repository did not exist, so there were no Wiki pages or revisions to inspect. The unused Wiki and Projects entry points were disabled on 2026-09-03.
 
 A technical scan cannot prove that the project never handled customer-confidential material or real credentials. The repository owner must make that determination. If real secrets or confidential data ever entered a commit, issue, pull request, log, artifact, release, or Wiki revision, rotate credentials and prefer a new clean repository while archiving the old one privately.
 
@@ -28,55 +28,60 @@ The runtime dependency chain uses BSD-3-Clause, MIT, and MPL-2.0 licenses. Those
 
 ## Repository metadata
 
-- [ ] Set the description to: `Local daemon and CLI for aggregated web and academic search plus admitted-URL fetching.`
-- [ ] Add relevant topics such as `python`, `cli`, `search`, `web-search`, `academic-search`, `llm`, and `unix-socket`.
-- [ ] Set the website field to `https://dingxingdi.github.io/agent-search-gateway/` after the first successful Pages deployment.
+Configuration in this section was verified through the GitHub API on 2026-09-03.
+
+- [x] Set the description to: `Local daemon and CLI for aggregated web and academic search plus admitted-URL fetching.`
+- [x] Add the `agent-search`, `academic-search`, `cli`, `llm`, `python`, `search`, `unix-socket`, and `web-search` topics.
+- [x] Set the website field to `https://dingxingdi.github.io/agent-search-gateway/`.
 - [x] Keep Issues enabled.
-- [ ] Disable Projects and Wiki unless they have an intentional maintainer workflow and reviewed content.
-- [ ] Enable automatic deletion of head branches after merge.
+- [x] Disable unused Projects and Wiki entry points.
+- [x] Enable automatic deletion of head branches after merge.
+- [x] Disable merge commits while retaining squash and rebase merges.
 
 ## Security and dependency settings
 
-- [ ] Enable private vulnerability reporting.
-- [ ] Enable the dependency graph, Dependabot alerts, and Dependabot security updates.
-- [ ] Enable GitHub secret scanning and push protection where the repository plan supports them.
-- [ ] Review the repository's Actions secrets, environments, deploy keys, webhooks, installed GitHub Apps, and fine-grained tokens. Remove anything unused and minimize scopes.
-- [ ] Set the default `GITHUB_TOKEN` permission to read-only and prevent GitHub Actions from creating or approving pull requests unless a reviewed workflow requires it.
+- [x] Enable private vulnerability reporting.
+- [x] Enable the dependency graph, Dependabot alerts, and Dependabot security updates.
+- [x] Enable GitHub secret scanning and push protection.
+- [x] Enable CodeQL default setup for GitHub Actions workflows and Python, and verify its initial analysis succeeds.
+- [x] Confirm that repository, Dependabot, Codespaces, and `github-pages` environment secret stores contain no secrets, and that the repository has no deploy keys or webhooks.
+- [ ] Review installed GitHub Apps and personal fine-grained tokens in the GitHub account settings; the authenticated OAuth CLI token cannot enumerate those account-level grants.
+- [x] Set the default `GITHUB_TOKEN` permission to read-only and prevent GitHub Actions from approving pull requests.
+- [x] Restrict Actions to GitHub-owned actions plus `astral-sh/setup-uv` and `trufflesecurity/trufflehog`, and require every action reference to use a full commit SHA.
 
-The checked-in Dependabot configuration handles routine uv and GitHub Actions version updates. Security updates still depend on the repository-level security features above.
+The checked-in Dependabot configuration handles routine uv and GitHub Actions version updates. Repository-level alerts and automated security updates are enabled. The CI workflow also audits the locked dependency graph.
 
-The CI workflow also runs TruffleHog for verified and unknown non-URI detections. Because the repository deliberately contains credential-shaped URLs on reserved example domains, a separate redacting scanner checks URI userinfo across affected commit snapshots and rejects every non-example hostname.
+The CI workflow runs TruffleHog for verified and unknown non-URI detections. Because the repository deliberately contains credential-shaped URLs on reserved example domains, a separate redacting scanner checks URI userinfo across affected commit snapshots and rejects every non-example hostname.
 
 ## Documentation publishing
 
-- [ ] Enable GitHub Pages and select **GitHub Actions** as the build and deployment source.
-- [ ] Run the `documentation` workflow once and verify the landing page and generated Python reference.
-- [ ] Change `[project.urls].Documentation` in `pyproject.toml` to the Pages URL and update the README wording after the first successful deployment.
-- [ ] Confirm the Pages environment allows deployment only from the default branch.
+- [x] Enable GitHub Pages and select **GitHub Actions** as the build and deployment source.
+- [x] Run the `documentation` workflow and verify the landing page and generated Python reference.
+- [x] Set `[project.urls].Documentation` and the README documentation link to the Pages URL.
+- [x] Restrict the `github-pages` environment deployment branch policy to `main`.
 
-The workflow probes whether Pages is enabled before attempting deployment. Until an administrator enables it, default-branch runs succeed with deployment safely skipped; documentation still has a mandatory build check in CI.
+The workflow probes whether Pages is enabled before attempting deployment. Documentation has a mandatory build check in CI, and successful default-branch runs deploy the generated site through the branch-restricted `github-pages` environment.
 
 ## Default-branch rules
 
-Create a ruleset for `main` with these initial controls:
+The active `Protect main` ruleset has these controls:
 
-- [ ] Require changes through pull requests.
-- [ ] Require the `verify` status check.
-- [ ] Require the branch to be up to date before merge.
-- [ ] Block force pushes and branch deletion.
-- [ ] Require conversation resolution.
-- [ ] Apply the rule to administrators, with an explicit emergency bypass role rather than a broad permanent bypass.
+- [x] Require changes through pull requests.
+- [x] Require the `verify` status check.
+- [x] Require the branch to be up to date before merge.
+- [x] Block force pushes and branch deletion.
+- [x] Require conversation resolution.
+- [x] Require linear history and allow only squash or rebase merges.
+- [x] Apply the ruleset to administrators with no permanent bypass actors. In an emergency, an administrator must explicitly disable or edit the ruleset, leaving an auditable settings change.
 
-For a single-maintainer repository, start with zero mandatory approving reviews so the maintainer is not deadlocked. Raise the requirement when another active maintainer can provide independent review.
-
-Prefer squash or rebase merges and disable merge commits if linear history is desired. Keep the `verify` check name stable because the workflow deliberately exposes it as the branch-protection aggregation check.
+For a single-maintainer repository, the ruleset requires zero mandatory approving reviews so the maintainer is not deadlocked. Raise the requirement when another active maintainer can provide independent review. Keep the `verify` check name stable because the workflow deliberately exposes it as the branch-protection aggregation check.
 
 ## Releases
 
 - [x] Merge the open-source readiness pull request and verify `main` CI.
 - [x] Review `CHANGELOG.md` and create the first annotated `v0.1.0` tag.
 - [x] Confirm that the release workflow attaches the wheel, source distribution, and build-provenance attestations.
-- [ ] Do not enable PyPI publishing until a project and Trusted Publisher are configured. Do not store a PyPI API token in repository secrets.
+- [x] Keep PyPI publishing disabled until a project and Trusted Publisher are configured; no PyPI token is stored in repository or environment secrets.
 
 ## Periodic review
 

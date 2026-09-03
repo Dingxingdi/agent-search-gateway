@@ -218,7 +218,7 @@ Expected provider/retry/semantic failures are logged as concise events without t
 
 The CLI commands, documented configuration, stdout contracts, result-file schemas, and runtime paths are the supported interfaces for the current `0.x` line. Python module imports and the local socket wire protocol remain internal implementation details. See [the public interface and compatibility policy](docs/public-interface.md) before building automation against the project.
 
-A static documentation site and generated internal Python reference are built in CI. After a repository administrator enables GitHub Pages with GitHub Actions as its source, the site will be published at the [project documentation address](https://dingxingdi.github.io/agent-search-gateway/).
+A static documentation site and generated internal Python reference are built in CI and published from the default branch at the [project documentation address](https://dingxingdi.github.io/agent-search-gateway/).
 
 ## Development and verification
 
