@@ -278,6 +278,8 @@ Contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) for the devel
 
 Do not report vulnerabilities in public issues or pull requests. Follow [SECURITY.md](SECURITY.md) and use the repository's private vulnerability-reporting flow. Configuration should contain environment-variable names rather than credential values, and debug logs must be reviewed as sensitive local artifacts before sharing.
 
+Security tooling for this project is provided by [Snyk](https://snyk.io/).
+
 ## Releases
 
 The project follows Semantic Versioning for tagged releases and records user-visible changes in [CHANGELOG.md](CHANGELOG.md). GitHub Release `v0.1.0` is the initial public release; tagged releases are built, attested, and published by CI. PyPI publishing is not configured yet. Maintainers should follow [RELEASING.md](RELEASING.md).
