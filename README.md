@@ -83,6 +83,24 @@ Jina Reader is a credential-free, fetch-only provider, so its configuration must
 
 Web search and fetch stages for the same provider share one concurrency quota. LLM provider transports have their own independent quotas.
 
+#### TinyFish endpoint migration
+
+TinyFish uses separate public Search and Fetch services. In an existing `~/.config/agent-search-gateway-cli/config.toml`, replace the legacy `https://api.tinyfish.ai/search` and `https://api.tinyfish.ai/fetch` values with the following endpoints:
+
+```toml
+[web_providers.tinyfish]
+search_api_url = "https://api.search.tinyfish.ai"
+fetch_api_url = "https://api.fetch.tinyfish.ai"
+```
+
+Edit these two keys in the existing provider block; keep its credential reference and enable flags unchanged. Upgrading the package or changing `config.example.toml` does not update an existing user configuration. Restart the daemon after updating its configuration; restarting clears in-memory URL admission and cached content, so search again before using `url-fetch`. Deliberately configured custom endpoints remain supported and are not automatically rewritten.
+
+#### Known provider limitations
+
+ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in their organic search results instead of the underlying destination URLs. The gateway currently preserves these provider-supplied links; it does not decode or resolve the wrappers. This can affect URL identity, deduplication, and later `url-fetch` requests. The provider limitation is tracked in [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) and is not fixed in the gateway.
+
+When destination URLs are required, use results from other search providers and set `enable_search = false` in the `[web_providers.scraperapi]` and `[web_providers.scrape_do]` configuration blocks. Their `enable_fetch` flags are independent and may remain enabled. Disabling search does not remove wrapper URLs already admitted to the running daemon; restarting clears that state and requires searching again before fetching URLs.
+
 ## Commands
 
 Run the daemon in the foreground:
@@ -211,6 +229,8 @@ The current log rotates at 5 MiB and retains 3 backups (`debug.log.1`, `.2`, and
 DEBUG events expose operational metadata such as request ID, provider, semantic stage, model, retry attempt, HTTP status, timing, result counts, scheduler/quota decisions, candidate URLs, and fixed acceptance/rejection reason codes. Target URL path/query/fragment values may be persisted, but URI userinfo is stripped first. HTTP transport endpoint fields additionally omit userinfo, query, and fragment so request-specific search/query content is not recorded as endpoint metadata. Treat the debug files as sensitive local artifacts because target URLs can themselves contain private or signed query values.
 
 The implementation does not intentionally log query/prompt/page/model-response bodies or authentication values. Central secret redaction is also applied to final rendered messages and debug tracebacks as defense in depth. DEBUG mode is diagnostic rather than a raw payload/TRACE mode.
+
+Transport retry (`http_retrying`) and terminal failure (`http_failed`) events include a `transport_type` field such as `ReadTimeout`, `ConnectTimeout`, or `ConnectError`. Only the concrete exception class name is recorded, not its message. HTTP status and JSON decode failures do not carry this field.
 
 Expected provider/retry/semantic failures are logged as concise events without tracebacks. Unexpected daemon workflow failures include a traceback only in DEBUG mode. Logging sink failures after successful startup do not change business workflow results.
 

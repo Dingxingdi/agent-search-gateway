@@ -302,6 +302,7 @@ async def test_http_executor_classifies_invalid_json_as_protocol_failure_without
     assert "event=http_failed" in logged
     failed_line = next(line for line in logged.splitlines() if "event=http_failed" in line)
     assert "category=decode" in failed_line
+    assert "transport_type=" not in logged
     assert "attempt=1" in failed_line
     assert "elapsed_ms=2000" in failed_line
     assert "not-json" not in logged
@@ -523,3 +524,121 @@ async def test_http_executor_status_failure_carries_terminal_status_code() -> No
     assert caught.value.status_code == 404
     assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
     assert "DO_NOT_EXPOSE_BODY" not in caught.value.message
+
+
+@pytest.mark.parametrize("response_mode", ["json", "text"])
+@pytest.mark.parametrize(
+    "error_type", [httpx.ReadTimeout, httpx.ConnectTimeout, httpx.ConnectError]
+)
+@pytest.mark.parametrize("recovers", [False, True], ids=["exhausted", "recovers"])
+async def test_http_executor_logs_safe_transport_subtypes(
+    response_mode: str,
+    error_type: type[httpx.TransportError],
+    recovers: bool,
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if recovers and attempts == 3:
+            if response_mode == "json":
+                return httpx.Response(200, json={"body": "RESPONSE_BODY_MARKER"}, request=request)
+            return httpx.Response(200, text="RESPONSE_BODY_MARKER", request=request)
+        raise error_type("TRANSPORT_MESSAGE_MARKER", request=request)
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.transport-subtypes")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=record_sleep,
+        )
+        request_method = executor.request_json if response_mode == "json" else executor.request_text
+        url = (
+            "https://user:USERINFO_MARKER@provider.example.test/search"
+            "?q=QUERY_MARKER#FRAGMENT_MARKER"
+        )
+        if recovers:
+            result = await request_method(
+                "POST", url, stage="search", json_body={"query": "REQUEST_BODY_MARKER"}
+            )
+            expected = (
+                {"body": "RESPONSE_BODY_MARKER"}
+                if response_mode == "json"
+                else ("RESPONSE_BODY_MARKER")
+            )
+            assert result == expected
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await request_method(
+                    "POST", url, stage="search", json_body={"query": "REQUEST_BODY_MARKER"}
+                )
+            assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+            assert isinstance(caught.value.__cause__, error_type)
+            assert caught.value.message == "fake/search: HTTP transport failure"
+
+    assert attempts == 3
+    assert delays == [0.01, 0.02]
+    logged = stream.getvalue()
+    lines = logged.splitlines()
+    retry_lines = [line for line in lines if "event=http_retrying" in line]
+    failed_lines = [line for line in lines if "event=http_failed" in line]
+    assert len(retry_lines) == 2
+    assert "attempt=1" in retry_lines[0] and "delay_ms=10" in retry_lines[0]
+    assert "attempt=2" in retry_lines[1] and "delay_ms=20" in retry_lines[1]
+    assert all(line.startswith("WARNING ") for line in retry_lines)
+    assert len(failed_lines) == (0 if recovers else 1)
+    if failed_lines:
+        assert failed_lines[0].startswith("DEBUG ")
+        assert "attempt=3" in failed_lines[0]
+    for line in [*retry_lines, *failed_lines]:
+        assert f"transport_type={error_type.__name__}" in line
+        assert "category=transport" in line
+        assert "provider=fake" in line and "stage=search" in line
+        assert "endpoint=https://provider.example.test/search" in line
+        assert "elapsed_ms=" in line
+    for line in lines:
+        if "event=http_retrying" not in line and "event=http_failed" not in line:
+            assert "transport_type=" not in line
+    for marker in (
+        "TRANSPORT_MESSAGE_MARKER",
+        "USERINFO_MARKER",
+        "QUERY_MARKER",
+        "FRAGMENT_MARKER",
+        "REQUEST_BODY_MARKER",
+        "RESPONSE_BODY_MARKER",
+        "traceback=",
+    ):
+        assert marker not in logged
+
+
+@pytest.mark.parametrize("response_mode", ["json", "text"])
+@pytest.mark.parametrize("status", [404, 503])
+async def test_http_status_failures_do_not_claim_a_transport_subtype(
+    response_mode: str, status: int
+) -> None:
+    logger, stream = structured_test_logger("tests.http.status-without-transport-subtype")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, request=request))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.01, 0.02, 1.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        request_method = executor.request_json if response_mode == "json" else executor.request_text
+        with pytest.raises(HttpStatusFailure) as caught:
+            await request_method("GET", "https://provider.example.test/search", stage="search")
+        assert caught.value.status_code == status
+
+    assert "category=status" in stream.getvalue()
+    assert "transport_type=" not in stream.getvalue()
