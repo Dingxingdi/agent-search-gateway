@@ -161,6 +161,7 @@ class HttpJsonExecutor:
                 delay_ms=delay_ms,
                 elapsed_ms=attempt_elapsed_ms,
                 category="transport",
+                transport_type=type(exc).__name__,
             )
 
         async def operation() -> httpx.Response:
@@ -207,7 +208,14 @@ class HttpJsonExecutor:
             )
             raise self._status_failure(stage, exc.status_code) from exc
         except (httpx.TimeoutException, httpx.TransportError) as exc:
-            self._log_failed(stage, log_endpoint, attempt, attempt_started, "transport")
+            self._log_failed(
+                stage,
+                log_endpoint,
+                attempt,
+                attempt_started,
+                "transport",
+                transport_type=type(exc).__name__,
+            )
             raise self._execution_failure(stage, "HTTP transport failure") from exc
 
         if response.status_code < 200 or response.status_code >= 300:
@@ -231,21 +239,14 @@ class HttpJsonExecutor:
         category: str,
         *,
         status: int | None = None,
+        transport_type: str | None = None,
     ) -> None:
         attempt_elapsed_ms = elapsed_ms(self._monotonic, started)
-        if status is None:
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "http_failed",
-                provider=self._provider_name,
-                stage=stage,
-                endpoint=endpoint,
-                attempt=attempt,
-                category=category,
-                elapsed_ms=attempt_elapsed_ms,
-            )
-            return
+        details: dict[str, object] = {}
+        if status is not None:
+            details["status"] = status
+        if transport_type is not None:
+            details["transport_type"] = transport_type
         log_event(
             self._logger,
             logging.DEBUG,
@@ -256,7 +257,8 @@ class HttpJsonExecutor:
             attempt=attempt,
             category=category,
             elapsed_ms=attempt_elapsed_ms,
-            status=status,
+            exc_info=False,
+            **details,
         )
 
     async def aclose(self) -> None:

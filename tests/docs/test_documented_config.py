@@ -1,14 +1,21 @@
 import argparse
+import json
 import re
 from pathlib import Path
 
+import httpx
+import pytest
+
 from agent_search_gateway.cli import build_parser
 from agent_search_gateway.config import load_toml, resolve_config
+from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.academic.defaults import (
     build_default_academic_registry,
     build_default_oa_resolver_registry,
 )
 from agent_search_gateway.providers.defaults import build_default_registry
+from agent_search_gateway.runtime import Runtime
+from agent_search_gateway.url_normalization import normalize_url
 
 _ROOT = Path(__file__).parents[2]
 
@@ -215,3 +222,109 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
     assert "does not bypass content already prepared by the gateway" in readme
     assert "no force-refresh option" in readme
     assert "| Apify |" not in readme
+
+
+def test_example_tinyfish_uses_documented_public_endpoints() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
+    tinyfish = next(item for item in resolved.web.providers if item.name == "tinyfish")
+
+    assert dict(tinyfish.options) == {
+        "search_api_url": "https://api.search.tinyfish.ai",
+        "fetch_api_url": "https://api.fetch.tinyfish.ai",
+    }
+
+
+def test_serp_wrapper_limitation_is_visible_in_readme_and_provider_configuration() -> None:
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    heading = "#### Known provider limitations"
+    assert heading in readme
+    limitations = readme.split(heading, 1)[1].split("\n## ", 1)[0]
+    for marker in (
+        "ScraperAPI",
+        "Scrape.do",
+        "google.com/goto",
+        "deduplication",
+        "url-fetch",
+        "enable_search = false",
+        "enable_fetch",
+        "https://github.com/Dingxingdi/agent-search-gateway/issues/74",
+    ):
+        assert marker in limitations
+
+    example = (_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    for provider in ("scraperapi", "scrape_do"):
+        block = example.split(f"[web_providers.{provider}]\n", 1)[1].split("\n[", 1)[0]
+        assert "google.com/goto" in block
+        assert "README.md#known-provider-limitations" in block
+
+
+@pytest.mark.parametrize("custom", [False, True], ids=["example", "custom"])
+async def test_tinyfish_example_and_custom_endpoints_reach_the_runtime_http_boundary(
+    tmp_path: Path,
+    custom: bool,
+) -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    tinyfish = web["tinyfish"]
+    assert isinstance(tinyfish, dict)
+    if custom:
+        tinyfish["search_api_url"] = "https://tinyfish.example.test/proxy/search"
+        tinyfish["fetch_api_url"] = "https://tinyfish.example.test/proxy/fetch"
+    data["web_providers"] = {"tinyfish": tinyfish}
+    resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
+    requests: list[httpx.Request] = []
+    target = normalize_url("https://example.test/article")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"results": [{"url": str(target), "title": "Title", "snippet": "Abstract"}]},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={"results": [{"url": str(target), "text": "Fetched content"}]},
+            request=request,
+        )
+
+    def client_factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    runtime = Runtime.build(
+        resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
+    )
+    try:
+        [search_provider] = runtime.web_search_providers
+        [fetch_provider] = runtime.web_fetch_providers
+        assert id(search_provider) == id(fetch_provider)
+        hits = await search_provider.search("hello world & docs")
+        assert len(hits) == 1 and hits[0].url == str(target)
+        candidate = await fetch_provider.fetch(target)
+        assert candidate.content == "Fetched content"
+    finally:
+        await runtime.aclose()
+
+    search_request, fetch_request = requests
+    search_endpoint = (
+        "https://tinyfish.example.test/proxy/search" if custom else "https://api.search.tinyfish.ai"
+    )
+    fetch_endpoint = (
+        "https://tinyfish.example.test/proxy/fetch" if custom else "https://api.fetch.tinyfish.ai"
+    )
+    assert search_request.method == "GET"
+    assert search_request.url.copy_with(query=None) == httpx.URL(search_endpoint)
+    assert dict(search_request.url.params) == {"query": "hello world & docs"}
+    assert search_request.headers["X-API-Key"] == "x"
+    assert fetch_request.method == "POST"
+    assert fetch_request.url == httpx.URL(fetch_endpoint)
+    assert fetch_request.headers["X-API-Key"] == "x"
+    assert json.loads(fetch_request.content) == {
+        "urls": [str(target)],
+        "format": "markdown",
+        "links": False,
+        "image_links": False,
+    }

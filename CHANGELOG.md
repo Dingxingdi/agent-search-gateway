@@ -8,6 +8,15 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Added concrete `transport_type` exception names to HTTP transport retry and terminal failure events without logging exception messages or changing retry behavior (#77).
+- Corrected the TinyFish Search and Fetch endpoints in the example configuration. Existing installations must update their configuration and restart the daemon; see the README migration guidance (#73).
+
+### Changed
+
+- Documented the known Google `goto` wrapper URL limitation in ScraperAPI and Scrape.do search results, including how to disable their search independently of fetch. Provider behavior is unchanged; the gateway does not resolve these wrappers (#74).
+
 ### Security
 
 - Raised the pytest floor to 9.0.3, upgraded the locked test stack, and added locked dependency auditing to CI and release verification to remediate CVE-2025-71176.

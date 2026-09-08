@@ -40,8 +40,8 @@ api_key_env = "ANYSEARCH_API_KEY"
 [web_providers.tinyfish]
 enable_search = true
 enable_fetch = true
-search_api_url = "https://api.tinyfish.ai/search"
-fetch_api_url = "https://api.tinyfish.ai/fetch"
+search_api_url = "https://api.search.tinyfish.ai"
+fetch_api_url = "https://api.fetch.tinyfish.ai"
 api_key_env = "TINYFISH_API_KEY"
 
 [web_providers.parallel]
@@ -70,6 +70,8 @@ search_zone = "example_serp_zone"
 fetch_zone = "example_unlocker_zone"
 
 [web_providers.scrape_do]
+# Search may return google.com/goto wrappers instead of destination URLs (issue #74).
+# See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
 enable_fetch = true
 api_url = "https://api.scrape.do"
@@ -100,6 +102,8 @@ api_url = "https://v2-api.scrapegraphai.com"
 api_key_env = "SCRAPEGRAPH_AI_API_KEY"
 
 [web_providers.scraperapi]
+# Search may return google.com/goto wrappers instead of destination URLs (issue #74).
+# See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
 enable_fetch = true
 api_url = "https://api.scraperapi.com"
