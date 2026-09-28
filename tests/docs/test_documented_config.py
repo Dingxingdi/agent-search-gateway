@@ -20,6 +20,17 @@ from agent_search_gateway.url_normalization import normalize_url
 _ROOT = Path(__file__).parents[2]
 
 
+def test_request_selectors_are_documented_in_public_policy_and_unreleased() -> None:
+    public = (_ROOT / "docs/public-interface.md").read_text(encoding="utf-8")
+    changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+    assert "### Added" in unreleased
+    for flag in ("--provider", "--model"):
+        assert flag in public and flag in unreleased
+    for command in ("keyword-search", "paper-search", "llm-search"):
+        assert command in public and command in unreleased
+
+
 def _stub_environment(data: dict[str, object]) -> dict[str, str]:
     names: set[str] = set()
     web = data.get("web_providers")

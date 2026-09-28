@@ -64,7 +64,9 @@ class SearchOrchestrator:
         self._logger = logger or logging.getLogger(__name__)
         self._monotonic = monotonic
 
-    async def keyword_search(self, query: str, *, request_id: str) -> str:
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         validate_request_id(request_id)
         normalized_query = query.strip()
         if not normalized_query:
@@ -75,11 +77,19 @@ class SearchOrchestrator:
                 "No keyword search providers are enabled",
             )
 
+        selected = self._keyword_providers
+        if provider is not None:
+            if not provider.strip():
+                raise InputFailure(ErrorCode.BAD_REQUEST, "Provider must not be empty")
+            selected = tuple(candidate for candidate in selected if candidate.name == provider)
+            if not selected:
+                raise InputFailure(
+                    ErrorCode.BAD_REQUEST,
+                    f"No enabled keyword-search provider matches '{provider}'",
+                )
+
         outcomes = await asyncio.gather(
-            *(
-                self._run_keyword_pipeline(provider, normalized_query)
-                for provider in self._keyword_providers
-            ),
+            *(self._run_keyword_pipeline(candidate, normalized_query) for candidate in selected),
             return_exceptions=True,
         )
         completed = [outcome for outcome in outcomes if isinstance(outcome, list)]
@@ -126,12 +136,68 @@ class SearchOrchestrator:
         )
         return str(path)
 
+    def _select_llm_invocations(
+        self, *, provider: str | None, model: str | None
+    ) -> tuple[LLMInvocation, ...]:
+        """Select from the search namespace without mutating configured invocations."""
+        invocations = self._llm_invocations
+        if not invocations:
+            raise ExecutionFailure(
+                ErrorCode.NO_LLM_SEARCH_PROVIDERS,
+                "No LLM search providers are configured",
+            )
+        if provider is not None and not provider.strip():
+            raise InputFailure(ErrorCode.BAD_REQUEST, "Provider must not be empty")
+        if model is not None and not model.strip():
+            raise InputFailure(ErrorCode.BAD_REQUEST, "Model must not be empty")
+        if provider is None and model is None:
+            return invocations
+
+        provider_matches = (
+            invocations
+            if provider is None
+            else tuple(item for item in invocations if item.provider == provider)
+        )
+        model_matches = (
+            invocations
+            if model is None
+            else tuple(item for item in invocations if item.model == model)
+        )
+        if not provider_matches and not model_matches:
+            raise InputFailure(
+                ErrorCode.BAD_REQUEST,
+                f"No LLM search invocation matches provider '{provider}' or model '{model}'",
+            )
+        if not provider_matches:
+            raise InputFailure(
+                ErrorCode.BAD_REQUEST,
+                f"No LLM search invocation matches provider '{provider}'",
+            )
+        if not model_matches:
+            raise InputFailure(
+                ErrorCode.BAD_REQUEST,
+                f"No LLM search invocation matches model '{model}'",
+            )
+        selected = (
+            provider_matches
+            if model is None
+            else tuple(item for item in provider_matches if item.model == model)
+        )
+        if not selected:
+            raise InputFailure(
+                ErrorCode.BAD_REQUEST,
+                f"No LLM search invocation matches provider '{provider}' with model '{model}'",
+            )
+        return selected
+
     async def llm_search(
         self,
         prompt: str,
         *,
         request_id: str,
         scope: LLMSearchScope = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
         validate_request_id(request_id)
         normalized_prompt = prompt.strip()
@@ -139,20 +205,16 @@ class SearchOrchestrator:
             raise InputFailure(ErrorCode.EMPTY_QUERY, "Prompt must not be empty")
         if scope not in {"web", "paper", "all"}:
             raise InputFailure(ErrorCode.BAD_REQUEST, "LLM search scope is invalid")
-        if not self._llm_invocations:
-            raise ExecutionFailure(
-                ErrorCode.NO_LLM_SEARCH_PROVIDERS,
-                "No LLM search providers are configured",
-            )
+        selected = self._select_llm_invocations(provider=provider, model=model)
 
         if scope == "web":
-            web_records = await self._llm_web_records(normalized_prompt)
+            web_records = await self._llm_web_records(normalized_prompt, invocations=selected)
             path = self._result_writer.write_results("llm", web_records, request_id=request_id)
             self._log_results_written(path=str(path), results=len(web_records))
             return str(path)
 
         if scope == "paper":
-            paper_records = await self._llm_paper_records(normalized_prompt)
+            paper_records = await self._llm_paper_records(normalized_prompt, invocations=selected)
             path = self._result_writer.write_paper_results(
                 "llm",
                 paper_records,
@@ -162,8 +224,8 @@ class SearchOrchestrator:
             return str(path)
 
         web_outcome, paper_outcome = await asyncio.gather(
-            self._llm_web_records(normalized_prompt),
-            self._llm_paper_records(normalized_prompt),
+            self._llm_web_records(normalized_prompt, invocations=selected),
+            self._llm_paper_records(normalized_prompt, invocations=selected),
             return_exceptions=True,
         )
         if isinstance(web_outcome, BaseException):
@@ -195,9 +257,11 @@ class SearchOrchestrator:
         )
         return str(path)
 
-    async def _llm_web_records(self, prompt: str) -> list[SearchRecord]:
+    async def _llm_web_records(
+        self, prompt: str, *, invocations: tuple[LLMInvocation, ...]
+    ) -> list[SearchRecord]:
         outcomes = await asyncio.gather(
-            *(self._run_llm_pipeline(invocation, prompt) for invocation in self._llm_invocations),
+            *(self._run_llm_pipeline(invocation, prompt) for invocation in invocations),
             return_exceptions=True,
         )
         if not any(isinstance(outcome, list) for outcome in outcomes):
@@ -217,12 +281,11 @@ class SearchOrchestrator:
                     ordered_urls.append(result.url)
         return [self._record_from_store(url) for url in ordered_urls]
 
-    async def _llm_paper_records(self, prompt: str) -> list[PaperRecord]:
+    async def _llm_paper_records(
+        self, prompt: str, *, invocations: tuple[LLMInvocation, ...]
+    ) -> list[PaperRecord]:
         outcomes = await asyncio.gather(
-            *(
-                self._run_llm_paper_pipeline(invocation, prompt)
-                for invocation in self._llm_invocations
-            ),
+            *(self._run_llm_paper_pipeline(invocation, prompt) for invocation in invocations),
             return_exceptions=True,
         )
         if not any(isinstance(outcome, list) for outcome in outcomes):
