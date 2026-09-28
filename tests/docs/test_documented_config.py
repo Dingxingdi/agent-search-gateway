@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,48 @@ def test_request_selectors_are_documented_in_public_policy_and_unreleased() -> N
         assert flag in public and flag in unreleased
     for command in ("keyword-search", "paper-search", "llm-search"):
         assert command in public and command in unreleased
+
+
+def test_public_interface_documents_request_scoped_provider_and_model_filters() -> None:
+    public = (_ROOT / "docs/public-interface.md").read_text(encoding="utf-8")
+    heading = "### Request-scoped provider and model filtering"
+    assert heading in public
+    section = re.split(r"\n#{2,3} ", public.split(heading, 1)[1], maxsplit=1)[0]
+    parser = build_parser()
+    examples: set[tuple[str, str | None, str | None, str | None]] = set()
+    for line in section.splitlines():
+        if not line.startswith("agent-search-gateway "):
+            continue
+        args = parser.parse_args(shlex.split(line)[1:])
+        examples.add(
+            (
+                args.command,
+                args.provider,
+                getattr(args, "model", None),
+                getattr(args, "scope", None),
+            )
+        )
+    assert {
+        ("keyword-search", "tavily", None, None),
+        ("paper-search", "arxiv", None, None),
+        ("llm-search", "openai_main", None, "web"),
+        ("llm-search", None, "gpt-5", "web"),
+        ("llm-search", "openai_main", "gpt-5", "web"),
+        ("llm-search", "openai_main", None, "paper"),
+        ("llm-search", "openai_main", "gpt-5", "all"),
+    } <= examples
+    for marker in (
+        "search_llm.providers",
+        "case-sensitive",
+        "fetch_llm",
+        "OA enrichment",
+        "url-fetch",
+        "BAD_REQUEST",
+        "DEBUG",
+        "request ID",
+    ):
+        assert marker in section
+    assert re.search(r"restart.*daemon", section, flags=re.IGNORECASE)
 
 
 def _stub_environment(data: dict[str, object]) -> dict[str, str]:
