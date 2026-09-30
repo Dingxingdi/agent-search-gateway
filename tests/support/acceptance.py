@@ -24,6 +24,7 @@ from agent_search_gateway.url_store import URLStore
 from tests.support.fakes import (
     FakeAcademicSearchProvider,
     FakeKeywordSearchProvider,
+    FakeLLMClient,
     FakeOAResolver,
     FakeURLFetchProvider,
 )
@@ -291,3 +292,105 @@ class DebugAcceptanceRuntime:
 
 def build_debug_acceptance_runtime(paths: RuntimePaths) -> DebugAcceptanceRuntime:
     return DebugAcceptanceRuntime(paths)
+
+
+class FilteringAcceptanceRuntime:
+    """A separate multi-provider runtime for request selector acceptance tests."""
+
+    def __init__(self, paths: RuntimePaths) -> None:
+        self.store = URLStore()
+        self.keyword_providers = tuple(
+            FakeKeywordSearchProvider(
+                name,
+                [
+                    KeywordSearchHit(
+                        url=f"https://example.com/keyword/{name}",
+                        snippet=name,
+                    )
+                ],
+            )
+            for name in ("alpha", "beta")
+        )
+        self.academic_providers = tuple(
+            FakeAcademicSearchProvider(
+                name,
+                [
+                    PaperSearchHit(
+                        source=name,
+                        source_id=source_id,
+                        title=f"Paper from {name}",
+                        abstract=f"About {name}",
+                        doi=f"10.1000/{name}",
+                        url=f"https://example.com/paper/{name}",
+                    )
+                ],
+            )
+            for name, source_id in (("arxiv", "2401.00001"), ("openalex", "W1"))
+        )
+        self.llm_invocations = (
+            LLMInvocation("openai_main", "gpt-5"),
+            LLMInvocation("openai_main", "gpt-5-mini"),
+            LLMInvocation("deepseek_main", "deepseek-v3"),
+            LLMInvocation("azure_main", "gpt-5"),
+        )
+        self.llm_clients = {
+            name: FakeLLMClient(
+                name,
+                text_result=f"## Result\nURL: https://example.com/llm/{name}\nAbstract: {name}",
+            )
+            for name in ("openai_main", "deepseek_main", "azure_main", "fetch_only")
+        }
+        fallback = LLMInvocation("fetch_only", "global-model")
+        stages = LLMStages(
+            self.llm_clients,
+            judge=fallback,
+            safety=fallback,
+            content_clean=fallback,
+            focus_summary=fallback,
+        )
+        self.fetch_provider = FakeURLFetchProvider(
+            "fetch", URLFetchCandidate(raw_content="Raw fetched content", content="Fetched content")
+        )
+        self.quotas = ProviderQuotaManager(
+            web_limits={"alpha": 2, "beta": 2, "fetch": 2},
+            llm_limits={name: 2 for name in self.llm_clients},
+            academic_limits={name: 2 for name in ("arxiv", "openalex")},
+        )
+        self.oa_resolver = FakeOAResolver()
+        result_writer = ResultWriter(paths.results_dir)
+        aggregator = PaperAggregator(
+            ("arxiv", "openalex", "llm:openai_main", "llm:deepseek_main", "llm:azure_main")
+        )
+        self.search_orchestrator = SearchOrchestrator(
+            keyword_providers=self.keyword_providers,
+            llm_invocations=self.llm_invocations,
+            quotas=self.quotas,
+            stages=stages,
+            store=self.store,
+            result_writer=result_writer,
+            paper_aggregator=aggregator,
+            paper_resolver=self.oa_resolver,
+        )
+        self.paper_search_orchestrator = PaperSearchOrchestrator(
+            providers=self.academic_providers,
+            quotas=self.quotas,
+            aggregator=aggregator,
+            resolver=self.oa_resolver,
+            store=self.store,
+            result_writer=result_writer,
+        )
+        self.fetch_orchestrator = FetchOrchestrator(
+            store=self.store,
+            scheduler=FetchScheduler([self.fetch_provider], self.quotas, stages),
+            stages=stages,
+        )
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        for client in self.llm_clients.values():
+            await client.aclose()
+
+
+def build_filtering_acceptance_runtime(paths: RuntimePaths) -> FilteringAcceptanceRuntime:
+    return FilteringAcceptanceRuntime(paths)

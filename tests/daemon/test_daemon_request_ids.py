@@ -18,7 +18,9 @@ class _RecordingSearch:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, str | None]] = []
 
-    async def keyword_search(self, query: str, *, request_id: str) -> str:
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         self.calls.append(("keyword", request_id, current_request_id()))
         return f"keyword-{request_id}.jsonl"
 
@@ -28,13 +30,17 @@ class _RecordingSearch:
         *,
         request_id: str,
         scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
         self.calls.append(("llm", request_id, current_request_id()))
         return f"llm-{request_id}.jsonl"
 
 
 class _RecordingPaper:
-    async def paper_search(self, query: str, *, request_id: str) -> str:
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         return f"paper-{request_id}.jsonl"
 
 

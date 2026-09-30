@@ -20,7 +20,9 @@ class _SlowSearch:
         self.release = asyncio.Event()
         self.cancelled = asyncio.Event()
 
-    async def keyword_search(self, query: str, *, request_id: str) -> str:
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         self.entered.set()
         try:
             await self.release.wait()
@@ -35,12 +37,16 @@ class _SlowSearch:
         *,
         request_id: str,
         scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
         return f"llm:{prompt}"
 
 
 class _Paper:
-    async def paper_search(self, query: str, *, request_id: str) -> str:
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         return f"paper:{query}"
 
 
