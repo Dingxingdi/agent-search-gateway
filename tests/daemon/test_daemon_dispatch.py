@@ -12,6 +12,7 @@ from agent_search_gateway.models import (
     ErrorResponse,
     KeywordSearchRequest,
     LLMSearchRequest,
+    LLMSearchScope,
     PaperSearchRequest,
     SuccessResponse,
     URLFetchRequest,
@@ -21,7 +22,14 @@ from agent_search_gateway.protocol import send_request
 
 
 class _FakeSearch:
-    async def keyword_search(self, query: str, *, request_id: str) -> str:
+    def __init__(self) -> None:
+        self.keyword_calls: list[tuple[str, str, str | None]] = []
+        self.llm_calls: list[tuple[str, str, str, str | None, str | None]] = []
+
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
+        self.keyword_calls.append((query, request_id, provider))
         if query == "typed-failure":
             raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "typed failure")
         if query == "unexpected":
@@ -34,12 +42,21 @@ class _FakeSearch:
         *,
         request_id: str,
         scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
+        self.llm_calls.append((prompt, request_id, scope, provider, model))
         return f"llm:{prompt}" if scope == "web" else f"llm:{scope}:{prompt}"
 
 
 class _FakePaper:
-    async def paper_search(self, query: str, *, request_id: str) -> str:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, str | None]] = []
+
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
+        self.calls.append((query, request_id, provider))
         return f"paper:{query}:{request_id}"
 
 
@@ -57,6 +74,90 @@ class _FakeRuntime:
 
     async def aclose(self) -> None:
         self.close_calls += 1
+
+
+async def test_daemon_forwards_selectors_and_defaults_over_socket(tmp_path: Path) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    runtime = _FakeRuntime()
+    ids = iter(f"{index:08x}" for index in range(1, 9))
+    daemon = ForegroundDaemon(
+        paths, runtime_factory=lambda: runtime, request_id_factory=ids.__next__
+    )
+    task = asyncio.create_task(daemon.start())
+    requests: list[KeywordSearchRequest | PaperSearchRequest | LLMSearchRequest] = [
+        KeywordSearchRequest("query", provider="exa"),
+        KeywordSearchRequest("query"),
+        PaperSearchRequest("query", provider="arxiv"),
+        PaperSearchRequest("query"),
+        LLMSearchRequest("prompt", "paper", provider="openai_main"),
+        LLMSearchRequest("prompt", "all", model="gpt-5"),
+        LLMSearchRequest("prompt", provider="openai_main", model="gpt-5"),
+        LLMSearchRequest("prompt"),
+    ]
+    try:
+        await asyncio.wait_for(daemon.ready.wait(), timeout=1)
+        for request in requests:
+            response = await asyncio.wait_for(send_request(paths.socket_file, request), timeout=1)
+            assert isinstance(response, SuccessResponse)
+        assert runtime.search_orchestrator.keyword_calls == [
+            ("query", "00000001", "exa"),
+            ("query", "00000002", None),
+        ]
+        assert runtime.paper_search_orchestrator.calls == [
+            ("query", "00000003", "arxiv"),
+            ("query", "00000004", None),
+        ]
+        assert runtime.search_orchestrator.llm_calls == [
+            ("prompt", "00000005", "paper", "openai_main", None),
+            ("prompt", "00000006", "all", None, "gpt-5"),
+            ("prompt", "00000007", "web", "openai_main", "gpt-5"),
+            ("prompt", "00000008", "web", None, None),
+        ]
+    finally:
+        await daemon.stop_for_test()
+        await asyncio.wait_for(task, timeout=1)
+    assert runtime.close_calls == 1
+
+
+@pytest.mark.parametrize("scope", ["web", "paper", "all"])
+async def test_daemon_concurrent_llm_selectors_keep_scope_and_request_identity(
+    tmp_path: Path, scope: LLMSearchScope
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    runtime = _FakeRuntime()
+    ids = iter(f"{index:08x}" for index in range(1, 5))
+    daemon = ForegroundDaemon(
+        paths, runtime_factory=lambda: runtime, request_id_factory=ids.__next__
+    )
+    task = asyncio.create_task(daemon.start())
+    requests = [
+        LLMSearchRequest("provider-only", scope, provider="openai_main"),
+        LLMSearchRequest("model-only", scope, model="gpt-5"),
+        LLMSearchRequest("both", scope, provider="azure_main", model="gpt-5"),
+        LLMSearchRequest("default", scope),
+    ]
+    try:
+        await asyncio.wait_for(daemon.ready.wait(), timeout=1)
+        responses = await asyncio.wait_for(
+            asyncio.gather(*(send_request(paths.socket_file, request) for request in requests)),
+            timeout=1,
+        )
+        assert all(isinstance(response, SuccessResponse) for response in responses)
+        calls = runtime.search_orchestrator.llm_calls
+        assert len(calls) == len(requests)
+        assert {request_id for _, request_id, _, _, _ in calls} == {
+            f"{index:08x}" for index in range(1, 5)
+        }
+        assert {
+            prompt: (received_scope, provider, model)
+            for prompt, _, received_scope, provider, model in calls
+        } == {
+            request.prompt: (request.scope, request.provider, request.model) for request in requests
+        }
+    finally:
+        await daemon.stop_for_test()
+        await asyncio.wait_for(task, timeout=1)
+    assert runtime.close_calls == 1
 
 
 async def test_daemon_loads_runtime_binds_socket_and_dispatches_typed_requests(

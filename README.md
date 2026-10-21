@@ -146,6 +146,44 @@ agent-search-gateway llm-search "research prompt" --scope paper
 agent-search-gateway llm-search "research prompt" --scope all
 ```
 
+### Request-scoped provider and model filters
+
+Use `--provider` to select an enabled search provider for one request. `llm-search` also accepts `--model`; either flag can be used alone or together:
+
+```bash
+agent-search-gateway keyword-search "query" --provider tavily
+agent-search-gateway paper-search "topic" --provider arxiv
+agent-search-gateway llm-search "prompt" --provider openai_main
+agent-search-gateway llm-search "prompt" --model gpt-5
+agent-search-gateway llm-search "prompt" --provider openai_main --model gpt-5
+```
+
+These example provider aliases and models must exist in your enabled search configuration; they are not guaranteed defaults. Selector values are exact and case-sensitive after the CLI trims surrounding whitespace. Each flag takes one name; comma-separated lists, wildcards, and partial matching are not supported.
+
+For keyword and paper search, `--provider` matches the enabled search provider's name, such as `tavily` or `arxiv`. Fetch-only or disabled providers do not match. For LLM search, it matches the configured provider alias in `[[search_llm.providers]]`, not the transport protocol name `openai` or an unrelated `llm_providers` entry.
+
+LLM selection preserves configured order and every matching invocation, including duplicate provider/model pairs:
+
+- Provider only runs all search models configured for that alias.
+- Model only runs that model across every matching search provider alias.
+- Both flags run their intersection: only invocations with that provider and model.
+- No flags run all configured search invocations, as before.
+
+The same selection applies to each LLM scope. With `--scope all`, both branches use the selected invocations:
+
+```bash
+agent-search-gateway llm-search "prompt" --provider openai_main --model gpt-5 --scope paper
+agent-search-gateway llm-search "prompt" --provider openai_main --model gpt-5 --scope all
+```
+
+An explicitly empty or whitespace-only selector is an input error. Unmatched selectors fail before provider work begins and never fall back to unselected backends. When both LLM flags are supplied, the error distinguishes a missing provider, a missing model, both names being absent, and both names existing separately without a matching provider/model pair. A runtime with no search providers retains its existing no-provider error; if every selected execution fails, the existing all-providers-failed error still applies.
+
+Filters affect search fan-out only. Keyword result judging configured through `fetch_llm` and normal paper OA enrichment can still run. `url-fetch`, `start`, `stop`, and `doctor` do not accept these flags. The daemon still validates and assembles all enabled providers at startup, so selecting one provider does not bypass startup validation for other enabled providers.
+
+Selection lasts for one request; the next command without flags uses the full configured set. After installing a version with these flags, stop and restart an already-running older daemon once to load the new code. Subsequent selector changes do not require restarting. Restarting clears in-memory URL admission and cached content, so search again before fetching previously admitted URLs.
+
+For a smoke test, start the daemon with `--debug` and correlate the result filename's request ID with the search-stage provider/model events. Only the selected search pipelines should execute; legitimate judge or OA enrichment events may name other services. Successful search stdout remains only the absolute result-file path.
+
 ## Academic paper search
 
 Direct paper discovery queries enabled academic providers concurrently and merges records by DOI, arXiv id, provider-native id, then a conservative bibliographic fallback. The built-in discovery order is arXiv, Semantic Scholar, OpenAlex, dblp, Crossref, then CORE. Unpaywall is not a discovery provider; it runs after deduplication and only for DOI-bearing papers.

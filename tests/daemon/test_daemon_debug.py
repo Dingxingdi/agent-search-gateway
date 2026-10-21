@@ -17,7 +17,9 @@ from agent_search_gateway.runtime import Runtime
 
 
 class _Search:
-    async def keyword_search(self, query: str, *, request_id: str) -> str:
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         return query
 
     async def llm_search(
@@ -26,12 +28,16 @@ class _Search:
         *,
         request_id: str,
         scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str:
         return prompt
 
 
 class _Paper:
-    async def paper_search(self, query: str, *, request_id: str) -> str:
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         return f"paper:{query}"
 
 
@@ -215,7 +221,9 @@ async def test_debug_workflow_lifecycle_logs_are_correlated_and_payload_safe(
     tmp_path: Path,
 ) -> None:
     class LifecycleSearch:
-        async def keyword_search(self, query: str, *, request_id: str) -> str:
+        async def keyword_search(
+            self, query: str, *, request_id: str, provider: str | None = None
+        ) -> str:
             if query == "typed":
                 raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "typed failure")
             if query == "boom":
@@ -228,6 +236,8 @@ async def test_debug_workflow_lifecycle_logs_are_correlated_and_payload_safe(
             *,
             request_id: str,
             scope: str = "web",
+            provider: str | None = None,
+            model: str | None = None,
         ) -> str:
             return "unused"
 

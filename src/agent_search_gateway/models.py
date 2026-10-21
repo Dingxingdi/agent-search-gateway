@@ -91,11 +91,13 @@ class StageDecision:
 @dataclass(frozen=True, slots=True)
 class KeywordSearchRequest:
     query: str
+    provider: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class PaperSearchRequest:
     query: str
+    provider: str | None = None
 
 
 LLMSearchScope = Literal["web", "paper", "all"]
@@ -105,6 +107,8 @@ LLMSearchScope = Literal["web", "paper", "all"]
 class LLMSearchRequest:
     prompt: str
     scope: LLMSearchScope = "web"
+    provider: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

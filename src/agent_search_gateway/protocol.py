@@ -37,36 +37,48 @@ def _require_exact_keys(payload: Mapping[str, object], expected: set[str]) -> No
         raise ValueError("request fields do not match schema")
 
 
+def _optional_string(payload: Mapping[str, object], key: str) -> str | None:
+    if key not in payload:
+        return None
+    value = payload[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value
+
+
 def _parse_keyword(payload: Mapping[str, object]) -> Request:
-    _require_exact_keys(payload, {"type", "query"})
+    if not {"type", "query"} <= set(payload) <= {"type", "query", "provider"}:
+        raise ValueError("request fields do not match schema")
     query = payload["query"]
     if not isinstance(query, str):
         raise ValueError("query must be a string")
-    return KeywordSearchRequest(query)
+    return KeywordSearchRequest(query, provider=_optional_string(payload, "provider"))
 
 
 def _parse_paper(payload: Mapping[str, object]) -> Request:
-    _require_exact_keys(payload, {"type", "query"})
+    if not {"type", "query"} <= set(payload) <= {"type", "query", "provider"}:
+        raise ValueError("request fields do not match schema")
     query = payload["query"]
     if not isinstance(query, str):
         raise ValueError("query must be a string")
-    return PaperSearchRequest(query)
+    return PaperSearchRequest(query, provider=_optional_string(payload, "provider"))
 
 
 def _parse_llm(payload: Mapping[str, object]) -> Request:
-    keys = set(payload)
-    if keys not in ({"type", "prompt"}, {"type", "prompt", "scope"}):
+    if not {"type", "prompt"} <= set(payload) <= {"type", "prompt", "scope", "provider", "model"}:
         raise ValueError("request fields do not match schema")
     prompt = payload["prompt"]
     if not isinstance(prompt, str):
         raise ValueError("prompt must be a string")
+    provider = _optional_string(payload, "provider")
+    model = _optional_string(payload, "model")
     scope = payload.get("scope", "web")
     if scope == "web":
-        return LLMSearchRequest(prompt, "web")
+        return LLMSearchRequest(prompt, "web", provider=provider, model=model)
     if scope == "paper":
-        return LLMSearchRequest(prompt, "paper")
+        return LLMSearchRequest(prompt, "paper", provider=provider, model=model)
     if scope == "all":
-        return LLMSearchRequest(prompt, "all")
+        return LLMSearchRequest(prompt, "all", provider=provider, model=model)
     raise ValueError("scope must be web, paper, or all")
 
 
@@ -159,17 +171,22 @@ class NDJSONDecoder:
 
 def _request_payload(request: Request) -> dict[str, object]:
     if isinstance(request, KeywordSearchRequest):
-        return {"type": "keyword_search", "query": request.query}
-    if isinstance(request, PaperSearchRequest):
-        return {"type": "paper_search", "query": request.query}
-    if isinstance(request, LLMSearchRequest):
-        payload: dict[str, object] = {"type": "llm_search", "prompt": request.prompt}
+        payload: dict[str, object] = {"type": "keyword_search", "query": request.query}
+    elif isinstance(request, PaperSearchRequest):
+        payload = {"type": "paper_search", "query": request.query}
+    elif isinstance(request, LLMSearchRequest):
+        payload = {"type": "llm_search", "prompt": request.prompt}
         if request.scope != "web":
             payload["scope"] = request.scope
-        return payload
-    if isinstance(request, URLFetchRequest):
+    elif isinstance(request, URLFetchRequest):
         return {"type": "url_fetch", "url": request.url, "focus": request.focus}
-    return {"type": "shutdown"}
+    else:
+        return {"type": "shutdown"}
+    if request.provider is not None:
+        payload["provider"] = request.provider
+    if isinstance(request, LLMSearchRequest) and request.model is not None:
+        payload["model"] = request.model
+    return payload
 
 
 def _response_payload(response: Response) -> dict[str, object]:

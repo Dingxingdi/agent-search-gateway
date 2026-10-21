@@ -58,7 +58,9 @@ class PaperSearchOrchestrator:
         self._logger = logger or logging.getLogger(__name__)
         self._monotonic = monotonic
 
-    async def paper_search(self, query: str, *, request_id: str) -> str:
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str:
         validate_request_id(request_id)
         normalized_query = query.strip()
         if not normalized_query:
@@ -69,8 +71,19 @@ class PaperSearchOrchestrator:
                 "No academic search providers are enabled",
             )
 
+        selected = self.providers
+        if provider is not None:
+            if not provider.strip():
+                raise InputFailure(ErrorCode.BAD_REQUEST, "Provider must not be empty")
+            selected = tuple(candidate for candidate in selected if candidate.name == provider)
+            if not selected:
+                raise InputFailure(
+                    ErrorCode.BAD_REQUEST,
+                    f"No enabled paper-search provider matches '{provider}'",
+                )
+
         outcomes = await asyncio.gather(
-            *(self._run_provider(provider, normalized_query) for provider in self.providers),
+            *(self._run_provider(candidate, normalized_query) for candidate in selected),
             return_exceptions=True,
         )
         if not any(isinstance(outcome, list) for outcome in outcomes):

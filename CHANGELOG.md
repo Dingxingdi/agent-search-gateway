@@ -8,6 +8,10 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- Added request-scoped `--provider` filtering to `keyword-search`, `paper-search`, and `llm-search`, plus independent `--model` filtering for `llm-search`. Filters select configured search backends before execution, preserve unfiltered defaults, and report distinct provider/model mismatch errors without falling back to other backends.
+
 ### Fixed
 
 - Added concrete `transport_type` exception names to HTTP transport retry and terminal failure events without logging exception messages or changing retry behavior (#77).

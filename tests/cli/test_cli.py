@@ -23,6 +23,124 @@ from agent_search_gateway.observability import DebugLoggingSession
 from agent_search_gateway.paths import RuntimePaths
 
 
+async def _invoke_selector_cli(
+    tmp_path: Path, argv: list[str]
+) -> tuple[int, str, str, list[Request]]:
+    calls: list[Request] = []
+
+    async def client(_socket_path: Path, request: Request) -> Response:
+        calls.append(request)
+        return SuccessResponse("/tmp/result.jsonl")
+
+    stdout, stderr = StringIO(), StringIO()
+    paths = RuntimePaths(
+        config_file=tmp_path / "config.toml",
+        socket_file=tmp_path / "gateway.sock",
+        results_dir=tmp_path / "results",
+    )
+    code = await run_command(
+        build_parser().parse_args(argv), paths, client=client, stdout=stdout, stderr=stderr
+    )
+    return code, stdout.getvalue(), stderr.getvalue(), calls
+
+
+async def test_keyword_cli_forwards_trimmed_provider(tmp_path: Path) -> None:
+    code, stdout, stderr, calls = await _invoke_selector_cli(
+        tmp_path, ["keyword-search", "query", "--provider", "  exa  "]
+    )
+    assert (code, stdout, stderr) == (0, "/tmp/result.jsonl\n", "")
+    assert calls == [KeywordSearchRequest("query", provider="exa")]
+
+
+@pytest.mark.parametrize("command", ["keyword-search", "paper-search"])
+@pytest.mark.parametrize("provider", [None, "  MixedCase  "])
+async def test_discovery_cli_selector_values(
+    tmp_path: Path, command: str, provider: str | None
+) -> None:
+    argv = [command, "  query  "]
+    if provider is not None:
+        argv += ["--provider", provider]
+    code, _, stderr, calls = await _invoke_selector_cli(tmp_path, argv)
+    request_type = KeywordSearchRequest if command == "keyword-search" else PaperSearchRequest
+    assert code == 0 and stderr == ""
+    assert calls == [
+        request_type("query", provider=provider.strip() if provider is not None else None)
+    ]
+
+
+@pytest.mark.parametrize("scope", ["web", "paper", "all"])
+@pytest.mark.parametrize("provider", [None, "  OpenAI_Main  "])
+@pytest.mark.parametrize("model", [None, "  Model-Name  "])
+async def test_llm_cli_selector_combinations(
+    tmp_path: Path, scope: str, provider: str | None, model: str | None
+) -> None:
+    argv = ["llm-search", "  prompt  ", "--scope", scope]
+    if provider is not None:
+        argv += ["--provider", provider]
+    if model is not None:
+        argv += ["--model", model]
+    code, _, stderr, calls = await _invoke_selector_cli(tmp_path, argv)
+    assert code == 0 and stderr == ""
+    request = calls[0]
+    assert isinstance(request, LLMSearchRequest)
+    assert (request.prompt, request.scope) == ("prompt", scope)
+    assert request.provider == (provider.strip() if provider is not None else None)
+    assert request.model == (model.strip() if model is not None else None)
+
+
+@pytest.mark.parametrize(
+    ("command", "flag", "message"),
+    [
+        ("keyword-search", "--provider", "Provider must not be empty"),
+        ("paper-search", "--provider", "Provider must not be empty"),
+        ("llm-search", "--provider", "Provider must not be empty"),
+        ("llm-search", "--model", "Model must not be empty"),
+    ],
+)
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+async def test_cli_rejects_blank_selector_before_socket(
+    tmp_path: Path, command: str, flag: str, message: str, blank: str
+) -> None:
+    assert await _invoke_selector_cli(tmp_path, [command, "text", flag, blank]) == (
+        1,
+        "",
+        message + "\n",
+        [],
+    )
+
+
+@pytest.mark.parametrize("command", ["keyword-search", "paper-search", "llm-search"])
+async def test_empty_query_precedes_empty_selector(tmp_path: Path, command: str) -> None:
+    message = "Prompt" if command == "llm-search" else "Query"
+    assert await _invoke_selector_cli(tmp_path, [command, " ", "--provider", " "]) == (
+        1,
+        "",
+        f"{message} must not be empty\n",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["url-fetch", "https://example.com", "--provider", "p"],
+        ["url-fetch", "https://example.com", "--model", "m"],
+        ["start", "--provider", "p"],
+        ["start", "--model", "m"],
+        ["stop", "--provider", "p"],
+        ["stop", "--model", "m"],
+        ["doctor", "--provider", "p"],
+        ["doctor", "--model", "m"],
+        ["keyword-search", "query", "--model", "m"],
+        ["paper-search", "query", "--model", "m"],
+    ],
+)
+def test_selectors_are_not_global_cli_flags(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as error:
+        build_parser().parse_args(argv)
+    assert error.value.code == 2
+
+
 class _FakeDaemon:
     def __init__(self) -> None:
         self.start_calls = 0

@@ -41,7 +41,9 @@ _SOCKET_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 class _SearchOrchestratorLike(Protocol):
-    async def keyword_search(self, query: str, *, request_id: str) -> str: ...
+    async def keyword_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str: ...
 
     async def llm_search(
         self,
@@ -49,11 +51,15 @@ class _SearchOrchestratorLike(Protocol):
         *,
         request_id: str,
         scope: LLMSearchScope = "web",
+        provider: str | None = None,
+        model: str | None = None,
     ) -> str: ...
 
 
 class _PaperSearchOrchestratorLike(Protocol):
-    async def paper_search(self, query: str, *, request_id: str) -> str: ...
+    async def paper_search(
+        self, query: str, *, request_id: str, provider: str | None = None
+    ) -> str: ...
 
 
 class _FetchOrchestratorLike(Protocol):
@@ -413,17 +419,21 @@ class ForegroundDaemon:
             return await runtime.search_orchestrator.keyword_search(
                 request.query,
                 request_id=request_id,
+                provider=request.provider,
             )
         if isinstance(request, PaperSearchRequest):
             return await runtime.paper_search_orchestrator.paper_search(
                 request.query,
                 request_id=request_id,
+                provider=request.provider,
             )
         if isinstance(request, LLMSearchRequest):
             return await runtime.search_orchestrator.llm_search(
                 request.prompt,
                 request_id=request_id,
                 scope=request.scope,
+                provider=request.provider,
+                model=request.model,
             )
         return await runtime.fetch_orchestrator.url_fetch(request.url, request.focus)
 

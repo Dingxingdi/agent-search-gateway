@@ -1,6 +1,7 @@
 import argparse
 import json
 import re
+import shlex
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,40 @@ from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
 
 _ROOT = Path(__file__).parents[2]
+
+
+def test_readme_documents_request_scoped_provider_and_model_filters() -> None:
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    heading = "### Request-scoped provider and model filters"
+    assert heading in readme
+    section = readme.split(heading, 1)[1].split("\n## ", 1)[0]
+    examples = re.findall(r"^agent-search-gateway .+$", section, flags=re.MULTILINE)
+    parser = build_parser()
+    parsed = [parser.parse_args(shlex.split(example)[1:]) for example in examples]
+    selections = {
+        (args.command, args.provider, getattr(args, "model", None), getattr(args, "scope", None))
+        for args in parsed
+    }
+    assert selections == {
+        ("keyword-search", "tavily", None, None),
+        ("paper-search", "arxiv", None, None),
+        ("llm-search", "openai_main", None, "web"),
+        ("llm-search", None, "gpt-5", "web"),
+        ("llm-search", "openai_main", "gpt-5", "web"),
+        ("llm-search", "openai_main", "gpt-5", "paper"),
+        ("llm-search", "openai_main", "gpt-5", "all"),
+    }
+
+
+def test_request_selectors_are_documented_in_public_policy_and_unreleased() -> None:
+    public = (_ROOT / "docs/public-interface.md").read_text(encoding="utf-8")
+    changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+    assert "### Added" in unreleased
+    for flag in ("--provider", "--model"):
+        assert flag in public and flag in unreleased
+    for command in ("keyword-search", "paper-search", "llm-search"):
+        assert command in public and command in unreleased
 
 
 def _stub_environment(data: dict[str, object]) -> dict[str, str]:

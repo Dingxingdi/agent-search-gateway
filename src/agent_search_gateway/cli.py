@@ -54,18 +54,35 @@ def build_parser() -> argparse.ArgumentParser:
 
     keyword = subparsers.add_parser("keyword-search")
     keyword.add_argument("query")
+    keyword.add_argument(
+        "--provider", metavar="NAME", help="Select an enabled keyword-search provider"
+    )
 
     paper = subparsers.add_parser("paper-search")
     paper.add_argument("query")
+    paper.add_argument("--provider", metavar="NAME", help="Select an enabled paper-search provider")
 
     llm = subparsers.add_parser("llm-search")
     llm.add_argument("prompt")
     llm.add_argument("--scope", choices=("web", "paper", "all"), default="web")
+    llm.add_argument(
+        "--provider", metavar="NAME", help="Select a configured search LLM provider alias"
+    )
+    llm.add_argument("--model", metavar="NAME", help="Select an exact configured search model")
 
     fetch = subparsers.add_parser("url-fetch")
     fetch.add_argument("url")
     fetch.add_argument("focus", nargs="?")
     return parser
+
+
+def _normalize_selector(value: str | None, label: str) -> str | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        raise InputFailure(ErrorCode.BAD_REQUEST, f"{label} must not be empty")
+    return value
 
 
 def _request_from_args(args: argparse.Namespace) -> Request:
@@ -75,17 +92,22 @@ def _request_from_args(args: argparse.Namespace) -> Request:
         query = args.query.strip()
         if not query:
             raise InputFailure(ErrorCode.EMPTY_QUERY, "Query must not be empty")
-        return KeywordSearchRequest(query)
+        return KeywordSearchRequest(query, provider=_normalize_selector(args.provider, "Provider"))
     if args.command == "paper-search":
         query = args.query.strip()
         if not query:
             raise InputFailure(ErrorCode.EMPTY_QUERY, "Query must not be empty")
-        return PaperSearchRequest(query)
+        return PaperSearchRequest(query, provider=_normalize_selector(args.provider, "Provider"))
     if args.command == "llm-search":
         prompt = args.prompt.strip()
         if not prompt:
             raise InputFailure(ErrorCode.EMPTY_QUERY, "Prompt must not be empty")
-        return LLMSearchRequest(prompt, args.scope)
+        return LLMSearchRequest(
+            prompt,
+            args.scope,
+            provider=_normalize_selector(args.provider, "Provider"),
+            model=_normalize_selector(args.model, "Model"),
+        )
     if args.command == "url-fetch":
         url = normalize_url(args.url)
         focus = args.focus.strip() if args.focus is not None and args.focus.strip() else None
