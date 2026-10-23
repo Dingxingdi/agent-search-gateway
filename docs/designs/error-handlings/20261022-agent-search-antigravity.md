@@ -1,6 +1,6 @@
 ## Error Handling: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live timeout/cancellation cleanup verified; successful live retrieval remains unverified because the installed Harness did not return. See the implementation plan's execution evidence.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live pinned-model Web retrieval, All partial success, and process/shutdown cleanup are verified with temporary proxy mappings. A reproduced Paper failure is blocked by the Harness's headless command permission; default-model retrieval, successful Paper/All branches, and live follow-up fetch remain unverified. See the implementation plan's execution evidence and environment prerequisites.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Testing:** [20261022-agent-search-antigravity.md](../testings/20261022-agent-search-antigravity.md).
 

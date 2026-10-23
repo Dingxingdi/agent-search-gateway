@@ -24,6 +24,14 @@ scope `web` and independent `--provider` and `--model` filters. Agent providers 
 the `agent_providers` namespace and `search_agent.providers` invocation list.
 `harness = "antigravity"`, `command`, `max_concurrency`, `timeout_seconds`, and
 `pass_env` follow the documented types, defaults, and bounds in the README.
+Proxy variables, like other extra environment variables, must exist in the daemon's
+environment and be explicitly named in `pass_env`; the gateway does not assign their
+values or load shell startup files. Configure the uppercase and/or lowercase
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` names required by the Harness
+in this allowlist. If the launcher stores proxy addresses under different names,
+map them to the standard names only in the daemon launch environment; keep addresses
+and credentials out of TOML. Restart the daemon after changing its environment or
+configuration.
 
 Invocation `model` is optional. Omission uses the Harness's saved default by
 omitting its execution `--model` flag; it never inherits an LLM model.

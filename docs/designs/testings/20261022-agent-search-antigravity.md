@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live timeout/cancellation cleanup verified; successful live retrieval remains unverified because the installed Harness did not return. See the implementation plan's execution evidence.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live pinned-model Web retrieval, All partial success, and process/shutdown cleanup are verified with temporary proxy mappings. A reproduced Paper failure is blocked by the Harness's headless command permission; default-model retrieval, successful Paper/All branches, and live follow-up fetch remain unverified. See the implementation plan's execution evidence and environment prerequisites.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
@@ -17,11 +17,15 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 **Implementation evidence (2026-10-23):** The final ordinary suite has **1195 passed, 4 skipped**;
 Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
 Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
-timeouts, cancellation, output bounds, and daemon shutdown. Authorized live checks verify
-timeout/cancellation cleanup, but successful live retrieval and a verified model slug remain
-unavailable because the installed Harness did not return. See the
+timeouts, cancellation, output bounds, and daemon shutdown. Temporary proxy mappings now
+allow live model discovery and pinned-model Web success through the real CLI/socket/daemon
+path. All-scope partial success and cleanup also pass. Paper still returns an empty terminal
+response; a diagnostic invocation explicitly identifies auto-denied headless command
+permission. Default-model retrieval, successful Paper retrieval, both-branch All success,
+and live follow-up fetch remain unverified. The installed fetch configuration's required
+environment variable is missing. See the
 [execution record](../plans/20261022-agent-search-antigravity.md#实施与验收记录2026-10-23)
-for exact evidence and the missing installed-fetch environment variable.
+for exact evidence, limits, and the environment prerequisites for the remaining live checks.
 
 **Primary acceptance requirements:**
 

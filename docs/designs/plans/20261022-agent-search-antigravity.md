@@ -39,26 +39,81 @@ CLI、Unix socket、Runtime、可执行测试进程、parser/store/writer 和后
 部分与空成功、真实子/孙进程回收、反复取消、stdout/stderr byte 上限，以及 shutdown
 完成前的清理。文档示例由真实 TOML resolver 和 CLI parser 校验；版本号未更改。
 
-### 已获授权的真实环境检查
+### 初次真实环境检查（代理映射前）
 
 - 安装版本的 `agy --help` 已确认 `-p`、`--output-format json`、`--print-timeout`
   和 `--model` 参数存在。
-- `agy models` 分别在 10 秒、45 秒等待内未返回可用模型列表，因此没有猜测显式模型 slug。
+- `agy models` 分别在 10 秒、45 秒等待内未返回可用模型列表，当时没有猜测模型 slug。
 - 独立临时 Runtime / socket 下，真实默认模型 Web 请求以 60 秒 Harness 预算运行，
   Python deadline 到期后返回安全的 all-provider failure；实际子进程没有传入
-  `--model`。验证结果：lease 为 0、直接子进程已回收、私有 cwd 已删除、socket
-  已删除、所属进程组存活进程数为 0。
-- 真实 `agy` 的主动取消场景通过：启动后取消，lease 回收，cwd 删除，直接子进程已回收，
-  所属进程组无存活进程。
-- 另用继承终端环境的最小直接 `agy -p` 请求排查：30 秒外部限时后进程组被终止，
-  未产生 stdout/stderr，未得到终态。这与 gateway 之外的 Harness 无响应一致；
-  尚不能确认具体外部原因。
-- 现有 gateway 配置解析还缺少 `CPA_API_KEY` 环境变量。本次真实 Agent 执行使用
-  独立的最小有效 fetch 配置且没有调用该占位 LLM endpoint；因此真实后续 fetch
-  未验证。正常离线端到端测试已验证共享 fetch 行为。
-- 真实成功的 Web/Paper/All 检索与实际模型 pin 仍未验证。没有把 `SUCCESS` 或格式通过
-  当作工具执行、源访问或结果真实性的证明；没有修改 Harness 权限、MCP、默认模型、
-  用户现有配置或认证文件。临时 smoke 脚本已移除，结果仅保留上述安全摘要。
+  `--model`。lease 为 0，直接子进程已回收，私有 cwd、socket 已删除，所属进程组
+  无存活进程。
+- 真实 `agy` 的主动取消场景通过：取消后 lease 回收、cwd 删除、子进程及所属进程组清理。
+- 继承终端环境的最小直接 `agy -p` 请求在 30 秒外部限时内没有产生终态。当时尚未定位原因。
+  下面的代理复验取代“全部真实成功检索均未验证”的初次结论。
+
+### 代理映射后的真实验收与阻塞（2026-10-23）
+
+实现提交为 `edb55f3`。本轮按用户指示，从已存在的
+`CODEXPRO_TOOL_HTTP_PROXY`、`CODEXPRO_TOOL_HTTPS_PROXY` 读取值，按协议临时设置
+大小写标准代理变量；`CODEXPRO_TOOL_ALL_PROXY` 不存在，但不影响使用前两项。
+只在临时 Runtime 的 Agent provider `pass_env` 中列入这些标准变量名和已有的
+`NO_PROXY` / `no_proxy`。没有记录地址、端口或凭据，没有更改持久代理或 ngrok 设置。
+这也验证了两个独立前提：daemon 环境必须已有代理值，Agent `pass_env` 必须允许传递这些值。
+
+`agy --version` 为 **1.4.5**。代理映射后 `agy models` 成功返回模型列表，
+`gemini-3.8-flash-high` 和 `gemini-3.8-flash-medium` 均来自该实际列表。
+继承终端环境的最小直接 `agy -p` 请求已返回 `SUCCESS` 和 `OK`。
+后续搜索使用真实 CLI → Unix socket → daemon → Runtime → `agy` →
+parser/store/writer 链路；仅为未使用的 mandatory fetch 配置提供占位，HTTP transport
+拒绝意外请求。以下完成的搜索检查均观察到 **0 Gateway HTTP calls / 0 LLM stage events**。
+
+| 真实检查 | 观察结果 |
+|---|---|
+| 默认模型 Web | 不传 `--model`；约 66 秒后 `empty_response`，没有结果文件 |
+| 显式 high 模型 Web | **成功**；约 70 秒，输出路径独占 stdout，2 条 Web JSONL，字段及 URLStore admission 通过 |
+| 默认模型 Paper | 不传 `--model`；约 42 秒后 `empty_response`，没有结果文件 |
+| 显式 high 模型 Paper | exit 0、`status=SUCCESS`、`num_turns=1`，但正文长度为 0；网关拒绝为空答复，没有进入 parser |
+| 显式 high 模型 All | **部分成功**；约 58 秒，Web 成功生成 2 条带 `type=web` 的结果，Paper 子进程 exit 3 / `status=ERROR`；失败分支未写入结果 |
+| 显式 medium 模型 Paper | 约 15 秒后 `SUCCESS` 空答复；stderr 明确指出所需 `command` 权限被 headless 自动拒绝 |
+| Agent 启动后的真实 CLI `stop` | `stop` exit 0；约 9.5 秒内请求以 `nonzero_exit` 结束、daemon 退出，清理检查通过 |
+
+成功 Web 返回的 URL 是
+`https://docs.python.org/3/library/asyncio-task.html` 与
+`https://docs.python.org/3/library/asyncio-exceptions.html`。
+All 的部分成功验证了 mixed schema、分支隔离与有效结果保留；
+由于没有成功的 Paper 行，不能据此宣称两分支成功时的真实排序或来源字段已经验收。
+这些行为已由离线真实可执行进程测试覆盖。
+
+所有完成的临时 Runtime 检查同时验证：未知模型筛选零进程调用、显式模型精确传递、
+省略模型不传参、JSON 输出和显式预算、独立进程组、代理变量被允许传递、
+无关服务凭据未传入、没有续接会话或自动批准参数；
+结束时 Agent lease 为 0、直接子进程已回收、所属进程组不存在、私有 cwd 和 socket
+均删除。此次 stop 检查中 Harness 在 shutdown 等待期间自行返回错误；
+强制取消/超时路径的真实证据来自上面的初次检查，完整竞态由离线测试覆盖。
+
+**剩余真实环境阻塞及诊断边界：**
+
+1. Paper 空答复已在 gateway 外用相同 prompt 的 `stream-json` 诊断复现：
+   1 个 init、7 个 step_update、1 个 result，最终 `SUCCESS` 但正文为空，
+   stderr 有权限拒绝提示。之后真实 gateway 的 medium 模型调用明确报告：
+   需要 `command` 权限的工具在 headless 下无法询问授权，因而被自动拒绝。
+   这是已复现 Paper 失败的 Harness 原因；不能把所有未披露的 ERROR 终态都归为同一原因。
+   未修改 Harness 工具权限、MCP、认证、保存的默认模型，也没有增加自动批准或重试。
+   默认模型成功检索、成功 Paper，以及 All 两分支同时成功，仍未完成真实验收。
+2. 已安装 gateway 的 mandatory fetch 配置引用 `CPA_API_KEY`，
+   该变量在 LocalHost 进程环境和 login shell 均缺失。因此尚未执行真实后续
+   `url-fetch`；URLStore admission 已真实验证，后续 fetch 链路已离线验证。
+   占位 fetch endpoint 没有被调用，用户现有配置及运行中服务没有被替换。
+3. 追加传递现有 `NODE_USE_ENV_PROXY` 未解决默认模型失败。一轮前台检查超过
+   LocalHost 请求超时，没有取得完整结果，不计为成功；随后确认该轮进程已退出。
+   有完整证据的复验得到 exit 3 / `status=ERROR`。没有把代理已通解释为权限也已具备。
+
+`SUCCESS`、格式校验或 URL admission 均不证明 Harness 实际访问过返回的来源。
+普通测试本轮再次通过 **1195 passed, 4 skipped**。代理传递操作约定补充在
+`docs/public-interface.md`。临时 smoke/诊断脚本和本地证据文件在验收记录整理后删除；
+仓库仅保留这里的安全摘要。两个外部前提（Harness 所需工具权限、fetch 配置凭据）
+具备后，应继续复验尚未通过的真实场景。
 
 ### 计划编写检查单
 
