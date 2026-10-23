@@ -1,6 +1,6 @@
 ## Error Handling: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; implementation not started.
+**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; implementation not started.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Testing:** [20261022-agent-search-antigravity.md](../testings/20261022-agent-search-antigravity.md).
 
@@ -24,6 +24,7 @@
 | Explicit blank provider/model selector | `InputFailure(BAD_REQUEST)` | Explain blank selector | No Agent launched |
 | No configured `search_agent` invocations | `ExecutionFailure(NO_AGENT_SEARCH_PROVIDERS)` | No Agent search providers configured | No Agent launched |
 | Unknown Agent provider/model or missing pair | `InputFailure(BAD_REQUEST)` | Precise mismatch message | No Agent launched |
+| Explicit model selector with only default-model Agent entries | `InputFailure(BAD_REQUEST)` | No configured model match | Zero Agent calls; do not discover or overwrite the default |
 | Invalid Agent TOML / unknown harness | `ConfigFailure(CONFIG_ERROR)` | Daemon startup/doctor reports invalid config | No Agent launched |
 | `agy` not installed / wrong executable | Provider `ExecutionFailure` | Generic selected-provider failure if all fail | No other selected backend fallback |
 | Auth missing/expired or invalid model | Provider `ExecutionFailure` | Existing all-provider failure if all fail | Reap child, no file |
@@ -51,7 +52,7 @@ The classification shown for a provider failure is internal; the existing `Searc
 
 #### 3.2 Provider and Model Selectors
 
-Agent selector semantics mirror current LLM ones, but only against `search_agent.providers`. Propose messages:
+Agent selector semantics mirror current LLM ones, but only against `search_agent.providers`. An omitted invocation model is valid and remains `None`. Without a model selector, default-model entries are eligible (including under a provider-only selector); with an explicit model selector they never match. Match only explicit configured strings, without asking Antigravity for its default or changing an invocation. Proposed messages:
 
 - `No Agent search providers are configured` — empty Agent invocation list (`NO_AGENT_SEARCH_PROVIDERS`).
 - `No Agent search invocation matches provider 'P'` — provider only unmatched.
@@ -66,7 +67,8 @@ No Agent invocation means a no-provider error even when selectors are present, m
 
 Reject malformed selected Agent configuration before the daemon listens:
 
-- `search_agent.providers` not an array of tables; missing/blank `provider` or `model`.
+- `search_agent.providers` not an array of tables; missing/blank/non-string `provider`.
+- If a `model` key is present, its value must be a nonempty string; blank/whitespace-only/non-string values (including explicit `None` in the resolver input) are invalid. An omitted key is valid and resolves to `None`, without inheriting any LLM model.
 - Referenced provider alias missing from `agent_providers`.
 - Missing/unknown `harness` (only `antigravity` is supported).
 - Invalid `command` (must be a nonempty executable name/path, not a shell pipeline or argument list).
@@ -83,9 +85,11 @@ Do not change existing `llm_providers`, `search_llm`, `fetch_llm` validation. Do
 The runner builds an argv array using `asyncio.create_subprocess_exec`; no `shell=True`. Launch with:
 
 ```text
-agy -p <serialized system/user prompt> --model <selected model> \
+agy -p <serialized system/user prompt> \
     --output-format json --print-timeout <bounded duration>
 ```
+
+Append `--model <configured model>` only if the selected invocation explicitly pins a model. Otherwise omit both the flag and its value, and let Antigravity use the user's saved model. Do not pass empty strings, `None`, or an invented default slug. Gateway still requires JSON output and an explicit bounded CLI timeout for its parsing/deadline contract. If the Harness fails because its saved default is missing or unusable, report a provider failure rather than choosing an LLM model or retrying another model.
 
 No `--continue`, `--conversation` or `--dangerously-skip-permissions`. Each invocation gets a temporary cwd and curated environment. It uses user-configured Harness tools/permissions rather than trying to control them.
 
@@ -125,6 +129,8 @@ Use three independent bounds:
 
 Proposed adapter limits: stdout up to **4 MiB**, stderr up to **256 KiB**. Read both streams concurrently to prevent pipe deadlock; reject overflow rather than silently truncating terminal JSON.
 
+The safe `model` metadata is the configured string or `None` (rendered as `model=null` by the existing formatter). It does not claim to identify the Harness's effective default; do not read settings or call `agy models` to fill it.
+
 Log only these categories (or equivalent fixed codes): `spawn_failure`, `nonzero_exit`, `terminal_status_failure`, `invalid_json`, `empty_response`, `invalid_markdown`, `timeout`, `output_limit`, `cancelled`. Do not log raw text even at DEBUG level.
 
 **Trade-off:** `agy -p TEXT` necessarily places the research prompt in subprocess argv, which might be visible in local process inspection while the child runs. This is an explicit limitation of choosing minimal non-interactive `-p` integration; switching to streaming stdin is a separate future hardening effort. Do not use a shell to construct argv.
@@ -139,7 +145,7 @@ Log only these categories (or equivalent fixed codes): `spawn_failure`, `nonzero
 
 ### 5. Aggregation, Results and Source Attribution
 
-- Preserve configured invocation order even if completion order differs; duplicate configured provider/model entries remain separate executions as for LLM.
+- Preserve configured invocation order even if completion order differs; duplicate configured provider/model entries, including repeated `(provider, None)` entries, remain separate executions as for LLM.
 - Web: commit valid nonempty-abstract results in first-seen order; URL deduplication stays in `SearchOrchestrator` / `URLStore`.
 - Paper: keep `finalize_paper_hits` shared. Agent source is `agent:<provider>`; extend generated-source precedence without changing existing `llm:` ordering or strong identifier matching.
 - For a selected invocation's invalid Markdown, no records from that invocation enter the shared store. Other successful invocations may still commit.
@@ -159,4 +165,4 @@ Log only these categories (or equivalent fixed codes): `spawn_failure`, `nonzero
 
 The corresponding testing spec must cover input/config errors, soft-denied tools with exit code zero, envelope errors, parser failures, source attribution, partial success, timeout/kill/reap, stdout/stderr limits, secret filtering, empty/missing Agent config and exact LLM backwards compatibility.
 
-This error design was approved together with the architecture and testing specs on 2026-10-22.
+This error design was approved together with the architecture and testing specs on 2026-10-22; the optional-model rules were revised with the plan at the user's request on 2026-10-23.

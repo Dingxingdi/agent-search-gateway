@@ -1,7 +1,8 @@
 ## Architecture: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; implementation not started.
+**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; implementation not started.
 **Date:** 2026-10-22
+**Last revised:** 2026-10-23
 **Base revision:** `fe72cc1` (`main`).
 **Companion documents:** [Error handling](../error-handlings/20261022-agent-search-antigravity.md) and [Testing](../testings/20261022-agent-search-antigravity.md).
 
@@ -10,7 +11,7 @@
 #### In Scope
 
 - Add a separate `agent-search` CLI command supporting `--scope web|paper|all` (default `web`), `--provider` and `--model`.
-- Support only the **Google Antigravity CLI** (`agy`) in non-interactive mode, with a Gemini model selected by the user. Every invocation starts a fresh Agent session.
+- Support only the **Google Antigravity CLI** (`agy`) in non-interactive mode, using the user's saved Antigravity model by default; an invocation may explicitly pin a model. Every invocation starts a fresh Agent session.
 - Reuse the existing `llm-search` search prompts, restricted Markdown grammars/parsers, selected-invocation fan-out, partial-failure policy, web URL admission/deduplication, paper aggregation/OA enrichment, and JSONL writers.
 - Retain `LLMStages` for its six current methods and temporarily add two Agent search methods there, as explicitly agreed. Keep Antigravity subprocess code in a separate provider adapter, outside `LLMStages`.
 - Create `providers/llm/` and `providers/agent/`; move the existing `providers/openai_chat.py` into `providers/llm/openai_chat.py` without changing API behavior.
@@ -33,6 +34,7 @@
 - `paper_search_parser.py` sets `source="llm:<provider>"`. `PaperAggregator` gives `llm:` sources special generated-source precedence.
 - `request_ids.py` and `ResultWriter` know only `keyword` / `llm` / `paper` file names. `protocol.py` defaults to 300 seconds for a socket response.
 - Installed `agy --help` supports `-p`, `--model`, `--output-format json` and `--print-timeout`. Antigravity's [official Headless Mode documentation](https://www.antigravity.google/docs/cli/headless/) specifies terminal `status` and `response` fields and notes that a soft-denied tool may still produce exit code zero.
+- Antigravity's [official CLI reference](https://www.antigravity.google/docs/cli/reference/) documents the persisted `/model` choice and the per-session `--model` flag. Gateway leaves an omitted invocation model unresolved and lets the child CLI load the user's saved choice; it does not read or modify Antigravity settings.
 - Internal Python imports and socket frames are not stable public interfaces, but documented CLI/TOML/stdout/JSONL contracts are; see `docs/public-interface.md`.
 
 ---
@@ -87,7 +89,7 @@ OpenAI Chat HTTP                   agy CLI process
 
 ##### Independent typed request and selectors
 
-- **Description:** Add `AgentSearchRequest(prompt, scope="web", provider=None, model=None)`; extend CLI, codec and daemon dispatch. Reuse the existing exact, case-sensitive, provider/model intersection policy but only against `[[search_agent.providers]]`. `SearchScope` may be a shared alias for the same three literals while preserving existing `LLMSearchScope` compatibility.
+- **Description:** Add `AgentSearchRequest(prompt, scope="web", provider=None, model=None)`; extend CLI, codec and daemon dispatch. Reuse the existing exact, case-sensitive, provider/model intersection policy but only against `[[search_agent.providers]]`. A model selector matches only an explicitly configured model; an invocation with `model=None` remains eligible when no model selector is supplied. Selectors do not overwrite invocation models or discover the Harness default. `SearchScope` may be a shared alias for the same three literals while preserving existing `LLMSearchScope` compatibility.
 - **Rationale:** Separate public commands and backend namespaces are explicit and testable.
 - **Trade-offs:** Mechanical additions to several dispatch/type branches.
 - **Rejected alternative:** Encode Agent intent in `LLMSearchRequest` or user prompt text.
@@ -105,7 +107,7 @@ OpenAI Chat HTTP                   agy CLI process
 
 - **Description:** No `--continue`, `--conversation`, persistent session ID, or long-lived stdin streaming. `--scope all` launches independent Web/Paper tasks; provider quotas may serialize process execution.
 - **Rationale:** No shared conversational state or recovery protocol is needed.
-- **Trade-offs:** Duplicate startup time and possibly two Gemini invocations per `--scope all` request.
+- **Trade-offs:** Duplicate startup time and possibly two Agent invocations per `--scope all` request.
 - **Rejected alternative:** Session reuse adds lifecycle and state semantics absent from the current gateway.
 
 #### Storage / Persistence
@@ -128,7 +130,7 @@ OpenAI Chat HTTP                   agy CLI process
 
 ##### Temporarily add Agent methods to LLMStages without coupling its transport
 
-- **Description:** Introduce `agent_search_markdown()` and `agent_paper_search_markdown()`. Inject an optional mapping of Agent runner **callables** keyed by alias, separate from existing `Mapping[str, LLMClient]`. A runner accepts `(model, messages: Sequence[ChatMessage])` and returns `str`. `LLMStages` builds the already-existing prompt messages and calls the selected runner. Do not require Agent backends to implement `LLMClient.complete_json` or expose CLI specifics inside `LLMStages`.
+- **Description:** Introduce `agent_search_markdown()` and `agent_paper_search_markdown()`. Inject an optional mapping of Agent runner **callables** keyed by alias, separate from existing `Mapping[str, LLMClient]`. A runner accepts `(model: str | None, messages: Sequence[ChatMessage])` and returns `str`; `None` means defer model selection to the Harness. `LLMStages` builds the already-existing prompt messages and calls the selected runner. Do not require Agent backends to implement `LLMClient.complete_json` or expose CLI specifics inside `LLMStages`.
 - **Rationale:** Honors the user's planned later `LLMStages` rebuild while retaining a narrow future extraction seam.
 - **Trade-offs:** The class remains mixed-responsibility temporarily, and its Agent methods should not emit `llm_stage_*` logging names.
 - **Rejected alternatives:** Add `AgentClient` classes / separate `SearchStages` now (premature structure); put subprocess code directly into `LLMStages` (future Harness coupling).
@@ -151,9 +153,9 @@ OpenAI Chat HTTP                   agy CLI process
 
 ##### Independent Agent namespace and invocation list
 
-- **Description:** Add `[agent_providers.<alias>]` and `[[search_agent.providers]]`. The provider has `harness="antigravity"`, optional `command="agy"`, positive `max_concurrency` (default 1), optional `timeout_seconds` (default 300; max 540), and optional `pass_env` containing names of extra variables to pass. The invocation has explicit `provider` and `model`. No Agent config or empty `search_agent.providers` is valid.
+- **Description:** Add `[agent_providers.<alias>]` and `[[search_agent.providers]]`. The provider has `harness="antigravity"`, optional `command="agy"`, positive `max_concurrency` (default 1), optional `timeout_seconds` (default 300; max 540), and optional `pass_env` containing names of extra variables to pass. The invocation requires `provider` and optionally accepts `model`. Omission resolves to `AgentInvocation.model=None`; an explicitly present model must be a nonempty string (blank/non-string values are invalid, not a request for the default). No Agent config or empty `search_agent.providers` is valid.
 - **Rationale:** Does not alter current `llm_providers`, `search_llm` or `fetch_llm` configuration; supports aliases and model filtering.
-- **Trade-offs:** A separate small config parser/validation path is needed.
+- **Trade-offs:** A separate small config parser/validation path is needed. With no pinned model, changes to the user's saved Antigravity model apply to later CLI invocations; Gateway does not snapshot or discover that model.
 - **Rejected alternative:** Store executable and model in the LLM transport config, or accept arbitrary shell command strings.
 
 ```toml
@@ -167,10 +169,11 @@ timeout_seconds = 300
 
 [[search_agent.providers]]
 provider = "antigravity_main"
-model = "gemini-3.1-pro-high"
+# Omit model to use the model saved in Antigravity.
+# model = "gemini-3.1-pro-high"  # Optional pin for this invocation.
 ```
 
-This is a **proposed config**, not a currently supported schema. Model identifiers must be checked against the installed `agy models`; neither `doctor` nor startup performs remote model discovery.
+This is a **proposed config**, not a currently supported schema. `provider` must still be configured; omitting `model` does not auto-create an invocation or inherit `global_default_llm`. An explicit model identifier should be checked by the user against the installed `agy models`; neither `doctor` nor startup performs model discovery or reads Antigravity settings. Gateway passes an explicit model only for that invocation and never changes the saved default.
 
 #### Concurrency / Scheduling
 
@@ -192,7 +195,7 @@ This is a **proposed config**, not a currently supported schema. Model identifie
 
 ##### Parse CLI envelope and require success
 
-- **Description:** Use `agy -p TEXT --model MODEL --output-format json --print-timeout <duration>`. Accept only exit status 0, JSON `status="SUCCESS"` and a nonempty string `response`; then apply the existing strict Markdown parser. Bound captured stdout/stderr and never log prompt or raw CLI output.
+- **Description:** Use `agy -p TEXT --output-format json --print-timeout <duration>`; append `--model MODEL` only when `AgentInvocation.model` is not `None`. JSON output and the explicit bounded timeout remain Gateway adapter requirements even though both flags are optional in the CLI. Accept only exit status 0, JSON `status="SUCCESS"` and a nonempty string `response`; then apply the existing strict Markdown parser. Bound captured stdout/stderr and never log prompt or raw CLI output.
 - **Rationale:** Antigravity headless tool soft-denial can still yield exit code 0; status and parser checks are mandatory.
 - **Trade-offs:** Correct output grammar cannot prove sources were genuinely accessed; source verification is outside the request.
 
@@ -200,7 +203,7 @@ This is a **proposed config**, not a currently supported schema. Model identifie
 
 ##### Keep existing event semantics
 
-- **Description:** Leave all existing `llm_stage_*` and LLM provider logs unchanged; Agent search records `provider_started/completed/failed` under `stage=agent_search` / `agent_paper_search`, with provider/model, elapsed time and outcome category, not raw prompts/CLI stderr.
+- **Description:** Leave all existing `llm_stage_*` and LLM provider logs unchanged; Agent search records `provider_started/completed/failed` under `stage=agent_search` / `agent_paper_search`, with provider, the configured model (or `model=null` when delegated to Antigravity), elapsed time and outcome category, not raw prompts/CLI stderr. The model field records an optional pin, not a discovered effective model.
 - **Rationale:** Regression tests remain meaningful; Agent execution can be diagnosed without leaking sensitive content.
 - **Trade-offs:** No full internal tool-call trace in Gateway logs.
 - **Rejected alternative:** Store raw Agent transcripts inside Gateway diagnostics.
@@ -353,13 +356,16 @@ return str(path)
 #### 5.5 Antigravity Adapter Per Selected Invocation
 
 ```python
-async def run_antigravity(model, messages, *, command, timeout, pass_env):
+async def run_antigravity(model: str | None, messages, *, command, timeout, pass_env):
     prompt = encode_chat_roles_as_single_cli_text(messages)
     cwd = private_temporary_workdir()
     argv = [
-        command, "-p", prompt, "--model", model,
+        command, "-p", prompt,
         "--output-format", "json", "--print-timeout", f"{timeout}s"
     ]
+    if model is not None:
+        argv.extend(["--model", model])
+    # None is never stringified or replaced with a guessed default.
     try:
         process = await create_subprocess_exec(
             *argv, cwd=cwd, env=curated_env(pass_env), start_new_session=True,
@@ -408,10 +414,11 @@ agent-search-gateway agent-search "query"
 agent-search-gateway agent-search "query" --scope paper
 agent-search-gateway agent-search "query" --scope all
 agent-search-gateway agent-search "query" --provider antigravity_main
+# Requires a search_agent entry explicitly configured with this model.
 agent-search-gateway agent-search "query" --provider antigravity_main --model gemini-3.1-pro-high
 ```
 
-`--provider` and `--model` perform exact, case-sensitive selection over configured `search_agent` invocations only; missing entries do not trigger fallback.
+`--provider` and `--model` perform exact, case-sensitive selection over configured `search_agent` invocations only; missing entries do not trigger fallback. Without selectors, select every configured entry; provider-only selects that alias's default-model and pinned-model entries. An explicit model selector matches only non-`None` configured model strings and excludes default-model entries, even if Antigravity's saved model happens to have the same name. The selector never fills in an omitted invocation model. Duplicate entries, including two default-model entries for the same alias, remain independent calls; no magic `default` model string is introduced.
 
 #### Internal Socket Request
 
@@ -427,17 +434,18 @@ Omit default scope and unset selectors in serialized frames. Successful socket r
 @dataclass(frozen=True, slots=True)
 class AgentInvocation:
     provider: str
-    model: str
+    model: str | None = None
 
 AgentTextRunner = Callable[
-    [str, Sequence[ChatMessage]], Awaitable[str]
+    [str | None, Sequence[ChatMessage]], Awaitable[str]
 ]
-# Inputs: model + Web/Paper role messages.
+# Inputs: optional pinned model + Web/Paper role messages.
+# None delegates to the CLI's saved model; it remains None through runtime/stages.
 # Output: nonempty Markdown text satisfying the selected prompt grammar.
 # No raw subprocess protocol, Agent session or Gateway store escapes this boundary.
 ```
 
-Existing `LLMInvocation` and `LLMClient` remain unchanged. No new concrete `AgentClient` class is required.
+Existing `LLMInvocation` and `LLMClient` retain their required string model and remain unchanged. No new concrete `AgentClient` class is required.
 
 #### JSONL Contracts
 
@@ -466,4 +474,4 @@ Existing `LLMInvocation` and `LLMClient` remain unchanged. No new concrete `Agen
 
 **Business behavior to leave alone:** `orchestrators/fetch.py`, `scheduler/fetch.py`, `URLStore` methods, existing Web/Academic adapters, existing Prompt text, existing OpenAI Chat API behavior.
 
-This approved design governs implementation scope alongside the companion error and test specs; it is not authorization to modify unrelated components.
+The 2026-10-23 revision makes only Agent invocation model selection optional and retains the JSON envelope, explicit CLI timeout, selector filtering policy and existing LLM requirements. This approved design governs implementation scope alongside the companion error and test specs; it is not authorization to modify unrelated components.

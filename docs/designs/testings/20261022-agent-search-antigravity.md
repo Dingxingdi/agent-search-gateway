@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; specification only, no new code has been implemented.
+**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; specification only, no new code has been implemented.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
@@ -20,10 +20,10 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 2. `agent-search` is an independent CLI / socket request, with `--scope web|paper|all`, `--provider` and `--model`; no hidden LLM search fallback.
 3. Both search backends use the *existing exact* Web/Paper prompt grammars, parsers, dedup/merge, URL admission and JSONL row shapes.
 4. `fetch_llm` remains mandatory; `search_llm` and `search_agent` lists are independently optional.
-5. Only Antigravity is supported in v1, and it uses one non-interactive process per invocation with no resumed session.
+5. Only Antigravity is supported in v1, and it uses one non-interactive process per invocation with no resumed session. An omitted invocation model uses the user's saved Harness model; only an explicit configured model generates `--model`.
 6. Agent process cancellation, timeout, error envelope, bounded output and environment restrictions are deterministic and safe.
 7. Existing LLM API adapter moves directory without changing transport behavior.
-8. All normal CI and unit/acceptance tests run **without real network, tokens or a real Gemini session**.
+8. All normal CI and unit/acceptance tests run **without real network, tokens or a real Agent session**.
 
 ### 2. Test Layers and Ownership
 
@@ -93,7 +93,8 @@ Verify `send_request` chooses the longer Agent deadline only for an `AgentSearch
 |---|---|---|---|
 | Valid mandatory `fetch_llm`; no `search_llm` or `search_agent` | Success | `NO_LLM_SEARCH_PROVIDERS` | `NO_AGENT_SEARCH_PROVIDERS` |
 | Valid fetch; LLM search only | Success | Works | `NO_AGENT_SEARCH_PROVIDERS` |
-| Valid fetch; Agent search only | Success | `NO_LLM_SEARCH_PROVIDERS` | Works |
+| Valid fetch; Agent search only, model omitted | Success | `NO_LLM_SEARCH_PROVIDERS` | Works using the saved Harness model |
+| Valid fetch; Agent search only, explicit model | Success | `NO_LLM_SEARCH_PROVIDERS` | Works with the configured pin |
 | Valid fetch; both search lists | Success | Works | Works |
 | Missing/invalid mandatory fetch stages | Existing startup failure | N/A | N/A |
 | Invalid referenced Agent harness/config | `CONFIG_ERROR` | N/A | N/A |
@@ -107,7 +108,9 @@ Parameterize:
 - `search_agent.providers` absent, empty and invalid type.
 - Referenced alias absent from `agent_providers`; extra unreferenced provider.
 - Missing/empty/unknown `harness`, wrong `command` type, shell-looking command text disallowed.
-- Missing/empty model, duplicated provider/model entries (valid and **both must run**).
+- Omitted model is valid and becomes `None`; a nonempty explicit string is preserved. Empty/whitespace-only/non-string model values, including explicit `None` in raw resolver input, are invalid.
+- No fallback to `global_default_llm`, no Gateway reads of Antigravity settings and no model-discovery subprocess for omitted models.
+- Duplicated provider/model entries, including repeated default-model entries and a mix of default/pinned entries, remain valid and **all must run** in configured order.
 - `max_concurrency` zero, negative, bool, fractional; valid 1 or 2.
 - `timeout_seconds` invalid/nonfinite, zero, too high (more than 540), valid default and override.
 - `pass_env` invalid array/non-string/empty/invalid environment variable names, valid explicit name list.
@@ -116,6 +119,7 @@ Parameterize:
 #### 4.3 Runtime Assembly, Provider Independence and Registry Seam
 
 - No Agent config leaves existing runtime construction, HTTP clients and `LLMStages` call behavior intact.
+- Runtime passes `model=None` unchanged through stages to the CLI adapter; the executable fake CLI verifies that no `--model` argument is sent. A pinned-model variant verifies the exact supplied value.
 - Agent runtime builds a bound runner for each referenced `harness="antigravity"` alias, with its own quota. No `LLMClient.complete_json` is needed for an Agent.
 - Provider alias collision across LLM and Agent namespaces is allowed but selects the correct backend based on command.
 - Agent runner is not constructed as `OpenAIChatCompletionsClient` and does not modify its `_build_llm_clients()` behavior.
@@ -131,11 +135,11 @@ Use fake LLM clients and injected async Agent runners that record passed `(model
 
 - `LLMStages.agent_search_markdown` passes the **same message sequence** as `llm_search_messages(prompt)`.
 - `LLMStages.agent_paper_search_markdown` passes the **same message sequence** as `llm_paper_search_messages(prompt)`.
-- Model and provider alias are resolved from the Agent invocation, not the existing fetch/LLM invocation.
+- Model and provider alias come from the Agent invocation, not the existing fetch/LLM invocation. Parameterize both facade methods with `model=None` and an explicit string; `None` must reach the runner unchanged.
 - Agent facade returns runner Markdown unchanged except for existing whitespace/nonempty validation contract; it does not parse output itself.
 - Agent methods never call `LLMClient`; existing LLM methods never call an Agent runner.
 - Existing six `LLMStages` tests and logs stay unchanged.
-- Agent-specific logs do not emit `llm_stage_*` events or sensitive prompts.
+- Agent-specific logs do not emit `llm_stage_*` events or sensitive prompts. The default path passes `model=None` to structured logging (rendered `model=null`); the pinned path records only the configured string. Do not guess or discover an effective default.
 
 #### 5.2 Web Search Shared Orchestration
 
@@ -179,10 +183,11 @@ Assert both branches are **scheduled concurrently**. With Agent provider quota 2
 Mirror the existing `test_llm_provider_model_filtering.py` matrix but for `AgentInvocation`, covering all three scopes:
 
 - No selectors -> all configured Agent invocation entries.
-- Provider only -> all configured models for that alias.
-- Model only -> all configured aliases using that exact model string.
-- Both -> exact intersection.
-- Duplicate matching entries -> both executed, in configured order.
+- Provider only -> all entries for that alias, including default-model and pinned-model entries.
+- Model only -> all entries explicitly configured with that exact model string; default-model entries are excluded.
+- Both -> exact intersection of provider and explicit model.
+- A default-only alias plus an explicit model selector -> `BAD_REQUEST` with zero calls, even if the Harness's saved model would have the same name. Do not probe that default or turn the selector into an override.
+- Duplicate matching entries, including `(provider, None)` without a model selector -> both executed, in configured order.
 - Missing provider, missing model, both absent, provider/model mismatch -> exact `BAD_REQUEST`, **zero** runner calls, no file.
 - Empty Agent namespace -> `NO_AGENT_SEARCH_PROVIDERS` (even with invalid selector, same no-provider priority as existing LLM).
 - Selecting an LLM-only alias/model with `agent-search` -> no Agent match, **not** an LLM fallback.
@@ -202,7 +207,9 @@ Fake CLI writes terminal JSON:
 
 Assert:
 
-- Arguments include exactly one `-p` prompt, configured `--model`, `--output-format json` and an explicit bounded `--print-timeout`.
+- Both model paths include exactly one `-p` prompt, `--output-format json` and an explicit bounded `--print-timeout`.
+- `model=None` omits `--model` and its value entirely; an explicit model adds exactly one `--model` with the configured string. No empty/default sentinel is substituted.
+- Make the fake CLI reject `--model` in the default-model case and choose a fixture-specific saved-default marker when the flag is absent; assert that its real response reaches Gateway output. The fixture simulates default selection without reimplementing Antigravity settings or inspecting real user files.
 - Arguments contain **no** `--continue`, `--conversation`, `--dangerously-skip-permissions` or shell pipeline.
 - Prompt contains both the existing system instructions and the user research request, not provider-selector metadata.
 - Adapter returns the `response` field rather than JSON envelope or CLI stderr.
@@ -289,8 +296,8 @@ Update implementation-time README, `config.example.toml`, `CHANGELOG.md` and `do
 
 - Independent `agent-search` command and flags.
 - Mandatory fetch LLM versus optional search LLM / optional search Agent.
-- Agent provider alias vs Harness type and model selection.
-- Antigravity local `agy` install/login/config responsibility and `agy models` discovery.
+- Agent provider alias vs Harness type, optional model pins, and the distinction between Gateway's `--model` filter and Antigravity's `--model` execution argument.
+- Antigravity local `agy` install/login/default-model configuration responsibility; omitted model delegates to that configuration, while `agy models` is only operator guidance for an explicit pin. JSON output and bounded timeout remain explicit adapter choices.
 - Headless status/permission soft-denial, bounded execution, retained authentication caches/environment, and cwd/process constraints.
 - `agent-*.jsonl`, source `agent:<provider>`, and scope-all semantics.
 - No promise of guaranteed source verification, no automatic permission approval, no Agent session resume.
@@ -302,14 +309,14 @@ Only after explicit operator opt-in and with an authenticated local `agy`:
 ```bash
 agent-search-gateway start --debug
 agent-search-gateway agent-search "Find official documentation on Python asyncio cancellation" \
-  --provider antigravity_main --model <slug-from-agy-models> --scope web
+  --provider antigravity_main --scope web
 agent-search-gateway agent-search "Find academic papers on retrieval augmented generation" \
-  --provider antigravity_main --model <slug-from-agy-models> --scope paper
+  --provider antigravity_main --scope paper
 agent-search-gateway agent-search "Find papers and reference sites for agent tool safety" \
-  --provider antigravity_main --model <slug-from-agy-models> --scope all
+  --provider antigravity_main --scope all
 ```
 
-Replace placeholder slugs before running; these are examples, not verified commands against a live account. Inspect only the newly returned file paths via ordinary shell tooling because direct access to `~/.cache/agent-search-gateway-cli/` may be permission-restricted in this environment. Check valid outputs, source labels and lack of background/orphan processes. Do not automatically run live API tests as part of the design phase.
+First configure `antigravity_main` in `search_agent.providers` with `model` omitted and ensure a default model is saved in Antigravity; the commands above exercise that path. To test an explicit pin separately, set that entry's model to a verified slug, restart the daemon to load the changed Gateway config, and rerun a command with `--model <that-same-slug>` (replace the placeholder). The Gateway selector only selects the configured pin; it does not supply an unconfigured model. These are examples, not verified commands against a live account. Inspect only the newly returned file paths via ordinary shell tooling because direct access to `~/.cache/agent-search-gateway-cli/` may be permission-restricted in this environment. Check valid outputs, source labels and lack of background/orphan processes. Do not automatically run live API tests as part of the design phase.
 
 ### 9. Acceptance Gate
 
@@ -318,10 +325,11 @@ The feature is ready for implementation review only after all of the following a
 - Both old and new search commands can be exercised through real local socket acceptance tests.
 - Existing output bytes and error contracts remain unchanged.
 - Agent Web/Paper/All produce the documented JSONL rows with correct source attribution.
+- The default-model path works through config, runtime, stages, subprocess argv and socket acceptance without a model flag; the pinned-model path remains explicitly selectable. JSON output and timeout flags remain present in both.
 - No Agent calls occur for invalid/empty selectors or missing search Agent configuration.
 - No subprocess remains after timeout, cancellation or daemon stop.
 - No unrelated LLM/Web API credentials enter Agent subprocesses by default or appear in logs.
 - No real provider API or live Agent credentials are needed for the ordinary test suite.
 - Documentation and changelog capture the new public command and configuration surface.
 
-**The user reviewed and approved the three specs on 2026-10-22.**
+**The user reviewed and approved the three specs on 2026-10-22 and requested the optional-model revision on 2026-10-23.**

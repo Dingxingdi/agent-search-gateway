@@ -13,10 +13,11 @@
 ## 执行上下文
 
 - 工作树：`/home/agent/agent-search-gateway/.worktrees/agent-search-antigravity-design`。
-- 分支：`agent-search-antigravity-design`；编写时 HEAD：`96c0d3e`，代码基线：`fe72cc1`。
+- 分支：`agent-search-antigravity-design`；初次编写时 HEAD：`96c0d3e`，代码基线：`fe72cc1`；本次修订基于计划提交 `660f890`。
 - 全部相对路径和执行命令都以此工作树为根。行号是编写计划时的位置，实施时按同名符号定位。沿用该工作树。
 - 此文档是实现计划；下面的实现、测试及真实 Agent smoke 尚未执行。testing spec 记录的 `871 passed, 4 skipped`、lint/type-check 通过是前次讨论的历史基线，不是本次验证结果。
 - 按已批准设计，首版 Agent 边界是本地 `agy -p`，不引入远程 Agent API/SDK。计划产物完成自查后单独提交；具体功能实现属于后续工作。
+- 2026-10-23 用户要求修订：Agent invocation 的 `model` 可省略，缺省沿用用户在 Antigravity 中保存的模型；仅显式配置时传 `--model`。`--output-format json` 和显式 `--print-timeout` 保持。三份 spec 与本计划同步更新。
 
 ### 计划编写检查单
 
@@ -70,12 +71,12 @@ LLMSearchScope = SearchScope
 TextSearchKind = Literal["llm", "agent"]
 
 # frozen=True, slots=True
-AgentInvocation(provider: str, model: str)
+AgentInvocation(provider: str, model: str | None = None)
 AgentSearchRequest(prompt: str, scope: SearchScope = "web",
                    provider: str | None = None, model: str | None = None)
 
 # providers/contracts.py
-AgentTextRunner = Callable[[str, Sequence[ChatMessage]], Awaitable[str]]
+AgentTextRunner = Callable[[str | None, Sequence[ChatMessage]], Awaitable[str]]
 
 # config.py: frozen=True, slots=True; no credential values
 AgentProviderConfig(name: str, harness: str, command: str,
@@ -87,7 +88,7 @@ ResolvedAgentConfig(providers: tuple[AgentProviderConfig, ...] = (),
 
 # providers/agent/antigravity_cli.py
 async def run_antigravity(
-    model: str, messages: Sequence[ChatMessage], *,
+    model: str | None, messages: Sequence[ChatMessage], *,
     command: str, timeout_seconds: float, pass_env: Sequence[str],
     quota: CapacityGate,
 ) -> str: ...
@@ -123,6 +124,9 @@ async def send_request(socket_path: Path, request: Request, *,
 |---|---|
 | 校验顺序 | request ID → prompt → scope → 配置列表是否为空 → selector 空值/精确匹配 → 工作流 |
 | 配置隔离 | Agent 只解析 search_agent 中引用的 alias；不继承 global_default_llm / extra_body；未引用 alias 不可选 |
+| 默认模型 | Agent 配置省略 model → AgentInvocation.model=None；runtime/stages 原样传递；adapter 不传 --model，交给 agy 读取用户保存的默认配置 |
+| 显式模型 | 配置 model 存在时必须为非空字符串；只对此 invocation 传 --model；不读取/修改 Antigravity 设置，不解析或缓存实际默认模型 |
+| model 选择器 | Gateway 的 --model 仍是配置筛选器，仅匹配显式 model；未设 selector 则包含默认模型 entry；不把 selector 写入 entry 或作为缺省值 |
 | invocation 顺序 | tuple 保留配置顺序和重复条目；结果按配置顺序处理，不按完成先后 |
 | 每进程预算 | timeout_seconds 默认 300，有限正数且 ≤540；agy 收到相同秒数的 --print-timeout |
 | Python 硬期限 | 每进程配置预算 + 5 秒；此常量用于容纳 CLI 终态退出，不形成新的用户配置 |
@@ -131,12 +135,14 @@ async def send_request(socket_path: Path, request: Request, *,
 | Socket | Agent 默认 1,200 秒，其他请求默认 300 秒；显式数值 timeout 优先 |
 | 输出 | stdout ≤4 MiB，stderr ≤256 KiB；按 bytes 并行读取，超限拒绝，不能截断后当成功 |
 | 重试 | 不重试整个 Agent；配置的重复 invocation 是独立调用，不是 retry |
-| 成功 | 退出码 0 + UTF-8 单 JSON object + status=SUCCESS + 非空 string response，再交给现有 Markdown parser |
+| 成功 | 默认/显式模型路径均固定传 --output-format json；退出码 0 + UTF-8 单 JSON object + status=SUCCESS + 非空 string response，再交给现有 Markdown parser |
 | 数据副作用 | parser 完整成功后才交给 shared store；完整失败/请求超时不新建文件；沿用现有 URLStore admission 语义，不引入全请求 store rollback |
 | 取消 | CancelledError 清理后重抛，不转成普通 provider 失败或结果文件 |
 | source | parser 的默认 llm: 不变；Agent 是 agent:；academic 强身份/优先级规则保留 |
 
 “fetch_llm 仍必需”指四个 fetch invocation 必须按既有 stage → fetch_llm → global_default_llm 继承规则完整解析；不新增“必须显式写出四个表”的限制，也不取消现有合法继承。
+
+Agent 日志的 `model` 表示显式配置的 pin；未配置时传 `None`，由已有 formatter 输出 `model=null`，不声称知道实际默认模型。`AgentSearchRequest.model=None` 表示不按模型筛选，`AgentInvocation.model=None` 表示委托 Harness 选择模型，两者不得混同。`LLMInvocation.model` 和 `LLMClient` 仍要求字符串。
 
 固定诊断分类写入已有 `GatewayError.reason`，日志仅从 allowlist 取值：`spawn_failure`、`nonzero_exit`、`terminal_status_failure`、`invalid_json`、`empty_response`、`invalid_markdown`、`timeout`、`output_limit`、`cancelled`；意外错误可归入固定 `execution_failure`。不记录 prompt、messages、argv、完整 command/path、response、stderr、JSON error、环境变量值或异常原文。
 
@@ -171,8 +177,8 @@ uv sync --locked --group dev --group docs
 
 - [ ] **Step 1: Write the failing test**
 
-首个用例 `test_resolve_config_builds_independent_agent_invocations`：使用现有有效 fetch_llm 配置，加两个 Agent alias、三个调用（含重复 provider/model）；调用真实 resolve_config，断言 agent namespace 存在、字段/defaults 正确、tuple 顺序与重复项保留。
-随后逐个补充：完全无 Agent 配置、空 search_agent.providers、只有 LLM search、只有 Agent search、两者都有；同名 LLM/Agent alias 的配置互不覆盖。对四个 fetch 阶段及原 LLM extra_body 保持原断言。
+首个用例 `test_resolve_config_builds_independent_agent_invocations`：使用现有有效 fetch_llm 配置，加两个 Agent alias、四个调用（混合省略 model、显式 pin 和重复默认模型 entry）；调用真实 resolve_config，断言 agent namespace 存在、字段/defaults 正确、缺省 model 为 None、tuple 顺序与重复项保留。
+随后逐个补充：完全无 Agent 配置、空 search_agent.providers、只有 LLM search、只有 Agent search、两者都有；同名 LLM/Agent alias 的配置互不覆盖。新增 `test_agent_config_omitted_model_defers_to_harness`：省略 model 的 entry 不继承非空 global_default_llm.model，也不读取 Harness 设置或运行发现命令；显式 model 字符串保留原值。对四个 fetch 阶段及原 LLM extra_body 保持原断言。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -187,10 +193,12 @@ Expected: FAIL：resolve_config 尚未返回独立 agent namespace；不能是 f
 - [ ] **Step 3: Describe the minimal implementation**
 
 ```text
-在 models.py 新增 frozen AgentInvocation(provider, model)，并先定义 SearchScope，
+在 models.py 新增 frozen AgentInvocation(provider: str, model: str | None = None)，并先定义 SearchScope，
 将既有 LLMSearchScope 保留为其兼容 alias；后续 Task 11 即可使用该类型。
 在 config.py 新增 AgentProviderConfig 与默认空的 ResolvedAgentConfig。
 resolve_agent_config(data) 读取 search_agent.providers，按原序构造 AgentInvocation。
+每个 entry 必填 provider；仅当 "model" in entry 时调用 _required_string 校验并保留原值，否则 model=None。
+不读取 Antigravity settings，不调用 agy/models，不将 None 替换成 global_default_llm、空串或魔法 default 名称。
 从 agent_providers 中只解析被引用 alias，给 command/max_concurrency/timeout_seconds/pass_env 应用约定默认值。
 ResolvedConfig 最后增加默认空 agent 字段；resolve_config 保持原 llm/fetch 解析并填充 agent。
 errors.py 只新增 NO_AGENT_SEARCH_PROVIDERS = "no_agent_search_providers"。
@@ -233,8 +241,8 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - [ ] **Step 1: Write the failing test**
 
 首个用例 `test_agent_config_rejects_unknown_harness`：引用 alias 的 harness="unknown"，断言 ConfigFailure/CONFIG_ERROR。
-随后一次一个参数化行为：search_agent/providers/条目类型错误；缺/空 provider、model、harness；引用缺失；command 非字符串、空值、附带 flags、管道/重定向/控制字符；max_concurrency 为 0、负数、bool、fraction；timeout 为 bool、NaN、±inf、0、负数、>540；pass_env 非数组、非字符串、空/非法 env 名；Agent 配置中的不支持字段。
-有效边界覆盖 concurrency 1/2、timeout 0.5/300/540、显式 command 路径与 env 名列表；缺失的 pass_env 名没有值时允许省略。未引用 alias 不装配、不使其可选。四个 fetch invocation 无法按原继承规则完整解析时仍失败；原本合法的 global_default_llm fallback 保持可用。
+随后一次一个参数化行为：search_agent/providers/条目类型错误；缺/空 provider、harness；显式 model 为空/纯空白/非字符串（含原始 resolver 输入中的 None、bool、数字、列表）；引用缺失；command 非字符串、空值、附带 flags、管道/重定向/控制字符；max_concurrency 为 0、负数、bool、fraction；timeout 为 bool、NaN、±inf、0、负数、>540；pass_env 非数组、非字符串、空/非法 env 名；Agent 配置中的不支持字段。
+有效边界覆盖 model 完全省略、显式非空 model、concurrency 1/2、timeout 0.5/300/540、显式 command 路径与 env 名列表；缺失的 pass_env 名没有值时允许省略。未引用 alias 不装配、不使其可选。四个 fetch invocation 无法按原继承规则完整解析时仍失败；原本合法的 global_default_llm fallback 保持可用。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -251,6 +259,7 @@ Expected: FAIL：未拒绝不支持的 harness；其他错误矩阵逐个跑出�
 ```text
 Agent 顶层结构先校验类型；只验证 search_agent 引用的 provider 配置。
 harness 精确等于 antigravity；provider/model 不从 LLM 配置继承。
+区分 model key 缺失与显式非法值；缺失允许 None，显式存在但不是非空 string 一律 CONFIG_ERROR。
 command 接受不含空白的可执行名，或含路径分隔符的单个路径；完整路径中的普通空格允许。
 拒绝控制字符、shell 运算符/展开片段及附加 flags（例如 agy --flag、/opt/agy --flag、agy | tee）。
 路径整体仍是一个 argv 元素；绝不 shlex 拆分、不 expandvars、不通过执行文件做配置验证。
@@ -480,7 +489,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - [ ] **Step 1: Write the failing test**
 
 首个用例 `test_runner_spawns_one_fresh_process_and_returns_markdown`：测试 helper 在 tmp_path 写入带 sys.executable shebang 的可执行假 agy，运行真实 create_subprocess_exec，输出完整 SUCCESS envelope；真实 runner 返回其中 Markdown。
-假程序向专用测试控制目录记录 pid/cwd/argv（仅测试哨兵数据）。核对一个 -p 参数、原 system/user 文本、选中 model、--output-format json、--print-timeout "<配置秒数>s"。prompt 包含空格、引号、换行、分号和 shell 元字符时仍是单个 argv，外部 marker 不被执行创建。两次调用 pid/cwd 独立，退出后目录删除。无 session resume/自动批准 flags。
+假程序向专用测试控制目录记录 pid/cwd/argv（仅测试哨兵数据）。核对一个 -p 参数、原 system/user 文本、--output-format json、--print-timeout "<配置秒数>s"。默认模型路径新增 `test_runner_omits_model_flag_when_model_is_none`：假进程遇到 --model 即失败，缺省时返回 fixture 的默认模型标记，断言真实 response 正常返回且 argv 没有 --model/占位值。显式 pin 路径新增 `test_runner_passes_only_explicit_model`：恰好一组 --model 与原字符串；两个路径的 JSON/timeout flags 均保持。prompt 包含空格、引号、换行、分号和 shell 元字符时仍是单个 argv，外部 marker 不被执行创建。两次调用 pid/cwd 独立，退出后目录删除。无 session resume/自动批准 flags。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -500,8 +509,10 @@ async with quota.lease():
     为本次调用创建私有 TemporaryDirectory，默认权限沿用安全 stdlib 临时目录。
     将 messages 依原序序列化为明确 role 区块，例如 [SYSTEM] + 原内容、[USER] + 原内容；
     不改 prompt builders，也不混入 provider/model selector。
-    argv = [command, "-p", serialized_prompt, "--model", model,
+    argv = [command, "-p", serialized_prompt,
             "--output-format", "json", "--print-timeout", "<timeout_seconds:g>s"]。
+    if model is not None: argv.extend(["--model", model])。
+    model=None 时省略整组参数，不读取用户设置、不推断实际模型、不修改持久配置。
     await create_subprocess_exec(*argv, cwd=private_cwd, env=基础 allowlist,
                                  start_new_session=True, stdin=DEVNULL,
                                  stdout=PIPE, stderr=PIPE)。
@@ -568,7 +579,7 @@ XDG_STATE_HOME、XDG_RUNTIME_DIR、TMPDIR/TEMP/TMP、LANG/LANGUAGE/LC_ALL
 及明确列举的标准 LC_* locale 名称；不以任意前缀继承所有变量。
 追加 pass_env 中已存在的名称对应值。
 不复制整个 os.environ、不写回父环境、不将环境值放到 config repr/argv/日志。
-spawn 继续在新 cwd 中进行；不改 Harness 的 MCP/tools/permissions 配置。
+spawn 继续在新 cwd 中进行；保留 HOME/XDG 配置位置供 Harness 自己读取已保存的默认模型与认证，不改其 model/MCP/tools/permissions 配置。
 缺少认证时沿 provider failure 返回，不自动扩大 env 白名单或启动登录。
 ```
 
@@ -744,8 +755,8 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 - [ ] **Step 1: Write the failing test**
 
-首个用例 `test_agent_web_stage_uses_existing_prompt_messages`：注入记录参数的 async callable，调用 agent_search_markdown；断言 model 与完整 messages 精确等于现有 llm_search_messages(prompt)，返回既有 strip/nonempty 约定的文本。
-再添加 paper prompt equality、同名 Agent/LLM alias 分离、missing runner 安全失败、空文本拒绝、CancelledError 重抛。Agent 不调用 complete_text/complete_json，也不触发 llm_stage_*；六个旧方法继续只调用 LLMClient，错误和日志不变。
+首个用例 `test_agent_web_stage_uses_existing_prompt_messages`：注入记录参数的 async callable，调用 agent_search_markdown；断言 model 等于 invocation.model，完整 messages 精确等于现有 llm_search_messages(prompt)，返回既有 strip/nonempty 约定的文本。
+再添加 paper prompt equality；Web/Paper 两个 facade 均参数化 model=None 与显式字符串，断言原样传递，不用 fetch/LLM model 补值。另覆盖同名 Agent/LLM alias 分离、missing runner 安全失败、空文本拒绝、CancelledError 重抛。Agent 不调用 complete_text/complete_json，也不触发 llm_stage_*；六个旧方法继续只调用 LLMClient，错误和日志不变。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -763,7 +774,7 @@ Expected: FAIL：Agent facade 尚未存在/未把真实 prompt sequence 交给 c
 在 contracts.py 添加 AgentTextRunner 类型别名。
 LLMStages.__init__ 新增可选 keyword-only agent_runners，复制为独立 map。
 两个 Agent 方法按 invocation.provider 取 runner，使用原 web/paper prompt builder，
-await runner(invocation.model, messages)，仅做 string/nonempty/strip 校验后返回。
+await runner(invocation.model, messages)，model 可为 None；仅对返回文本做 string/nonempty/strip 校验后返回。
 missing runner/空 response 使用 Agent 的安全 ExecutionFailure，不借用 LLM_STAGE_FAILED。
 不调用 _run_text_stage（该 helper 固定发 llm_stage_*）；Agent provider 生命周期由 orchestrator 统一记录。
 facade 不知道 subprocess，不解析 Markdown，不接触 URLStore。
@@ -874,8 +885,9 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 - [ ] **Step 1: Write the failing test**
 
-首个用例 `test_agent_provider_filter_executes_only_matching_invocations`：多个 alias/model，选择一个 provider，实际输出与 runner 记录只包含其调用，后续无 selector 请求仍执行全部。
-逐个加入 model-only、intersection、精确大小写、重复 entry 两次执行、缺 provider/model/两者均缺/两者各自存在但组合不存在、显式空白 selectors、Agent 配置为空且 selectors 无效的优先级。
+首个用例 `test_agent_provider_filter_executes_only_matching_invocations`：多个 alias/model（包含 model=None 与显式 pin），选择一个 provider，实际输出与 runner 记录包含该 alias 的默认及显式模型 entry，后续无 selector 请求仍执行全部。
+逐个加入 model-only、intersection、精确大小写、重复 entry（含重复默认模型 entry）两次执行、缺 provider/model/两者均缺/两者各自存在但组合不存在、显式空白 selectors、Agent 配置为空且 selectors 无效的优先级。
+新增 `test_agent_model_filter_excludes_unpinned_invocations`：model selector 只匹配显式 model；default-only alias 即使 Harness 默认可能是该模型也 BAD_REQUEST、零调用；不做发现、不把 selector 注入 model=None entry。无 model selector 时 None entry 正常执行。
 选择 LLM-only 或仅在 agent_providers 声明但未列入 search_agent 的 alias 均 BAD_REQUEST，无调用/无文件/无 admission。保留非空服务端 selector 的精确字符串；trim 只由 CLI 做。
 补充直接调用 agent_search 的无效 request ID、空 prompt、非法 scope：零 runner 调用、无文件；空 prompt/非法 scope 优先于空 Agent 配置错误。
 先覆盖 web；Tasks 14-15 把同矩阵扩展到 paper/all。
@@ -898,6 +910,8 @@ _select_llm_invocations 传原 tuple/label="LLM"/NO_LLM_SEARCH_PROVIDERS；
 _select_agent_invocations 传 Agent tuple/label="Agent"/NO_AGENT_SEARCH_PROVIDERS。
 保留所有原 LLM 错误原文、验证优先级和 tuple identity/entry identity。
 Agent 错误原文使用 error spec 的五种精确 mismatch 消息。
+model selector 为 None 时不过滤模型，保留 default/pinned entries；selector 为字符串时仅 item.model == selector 的显式配置匹配。
+不把 AgentInvocation.model=None 当作 wildcard；不将请求 model 写入任何 invocation，也不调用 Harness 获得默认模型。
 所有选中 tuple 显式传入 records/pipeline；配置 tuple 不排序、不去重、不修改。
 每个请求单独筛选，异步并发请求不共享 selector 状态。
 无可用 Agent 配置先报 no-provider；CLI 显式空 selector 在 socket 前拒绝是另一层。
@@ -1197,7 +1211,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 - [ ] **Step 1: Write the failing test**
 
-首个用例 `test_runtime_agent_search_uses_configured_cli_without_llm_transport`：真实 resolve_config + Runtime.build，Agent command 指向假 CLI，HTTP transport 为离线 MockTransport；执行 Agent Web 后文件正确，搜索阶段没有 LLM HTTP 请求。
+首个用例 `test_runtime_agent_search_uses_configured_cli_without_llm_transport`：真实 resolve_config + Runtime.build，Agent command 指向假 CLI，search_agent entry 省略 model，HTTP transport 为离线 MockTransport；执行 Agent Web 后文件正确，实际进程 argv 无 --model，搜索阶段没有 LLM HTTP 请求。随后加入显式 pin 变体，断言 argv 精确传递该值；启动时不解析/缓存 Harness 默认模型。
 逐个覆盖多个 alias 的 command/timeout/pass_env 正确绑定（防闭包晚绑定）、重复 entry 共用 alias gate但独立执行、与 LLM alias 同名、只有 Agent search 但 fetch 有效、无 Agent config 的旧 runtime、未选择 alias 零执行、无 agy 安装也能 build。
 另设 retry.max_attempts=3 且假 Agent 非零退出，断言每个选中 entry 只启动一次，证明未套用 HTTP/LLM retry。
 验证 runtime.aclose 原 HTTP 资源只关闭一次；runner 不需要 aclose/持久会话；真实论文 priority 包含 academic、旧 llm、agent 且旧序不变。
@@ -1221,7 +1235,7 @@ ProviderQuotaManager 传 agent_limits={name:max_concurrency}。
     run_antigravity(model, messages, command=..., timeout_seconds=...,
                     pass_env=..., quota=quotas.get_agent(alias))。
 不启动 subprocess；不调用 models/login；未知 harness 用 ConfigFailure 防御性拒绝。
-LLMStages 传 agent_runners；SearchOrchestrator 传 agent_invocations。
+LLMStages 传 agent_runners；SearchOrchestrator 传 agent_invocations；model=None 原样经过绑定 callable 到 runner，不在 Runtime 补默认模型。
 共享 PaperAggregator priority = academic names + 原 llm:* + agent:*。
 _build_llm_clients 和 Runtime.aclose 保持 HTTP 所有权；active process 的清理归 runner task。
 无需新增通用 registry、AgentClient 类或为测试暴露 runtime 内部 maps。
@@ -1352,7 +1366,7 @@ Expected: FAIL：argparse 当前不识别 agent-search；将 SystemExit 以预�
 _request_from_args 新分支复用 prompt.strip 与 _normalize_selector；
 构造 AgentSearchRequest，不把调用改写为 llm-search。
 复用 run_command 的 socket/send、SuccessResponse/stdout、ErrorResponse/stderr 路径。
-README 增加独立章节及最小 agent-search 示例；
+README 增加独立章节及不带 --model 的最小 agent-search 示例；注明该 flag 是显式配置模型的筛选器，不会覆盖 Harness 默认设置；
 文档测试 regex/预期命令集合增加 agent-search，保留旧命令与旧选择器断言。
 完整配置/限制文档由 Task 23 补齐。
 ```
@@ -1463,7 +1477,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 新增 `test_agent_cli_socket_to_fake_cli_and_followup_fetch`：有效 TOML 经真实 resolve_config/Runtime.build；command 为假 agy；所有 HTTP 走 MockTransport；真实 CLI run_command → send_request → Unix socket → daemon → shared orchestrator → subprocess → parser/store/writer。
 断言 stdout 只有实际绝对 agent JSONL 路径，Web/Paper/All 三类 schema 正确、paper 来源为 agent:*。从结果取得 landing URL 后执行原 url-fetch，实际使用同一 store 和既有 fetch LLM 阶段；PDF-only URL 不能因 metadata 自动 admission。
-独立场景：选中 provider/model、不选调用未触发、重复 entry 独立、并发与后续无 selector 请求、部分成功、全失败没有新文件、只有 Agent search 的 runtime 仍需有效 fetch。
+首个验收使用省略 model 的 Agent entry，假 CLI 在收到 --model 时拒绝并在缺省时产出默认模型标记；断言标记出现在真实结果中，证明默认路径贯穿配置、socket、runtime 和 subprocess。独立场景覆盖显式 model 配置并用 provider/model 选择、default-only 配置加 model selector 无匹配且零 spawn、不选调用未触发、重复默认 entry 独立、并发与后续无 selector 请求、部分成功、全失败没有新文件、只有 Agent search 的 runtime 仍需有效 fetch。
 所有断言基于返回文件/HTTP边界/进程观察，不替换 parser、finalization、URLStore 或 writer。
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1526,7 +1540,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 首个用例 `test_agent_failure_logs_allowlisted_reason_without_payload`：真实失败 runner（stderr、JSON error、prompt、response、env 值各含不同哨兵）经共享搜索路径触发 provider_failed；断言 provider/model/stage/elapsed_ms 和固定 reason 完整，全部哨兵不出现在 DEBUG/stderr/用户错误中。
 分别覆盖成功、invalid_json、nonzero_exit、terminal_status_failure、invalid_markdown、timeout、output_limit、取消、未知 RuntimeError、恶意 reason 值；Agent 两个 stage 名分别正确，没有 llm_stage_*。
-补充 doctor：有效 Agent config + 不存在 command 仍只进行本地检查；无效 Agent TOML 返回 configuration invalid；用失败哨兵禁止 subprocess/HTTP/远程模型发现。既有 LLM事件精确 assertions 不变。
+默认模型路径的 Agent 事件传入 model=None，断言已有 formatter 输出 model=null；显式 pin 记录配置值，不读取/伪造实际默认模型。补充 doctor：省略 model 的有效 Agent config + 不存在 command 仍只进行本地检查；显式 model 空白/错误类型等无效 Agent TOML 返回 configuration invalid；用失败哨兵禁止 subprocess/HTTP/远程模型发现。既有 LLM事件精确 assertions 不变。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1542,7 +1556,7 @@ Expected: FAIL：共享日志尚未记录完整 Agent reason/model，或意外�
 
 ```text
 Agent provider_started/completed/failed 在 shared pipeline 发出，
-stage 仅 agent_search 或 agent_paper_search；使用 invocation.provider/model 和 monotonic elapsed。
+stage 仅 agent_search 或 agent_paper_search；使用 invocation.provider/model 和 monotonic elapsed；model=None 由现有 formatter 渲染 null，不新建默认名称或模型发现逻辑。
 从 GatewayError.reason 的固定 allowlist 取失败分类；ParserFailure -> invalid_markdown；
 未知异常/非白名单 reason -> execution_failure；取消记录固定 cancelled 后重抛。
 不打印 exc/str(exc)/repr(exc)/args/traceback payload，也不转存 CLI metadata。
@@ -1590,7 +1604,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 
 - [ ] **Step 1: Write the failing test**
 
-首个用例 `test_agent_example_config_matches_documented_command`：load_toml(config.example.toml) 经真实 resolve_config + stub LLM secrets，断言合法的 antigravity_main 配置和显式 Agent invocation；README 中独立 Agent 示例经 build_parser 产生对应 request参数；不运行 agy 或解析实时模型列表。
+首个用例 `test_agent_example_config_matches_documented_command`：load_toml(config.example.toml) 经真实 resolve_config + stub LLM secrets，断言合法的 antigravity_main 配置和 model=None 的 Agent invocation；再为同一 entry 填入显式 model 验证 pin 路径。README 默认示例不带 --model，pin 示例须说明先配置同名 model，再通过 build_parser 产生对应 request 参数；不运行 agy 或解析实时模型列表。
 再验证公共 policy 与 Unreleased 覆盖 agent-search、scope/provider/model、agent-*、agent: provenance，以及 fetch mandatory/search optional。保留原命令/配置/LLM示例 assertions，不用宽松 substring 替代原明确命令集合。
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1610,14 +1624,16 @@ README/示例配置写清：
     agent_providers alias 与 harness="antigravity" 的区别；独立 search_agent.providers；
     command/max_concurrency/timeout_seconds/pass_env 类型、默认值和限制；
     fetch_llm 四阶段仍必需，search_llm/search_agent 可独立为空；
-    agy 由用户安装/登录/配置，model 要从安装版本的 agy models 选择，示例 slug 不是可用性保证；
+    agy 由用户安装/登录/配置默认模型；search_agent 的 model 可省略，不从 LLM 继承；
+    需要固定模型时才配置非空 model，并由用户从安装版本的 agy models 选择，示例 slug 不是可用性保证；
+    Gateway 的 --model 只筛选显式配置项，不覆盖缺省 entry；默认/显式两路径均传 JSON 输出和显式 timeout；
     Web/Paper/All 命令、精确 selectors、无匹配不 fallback、重复 entry 独立执行；
     agent 文件名与 schema、source agent:、mixed顺序、空成功/部分成功；
     一次调用新会话、all两次调用可能排队、三层deadline、输出上限、无整Agent retry；
     exit 0/soft-denial 不证明工具执行；无源访问保证；
     不自动批准权限、不管理 Harness tools/MCP；
     argv -p 的本地可见性、临时 cwd 和 env allowlist 的局限（不是 sandbox）。
-在 config.example 给出合法可解析的 Agent 示例；注释指出未配置/清空 search_agent 可关闭 Agent 搜索。
+在 config.example 给出省略 model 的合法可解析 Agent 示例，把可选 model pin 写成注释；不要为演示两种模式默认添加第二个 invocation 而意外执行两次。注释指出未配置/清空 search_agent 可关闭 Agent 搜索。
 public-interface 将新 CLI/TOML/JSONL 纳入现有公共合约，内部 Python/socket 仍非稳定 SDK。
 CHANGELOG 的 Unreleased/Added 记录功能；不变更版本号。
 保持自动测试离线；真实 smoke 仅在后续已有明确运行授权时执行。
@@ -1665,17 +1681,17 @@ uv run python scripts/build_docs.py
 
 仅在后续实施阶段已有真实运行授权、且操作者已安装并认证 agy 时进行下列 smoke。本次计划编写不运行它们：
 
-1. 用安装版本的 `agy --help`、`agy models` 确认可用命令与实际模型 slug；不改 Harness 权限或 MCP/tool 配置。
-2. 在有效 mandatory fetch_llm 配置中，加入 spec 对应 Agent alias 和所选模型。
+1. 用安装版本的 `agy --help` 确认可用参数，并确认用户已在 Antigravity 保存默认模型；不改 Harness 权限或 MCP/tool 配置。只有测试显式 pin 时才需用 `agy models` 确认实际 slug。
+2. 在有效 mandatory fetch_llm 配置中，加入 spec 对应 Agent alias，先省略 search_agent entry 的 model。
 3. 在单独终端运行 `agent-search-gateway start --debug`；另一终端分别运行：
 
 ```bash
-agent-search-gateway agent-search "Find official documentation on Python asyncio cancellation" --provider antigravity_main --model "<actual-model-slug>" --scope web
-agent-search-gateway agent-search "Find academic papers on retrieval augmented generation" --provider antigravity_main --model "<actual-model-slug>" --scope paper
-agent-search-gateway agent-search "Find papers and reference sites for agent tool safety" --provider antigravity_main --model "<actual-model-slug>" --scope all
+agent-search-gateway agent-search "Find official documentation on Python asyncio cancellation" --provider antigravity_main --scope web
+agent-search-gateway agent-search "Find academic papers on retrieval augmented generation" --provider antigravity_main --scope paper
+agent-search-gateway agent-search "Find papers and reference sites for agent tool safety" --provider antigravity_main --scope all
 ```
 
-先替换 placeholder，且 provider/model 必须与 search_agent 中的 entry 一致。这些是待执行示例，不是本次已验证的账户/模型事实。
+上述三条先验证默认模型路径。再把同一 entry 的 model 显式设为已核实的 slug，按现有流程重启 daemon 使新配置生效，单独执行 `agent-search-gateway agent-search "Find official documentation on Python asyncio cancellation" --provider antigravity_main --model "<actual-model-slug>" --scope web`；替换 placeholder，且 selector 必须与配置值一致。不得靠该 flag 为未配置 model 的 entry 临时注入模型。这些是待执行示例，不是本次已验证的账户/模型事实。
 
 只检查新返回的结果文件；按当前环境约束可通过 bash 读取 `~/.cache/agent-search-gateway-cli/` 下这些明确路径。确认 Web 两键、Paper agent:* 来源、mixed type/顺序；任选 admitted landing URL 验证原 url-fetch。以 `stop` 和一个有界取消场景检查无存活 Agent 进程，不输出认证值或原始 transcript。记录 soft-denial 时只说明终态/格式结果，不能据 SUCCESS 推断工具或源访问真实发生。
 
@@ -1686,6 +1702,9 @@ agent-search-gateway agent-search "Find papers and reference sites for agent too
 | Architecture §1：仅 Antigravity、最小改动、既有 fetch 必需 | 1-2、5-10、17、23 |
 | Architecture §2-3：一个 SearchOrchestrator，共享文本搜索，保留 LLMStages | 10-16；旧 LLM scope/selector/bytes 回归 |
 | Agent/LLM 独立配置，缺省可空，同名 alias 无冲突 | 1-2、12、17 |
+| Agent model 可省略，None 贯穿类型边界，省略 --model；显式 pin 精确传递 | 1-2、6、10、17、21-23 |
+| 模型筛选排除默认 entry，provider-only/无 selector 保留；不探测/覆盖 Harness 默认 | 12、14-15、17、21-23 |
+| 两种模型路径均保留 JSON 输出及显式 CLI timeout，日志默认 model=null | 6、8、22-23 |
 | 单请求 selectors 精确匹配、错误优先级、无隐式 fallback | 12、14-15、18-21 |
 | 保留重复 invocation 与配置顺序 | 1、11-12、14-15、17、21 |
 | 六个既有 LLMStages 方法及 llm_stage_* 保持 | 10-12、14-15、22 |
@@ -1717,10 +1736,10 @@ agent-search-gateway agent-search "Find papers and reference sites for agent too
 
 | 接缝 | 唯一约定 |
 |---|---|
-| config → runtime → stages → runner | AgentInvocation(provider, model)；AgentProviderConfig.timeout_seconds；AgentTextRunner(model, messages) -> Awaitable[str] |
+| config → runtime → stages → runner | AgentInvocation(provider, model: str \| None = None)；AgentProviderConfig.timeout_seconds；AgentTextRunner(model: str \| None, messages) -> Awaitable[str]；None 原样传递 |
 | runtime → runner 配置绑定 | command/timeout_seconds/pass_env/quota 为 keyword-only；alias gate 在绑定时确定 |
 | request → codec → CLI → daemon → orchestrator | AgentSearchRequest(prompt, scope, provider, model)；wire type agent_search；method agent_search(..., request_id=...) |
-| old LLM scope | LLMSearchScope 保留兼容 alias；LLMInvocation 的 extra_body 不丢失 |
+| old LLM scope | LLMSearchScope 保留兼容 alias；LLMInvocation 的 model 仍为必需 str，extra_body 不丢失 |
 | shared helper | typed tuple + 对应同类型 generator；不用 Agent/LLM union 的强转代替类型配对 |
 | parser → aggregator | source_kind="agent" 显式传递；默认 llm；完整 agent:<alias> 参与 sources/citation_counts |
 | writer → request registry | ResultKind 四种；PaperResultKind 三种；mixed 的 TextSearchKind 默认 llm |
@@ -1732,10 +1751,12 @@ agent-search-gateway agent-search "Find papers and reference sites for agent too
 
 实现交付必须满足：所有任务复选框都有对应实际验证；三份 spec 的上述映射无遗漏；旧命令/错误/JSONL 字节不回归；新的 Agent Web/Paper/All 可经过真实本地 socket 离线验收；异常和 shutdown 后没有存活 subprocess；普通测试不依赖真实 Agent 账户；公共文档与配置可实际解析。
 
-### 计划自查结果（2026-10-22）
+### 计划自查结果（初版 2026-10-22；修订 2026-10-23）
 
 已逐节对照 Architecture §1-7、Error handling §1-7、Testing §1-9，覆盖映射中没有待补的实现要求。已核对文件路径、任务依赖、类型名、callable 参数、source_kind 默认值、writer kind 和三层 timeout。
 
 自查修正：把 SearchScope/LLMSearchScope alias 的定义提前到 Task 1；明确 fetch 必需不改变既有配置继承；固定 command 单 argv 校验及终态 status/response 顺序；补齐直接调用输入优先级和整 Agent 不重试测试。接口目录使用伪代码签名标记，避免被误当成可直接执行的完整 Python。
 
-保存内容已回读核对。23 个实现任务及其 115 个执行步骤仍保持未完成；本次仅完成计划编写与审查，未执行功能实现、测试套件或真实 Agent smoke。
+2026-10-23 修订自查：同步三份 spec 与 Tasks 1-2、6-7、10、12、17、19、21-23；补齐省略/显式非法 model 的区别、optional callable 类型、条件 argv、默认/显式模型端到端验收、model=null 日志及默认 smoke 示例。Gateway 的 --model 筛选语义、JSON envelope 和三层 timeout 保持不变。
+
+23 个实现任务及其 115 个执行步骤仍保持未完成；本次仅修订计划与 spec，未执行功能实现、测试套件或真实 Agent smoke。
