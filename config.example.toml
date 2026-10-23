@@ -203,6 +203,23 @@ extra_body = {}
 [fetch_llm.focus_summary]
 extra_body = {}
 
+# Agent and LLM search are independent; all four fetch_llm stages must still resolve.
+# Install/authenticate agy and select its saved default model before using Agent search.
+[agent_providers.antigravity_main]
+harness = "antigravity"
+command = "agy"           # One executable name/path, not a shell command with flags.
+max_concurrency = 1       # Positive integer, shared by this alias's invocations.
+timeout_seconds = 300     # Positive finite number, at most 540.
+pass_env = []             # Additional environment-variable names only.
+
+# Omit this search_agent section, or replace it with [search_agent] providers = [],
+# to disable Agent search. Do not add a second entry just to demonstrate pinning.
+[[search_agent.providers]]
+provider = "antigravity_main"
+# Omit model to use the Harness default; it never inherits global_default_llm.
+# model = "MODEL"         # Optional exact slug from your installed agy models.
+# Gateway --model filters configured entries; it cannot override an omitted model.
+
 [retry]
 max_attempts = 3
 base_delay_seconds = 0.25

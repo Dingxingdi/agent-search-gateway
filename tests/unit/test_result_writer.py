@@ -147,3 +147,51 @@ def test_paper_writer_validates_all_records_before_creating_target(tmp_path: Pat
         with pytest.raises(ValueError):
             writer.write_paper_results("paper", [invalid], request_id=request_id)
         assert not (tmp_path / f"paper-{request_id}.jsonl").exists()
+
+
+def test_agent_writers_preserve_existing_row_bytes_and_mixed_default(tmp_path: Path) -> None:
+    writer = ResultWriter(tmp_path)
+    web = [SearchRecord(normalize_url("https://example.test/web"), "Résumé")]
+    papers = [_paper(sources=("agent:primary",))]
+    agent = writer.write_results("agent", web, request_id="11111111")
+    old = writer.write_results("llm", web, request_id="11111111")
+    assert agent.is_absolute()
+    assert agent.name == "agent-11111111.jsonl"
+    assert agent.read_bytes() == old.read_bytes()
+    agent_paper = writer.write_paper_results("agent", papers, request_id="22222222")
+    old_paper = writer.write_paper_results("llm", papers, request_id="22222222")
+    assert agent_paper.read_bytes() == old_paper.read_bytes()
+    assert "type" not in json.loads(agent_paper.read_text())
+    agent_mixed = writer.write_mixed_results(web, papers, request_id="33333333", kind="agent")
+    old_mixed = writer.write_mixed_results(web, papers, request_id="33333333")
+    assert old_mixed.name == "llm-33333333.jsonl"
+    assert agent_mixed.name == "agent-33333333.jsonl"
+    assert agent_mixed.read_bytes() == old_mixed.read_bytes()
+    assert [json.loads(row)["type"] for row in agent_mixed.read_text().splitlines()] == [
+        "web",
+        "paper",
+    ]
+    with pytest.raises(FileExistsError):
+        writer.write_results("agent", [], request_id="11111111")
+    assert agent.read_bytes() == old.read_bytes()
+
+
+def test_agent_serialization_and_partial_write_leave_no_file(tmp_path: Path) -> None:
+    from collections.abc import Iterator
+
+    writer = ResultWriter(tmp_path)
+    with pytest.raises(ValueError):
+        writer.write_results(
+            "agent",
+            [SearchRecord(normalize_url("https://example.test"), "")],
+            request_id="11111111",
+        )
+    assert not (tmp_path / "agent-11111111.jsonl").exists()
+
+    def broken_rows() -> Iterator[str]:
+        yield "one valid row"
+        raise OSError("simulated write failure")
+
+    with pytest.raises(OSError):
+        writer._write_serialized("agent-22222222.jsonl", broken_rows())
+    assert not (tmp_path / "agent-22222222.jsonl").exists()

@@ -13,6 +13,7 @@ from .daemon import ForegroundDaemon
 from .doctor import DoctorReport, render_doctor, run_doctor
 from .errors import DaemonUnavailable, ErrorCode, GatewayError, InputFailure
 from .models import (
+    AgentSearchRequest,
     ErrorResponse,
     KeywordSearchRequest,
     LLMSearchRequest,
@@ -70,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     llm.add_argument("--model", metavar="NAME", help="Select an exact configured search model")
 
+    agent = subparsers.add_parser("agent-search")
+    agent.add_argument("prompt")
+    agent.add_argument("--scope", choices=("web", "paper", "all"), default="web")
+    agent.add_argument("--provider", metavar="NAME", help="Select a configured search Agent alias")
+    agent.add_argument(
+        "--model", metavar="NAME", help="Filter an explicitly configured Agent model"
+    )
+
     fetch = subparsers.add_parser("url-fetch")
     fetch.add_argument("url")
     fetch.add_argument("focus", nargs="?")
@@ -103,6 +112,16 @@ def _request_from_args(args: argparse.Namespace) -> Request:
         if not prompt:
             raise InputFailure(ErrorCode.EMPTY_QUERY, "Prompt must not be empty")
         return LLMSearchRequest(
+            prompt,
+            args.scope,
+            provider=_normalize_selector(args.provider, "Provider"),
+            model=_normalize_selector(args.model, "Model"),
+        )
+    if args.command == "agent-search":
+        prompt = args.prompt.strip()
+        if not prompt:
+            raise InputFailure(ErrorCode.EMPTY_QUERY, "Prompt must not be empty")
+        return AgentSearchRequest(
             prompt,
             args.scope,
             provider=_normalize_selector(args.provider, "Provider"),

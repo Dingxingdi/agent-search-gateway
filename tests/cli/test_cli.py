@@ -95,6 +95,8 @@ async def test_llm_cli_selector_combinations(
         ("paper-search", "--provider", "Provider must not be empty"),
         ("llm-search", "--provider", "Provider must not be empty"),
         ("llm-search", "--model", "Model must not be empty"),
+        ("agent-search", "--provider", "Provider must not be empty"),
+        ("agent-search", "--model", "Model must not be empty"),
     ],
 )
 @pytest.mark.parametrize("blank", ["", "   ", "\t"])
@@ -109,9 +111,11 @@ async def test_cli_rejects_blank_selector_before_socket(
     )
 
 
-@pytest.mark.parametrize("command", ["keyword-search", "paper-search", "llm-search"])
+@pytest.mark.parametrize(
+    "command", ["keyword-search", "paper-search", "llm-search", "agent-search"]
+)
 async def test_empty_query_precedes_empty_selector(tmp_path: Path, command: str) -> None:
-    message = "Prompt" if command == "llm-search" else "Query"
+    message = "Prompt" if command in {"llm-search", "agent-search"} else "Query"
     assert await _invoke_selector_cli(tmp_path, [command, " ", "--provider", " "]) == (
         1,
         "",
@@ -139,6 +143,68 @@ def test_selectors_are_not_global_cli_flags(argv: list[str]) -> None:
     with pytest.raises(SystemExit) as error:
         build_parser().parse_args(argv)
     assert error.value.code == 2
+
+
+async def test_agent_cli_builds_independent_request(tmp_path: Path) -> None:
+    try:
+        result = await _invoke_selector_cli(tmp_path, ["agent-search", "  topic  "])
+    except SystemExit:
+        pytest.fail("agent-search must be registered in the CLI")
+    from agent_search_gateway.models import AgentSearchRequest
+
+    assert result == (0, "/tmp/result.jsonl\n", "", [AgentSearchRequest("topic")])
+
+
+@pytest.mark.parametrize("scope", ["web", "paper", "all"])
+@pytest.mark.parametrize("provider", [None, "  AgY  "])
+@pytest.mark.parametrize("model", [None, "  Pinned-Model  "])
+async def test_agent_cli_selector_combinations(
+    tmp_path: Path,
+    scope: str,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    from agent_search_gateway.models import AgentSearchRequest
+
+    argv = ["agent-search", "  topic  ", "--scope", scope]
+    if provider is not None:
+        argv += ["--provider", provider]
+    if model is not None:
+        argv += ["--model", model]
+    code, stdout, stderr, calls = await _invoke_selector_cli(tmp_path, argv)
+    assert (code, stdout, stderr) == (0, "/tmp/result.jsonl\n", "")
+    [request] = calls
+    assert isinstance(request, AgentSearchRequest)
+    assert (request.prompt, request.scope) == ("topic", scope)
+    assert request.provider == (provider.strip() if provider is not None else None)
+    assert request.model == (model.strip() if model is not None else None)
+
+
+async def test_agent_cli_reports_daemon_failure_on_stderr(tmp_path: Path) -> None:
+    async def client(path: Path, request: Request) -> Response:
+        return ErrorResponse(
+            ErrorCode.NO_AGENT_SEARCH_PROVIDERS, "No Agent search providers are configured"
+        )
+
+    out, err = StringIO(), StringIO()
+    code = await run_command(
+        build_parser().parse_args(["agent-search", "q"]),
+        RuntimePaths.from_home(tmp_path),
+        client=client,
+        stdout=out,
+        stderr=err,
+    )
+    assert (code, out.getvalue(), err.getvalue()) == (
+        1,
+        "",
+        "No Agent search providers are configured\n",
+    )
+
+
+def test_agent_cli_rejects_invalid_scope() -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(["agent-search", "q", "--scope", "invalid"])
+    assert caught.value.code == 2
 
 
 class _FakeDaemon:

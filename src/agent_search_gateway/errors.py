@@ -10,6 +10,7 @@ class ErrorCode(StrEnum):
     URL_NOT_ADMITTED = "url_not_admitted"
     NO_KEYWORD_SEARCH_PROVIDERS = "no_keyword_search_providers"
     NO_LLM_SEARCH_PROVIDERS = "no_llm_search_providers"
+    NO_AGENT_SEARCH_PROVIDERS = "no_agent_search_providers"
     NO_URL_FETCH_PROVIDERS = "no_url_fetch_providers"
     NO_ACADEMIC_SEARCH_PROVIDERS = "no_academic_search_providers"
     ALL_PROVIDERS_FAILED = "all_providers_failed"

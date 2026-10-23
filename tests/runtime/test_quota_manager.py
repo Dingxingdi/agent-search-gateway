@@ -147,3 +147,38 @@ def test_omitted_academic_limits_preserve_existing_constructor_behavior() -> Non
         pass
     else:
         raise AssertionError("missing academic quota must not be synthesized")
+
+
+async def test_agent_quota_is_independent_of_same_named_llm_quota() -> None:
+    assert hasattr(ProviderQuotaManager, "get_agent"), "Agent requires its own quota namespace"
+    quotas = ProviderQuotaManager(web_limits={}, llm_limits={"same": 1}, agent_limits={"same": 1})
+    gate = quotas.get_agent("same")
+    async with gate.lease(), asyncio.timeout(1), quotas.get_llm("same").lease():
+        assert gate.in_use == 1
+        assert quotas.get_llm("same").in_use == 1
+    assert gate.in_use == 0
+
+
+async def test_agent_quota_waiter_cancellation_and_release() -> None:
+    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, agent_limits={"a": 1, "b": 2})
+    gate = quotas.get_agent("a")
+    attempted, entered = asyncio.Event(), asyncio.Event()
+
+    async def waiter() -> None:
+        attempted.set()
+        async with gate.lease():
+            entered.set()
+
+    async with gate.lease():
+        waiting = asyncio.create_task(waiter())
+        await attempted.wait()
+        assert not entered.is_set()
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
+        assert gate.in_use == 1
+    async with asyncio.timeout(1):
+        await waiter()
+    assert entered.is_set()
+    assert gate.in_use == 0
+    async with quotas.get_agent("b").lease(), quotas.get_agent("b").lease():
+        assert quotas.get_agent("b").in_use == 2

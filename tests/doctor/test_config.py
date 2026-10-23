@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from agent_search_gateway.doctor import DoctorStatus, run_doctor
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.socket_probe import SocketProbeResult, SocketState
@@ -61,4 +63,25 @@ async def test_doctor_surfaces_real_config_resolution_failure_safely(tmp_path: P
     assert report.exit_code == 1
     assert report.checks[0].status is DoctorStatus.FAIL
     assert environment_name() in report.checks[0].message
+    assert "configuration invalid" in report.checks[0].message
+
+
+@pytest.mark.parametrize(
+    "model_line", ['model = ""', 'model = " "', "model = 7", "model = []", "extra_body = {}"]
+)
+async def test_doctor_reports_invalid_agent_configuration(tmp_path: Path, model_line: str) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    with paths.config_file.open("a") as target:
+        target.write(
+            '[agent_providers.local]\nharness = "antigravity"\n'
+            '[[search_agent.providers]]\nprovider = "local"\n' + model_line + "\n"
+        )
+    report = await run_doctor(
+        paths,
+        environ={environment_name(): "[REDACTED_SECRET]"},
+        socket_probe=_missing_socket,
+    )
+    assert report.exit_code == 1
+    assert report.checks[0].status is DoctorStatus.FAIL
     assert "configuration invalid" in report.checks[0].message

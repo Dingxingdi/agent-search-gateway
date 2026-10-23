@@ -122,3 +122,49 @@ async def test_socket_client_rejects_malformed_response(tmp_path: Path, response
 async def test_socket_client_distinguishes_missing_daemon(tmp_path: Path) -> None:
     with pytest.raises(DaemonUnavailable):
         await send_request(tmp_path / "missing.sock", KeywordSearchRequest("hello"))
+
+
+@pytest.mark.parametrize("kind", ["agent", "llm", "keyword", "paper", "fetch", "shutdown"])
+@pytest.mark.parametrize("override", [None, 0.01, 42.0])
+async def test_socket_timeout_depends_on_request_type_and_honors_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    override: float | None,
+) -> None:
+    from collections.abc import Awaitable
+
+    from agent_search_gateway.models import (
+        AgentSearchRequest,
+        LLMSearchRequest,
+        PaperSearchRequest,
+        Request,
+        ShutdownRequest,
+        URLFetchRequest,
+    )
+
+    requests: dict[str, Request] = {
+        "agent": AgentSearchRequest("q"),
+        "llm": LLMSearchRequest("q"),
+        "keyword": KeywordSearchRequest("q"),
+        "paper": PaperSearchRequest("q"),
+        "fetch": URLFetchRequest("https://example.test"),
+        "shutdown": ShutdownRequest(),
+    }
+    seen: list[float | None] = []
+
+    async def recording_wait_for(awaitable: Awaitable[bytes], timeout: float | None) -> bytes:
+        seen.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
+    path = tmp_path / "timeout.sock"
+    server = await _run_server(path, encode_response(SuccessResponse("ok")), [])
+    try:
+        assert await send_request(
+            path, requests[kind], response_timeout_seconds=override
+        ) == SuccessResponse("ok")
+    finally:
+        server.close()
+        await server.wait_closed()
+    assert seen == [override if override is not None else (1200.0 if kind == "agent" else 300.0)]

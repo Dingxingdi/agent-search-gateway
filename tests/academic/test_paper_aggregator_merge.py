@@ -160,3 +160,42 @@ def test_optional_malformed_metadata_does_not_overwrite_valid_values_or_invent_d
     assert record.published_date is None
     assert record.updated_date is None
     assert record.citation_counts == {"openalex": 4}
+
+
+def test_agent_and_llm_generated_sources_keep_academic_precedence_and_priorities() -> None:
+    hits = [
+        PaperSearchHit(
+            source=source,
+            source_id="record",
+            title=source,
+            abstract=source,
+            doi=DOI,
+            url=f"https://example.test/{index}",
+            citation_count=index,
+        )
+        for index, source in enumerate(("agent:a", "llm:l", "academic"))
+    ]
+    aggregator = PaperAggregator(("agent:a", "llm:l", "academic"))
+    for ordered in permutations(hits):
+        record = aggregator.aggregate(ordered)[0]
+        assert record.title == record.abstract == "academic"
+        assert record.sources == ("academic", "agent:a", "llm:l")
+        assert record.citation_counts == {"academic": 2, "agent:a": 0, "llm:l": 1}
+    record = PaperAggregator(("llm:l",)).aggregate(hits[:2])[0]
+    assert record.title == "llm:l"
+    assert record.sources == ("llm:l", "agent:a")
+
+
+def test_agent_native_source_ids_remain_namespaced() -> None:
+    hits = [
+        PaperSearchHit(
+            source=source,
+            source_id="same-native-id",
+            title="Paper",
+            url="https://example.test/paper",
+        )
+        for source in ("agent:a", "agent:b", "llm:a")
+    ]
+    records = PaperAggregator(("llm:a", "agent:a", "agent:b")).aggregate(hits)
+    assert len(records) == 3
+    assert [record.sources for record in records] == [("llm:a",), ("agent:a",), ("agent:b",)]

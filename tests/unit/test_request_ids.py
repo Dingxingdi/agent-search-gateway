@@ -143,3 +143,15 @@ def test_result_filename_is_exact_and_validated() -> None:
         result_filename("other", "11111111")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="request ID"):
         result_filename("keyword", "bad")
+
+
+def test_agent_result_filename_uses_request_id() -> None:
+    assert result_filename("agent", "a1b2c3d4") == "agent-a1b2c3d4.jsonl"
+
+
+def test_agent_result_collision_reserves_a_new_id(tmp_path: Path) -> None:
+    (tmp_path / "agent-33333333.jsonl").write_text("existing\n", encoding="utf-8")
+    values = iter(["33333333", "44444444"])
+    registry = RequestIdRegistry(tmp_path, factory=values.__next__)
+    with registry.reserve(may_write_search_result=True) as request_id:
+        assert request_id == "44444444"

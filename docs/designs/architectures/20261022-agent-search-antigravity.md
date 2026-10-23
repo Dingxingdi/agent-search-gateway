@@ -1,6 +1,6 @@
 ## Architecture: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; implementation not started.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live timeout/cancellation cleanup verified; successful live retrieval remains unverified because the installed Harness did not return. See the implementation plan's execution evidence.
 **Date:** 2026-10-22
 **Last revised:** 2026-10-23
 **Base revision:** `fe72cc1` (`main`).
@@ -25,7 +25,7 @@
 - Calling Gateway web providers from the Harness; managing the Harness's MCP, browser, tools, permissions or conversation history.
 - Replacing the strict Markdown grammar with JSON, fetching/verifying every Agent result URL, changing JSONL row schemas, or making the four `fetch_llm` stages optional.
 
-#### Assumptions (Verified Against Source)
+#### Baseline Assumptions (Verified Against Pre-implementation Source)
 
 - `LLMStages.llm_search_markdown` / `llm_paper_search_markdown` construct messages and call an `LLMClient`; parsers are invoked by `SearchOrchestrator`, not by `LLMStages`.
 - `LLMStages` also implements `judge` / `safety` / `content_clean` / `focus_summary` for existing keyword/fetch workflows.

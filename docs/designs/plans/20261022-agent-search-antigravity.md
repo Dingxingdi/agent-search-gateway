@@ -15,9 +15,50 @@
 - 工作树：`/home/agent/agent-search-gateway/.worktrees/agent-search-antigravity-design`。
 - 分支：`agent-search-antigravity-design`；初次编写时 HEAD：`96c0d3e`，代码基线：`fe72cc1`；本次修订基于计划提交 `660f890`。
 - 全部相对路径和执行命令都以此工作树为根。行号是编写计划时的位置，实施时按同名符号定位。沿用该工作树。
-- 此文档是实现计划；下面的实现、测试及真实 Agent smoke 尚未执行。testing spec 记录的 `871 passed, 4 skipped`、lint/type-check 通过是前次讨论的历史基线，不是本次验证结果。
-- 按已批准设计，首版 Agent 边界是本地 `agy -p`，不引入远程 Agent API/SDK。计划产物完成自查后单独提交；具体功能实现属于后续工作。
+- 此文档保留原实现计划与 Expected，并在下方记录实际完成结果。原 testing spec 的基线记录与本次最终验收结果分别列出。
+- 按已批准设计，首版 Agent 边界是本地 `agy -p`，不引入远程 Agent API/SDK。计划提交与本次功能实现分开记录。
 - 2026-10-23 用户要求修订：Agent invocation 的 `model` 可省略，缺省沿用用户在 Antigravity 中保存的模型；仅显式配置时传 `--model`。`--output-format json` 和显式 `--print-timeout` 保持。三份 spec 与本计划同步更新。
+
+## 实施与验收记录（2026-10-23）
+
+本工作树已完成 Tasks 1–23 的实现和离线验收。115 个步骤下的复选框对应实际执行；
+正常测试没有调用真实网络、LLM 或 Agent。Task 21 的真实本地链路直接覆盖配置、
+CLI、Unix socket、Runtime、可执行测试进程、parser/store/writer 和后续 fetch；
+未为制造 RED 回退已正确实现的生产代码。原有测试断言保持，OpenAI adapter 仅移动目录。
+
+| 最终质量门 | 实际结果 |
+|---|---|
+| `uv run ruff format --check src tests scripts` | 195 files already formatted |
+| `uv run ruff check .` | All checks passed |
+| `uv run mypy src tests scripts` | Success: no issues found in 195 source files |
+| `WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q` | **1195 passed, 4 skipped** |
+| `uv run python scripts/build_docs.py` | exit 0 |
+
+实施前另行重跑普通测试确认 **871 passed, 4 skipped**。新增验收覆盖默认模型不传
+`--model`、显式模型精确传递、请求筛选不污染后续请求、重复 invocation、Web/Paper/All
+部分与空成功、真实子/孙进程回收、反复取消、stdout/stderr byte 上限，以及 shutdown
+完成前的清理。文档示例由真实 TOML resolver 和 CLI parser 校验；版本号未更改。
+
+### 已获授权的真实环境检查
+
+- 安装版本的 `agy --help` 已确认 `-p`、`--output-format json`、`--print-timeout`
+  和 `--model` 参数存在。
+- `agy models` 分别在 10 秒、45 秒等待内未返回可用模型列表，因此没有猜测显式模型 slug。
+- 独立临时 Runtime / socket 下，真实默认模型 Web 请求以 60 秒 Harness 预算运行，
+  Python deadline 到期后返回安全的 all-provider failure；实际子进程没有传入
+  `--model`。验证结果：lease 为 0、直接子进程已回收、私有 cwd 已删除、socket
+  已删除、所属进程组存活进程数为 0。
+- 真实 `agy` 的主动取消场景通过：启动后取消，lease 回收，cwd 删除，直接子进程已回收，
+  所属进程组无存活进程。
+- 另用继承终端环境的最小直接 `agy -p` 请求排查：30 秒外部限时后进程组被终止，
+  未产生 stdout/stderr，未得到终态。这与 gateway 之外的 Harness 无响应一致；
+  尚不能确认具体外部原因。
+- 现有 gateway 配置解析还缺少 `CPA_API_KEY` 环境变量。本次真实 Agent 执行使用
+  独立的最小有效 fetch 配置且没有调用该占位 LLM endpoint；因此真实后续 fetch
+  未验证。正常离线端到端测试已验证共享 fetch 行为。
+- 真实成功的 Web/Paper/All 检索与实际模型 pin 仍未验证。没有把 `SUCCESS` 或格式通过
+  当作工具执行、源访问或结果真实性的证明；没有修改 Harness 权限、MCP、默认模型、
+  用户现有配置或认证文件。临时 smoke 脚本已移除，结果仅保留上述安全摘要。
 
 ### 计划编写检查单
 
@@ -175,12 +216,12 @@ uv sync --locked --group dev --group docs
 - Test: `tests/unit/test_config_llm.py`
 - Docs: `docs/designs/architectures/20261022-agent-search-antigravity.md` §3 Configuration
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_resolve_config_builds_independent_agent_invocations`：使用现有有效 fetch_llm 配置，加两个 Agent alias、四个调用（混合省略 model、显式 pin 和重复默认模型 entry）；调用真实 resolve_config，断言 agent namespace 存在、字段/defaults 正确、缺省 model 为 None、tuple 顺序与重复项保留。
 随后逐个补充：完全无 Agent 配置、空 search_agent.providers、只有 LLM search、只有 Agent search、两者都有；同名 LLM/Agent alias 的配置互不覆盖。新增 `test_agent_config_omitted_model_defers_to_harness`：省略 model 的 entry 不继承非空 global_default_llm.model，也不读取 Harness 设置或运行发现命令；显式 model 字符串保留原值。对四个 fetch 阶段及原 LLM extra_body 保持原断言。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -190,7 +231,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_agent.py::test
 
 Expected: FAIL：resolve_config 尚未返回独立 agent namespace；不能是 fixture 缺失 fetch 配置造成的 CONFIG_ERROR。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 在 models.py 新增 frozen AgentInvocation(provider: str, model: str | None = None)，并先定义 SearchScope，
@@ -205,7 +246,7 @@ errors.py 只新增 NO_AGENT_SEARCH_PROVIDERS = "no_agent_search_providers"。
 此步仅实现有效配置和缺省行为；严密拒绝矩阵由 Task 2 逐项驱动。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_agent.py tests/unit/test_config_llm.py -q
@@ -214,7 +255,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 _require_mapping、_required_string 等现有局部 helper；不让 AgentInvocation 继承 LLMInvocation，也不复用会隐式继承 global_default_llm 的 _resolve_invocation。
 
@@ -238,13 +279,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/unit/test_config_llm.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §3.3
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_config_rejects_unknown_harness`：引用 alias 的 harness="unknown"，断言 ConfigFailure/CONFIG_ERROR。
 随后一次一个参数化行为：search_agent/providers/条目类型错误；缺/空 provider、harness；显式 model 为空/纯空白/非字符串（含原始 resolver 输入中的 None、bool、数字、列表）；引用缺失；command 非字符串、空值、附带 flags、管道/重定向/控制字符；max_concurrency 为 0、负数、bool、fraction；timeout 为 bool、NaN、±inf、0、负数、>540；pass_env 非数组、非字符串、空/非法 env 名；Agent 配置中的不支持字段。
 有效边界覆盖 model 完全省略、显式非空 model、concurrency 1/2、timeout 0.5/300/540、显式 command 路径与 env 名列表；缺失的 pass_env 名没有值时允许省略。未引用 alias 不装配、不使其可选。四个 fetch invocation 无法按原继承规则完整解析时仍失败；原本合法的 global_default_llm fallback 保持可用。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -254,7 +295,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_agent.py::test
 
 Expected: FAIL：未拒绝不支持的 harness；其他错误矩阵逐个跑出对应缺失校验的失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Agent 顶层结构先校验类型；只验证 search_agent 引用的 provider 配置。
@@ -269,7 +310,7 @@ pass_env 只保存满足 [A-Za-z_][A-Za-z0-9_]* 的名称 tuple，不解析/持�
 启动和 doctor 不检查登录、不运行 agy/models，不要求 command 此刻已安装。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_agent.py tests/unit/test_config_llm.py tests/doctor/test_config.py -q
@@ -278,7 +319,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 让 Agent-specific validation 集中在新增 resolver 中。现有 LLM、Web、Academic 配置规则和错误优先级不变。
 
@@ -304,13 +345,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/unit/test_result_writer.py`
 - Docs: `docs/designs/testings/20261022-agent-search-antigravity.md` §7.1
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_result_filename_uses_request_id`：result_filename("agent", "a1b2c3d4") 应为 agent-a1b2c3d4.jsonl。
 逐步增加 Agent Web/Paper/Mixed 真文件断言：路径绝对、JSONL 逐字节等于旧 schema、mixed Web 在 Paper 前、paper-only 无 type。默认 write_mixed_results 仍输出 llm-* 及旧 bytes。用现有生成器 fixture 验证四种旧/新结果文件均触发 ID 重选；同一 ID 正在使用也不能重复。
 保留 exclusive-create：预存文件不得覆盖；序列化/写入失败不留下新半文件。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -320,7 +361,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_request_ids.py::test_
 
 Expected: FAIL：agent 尚未是合法 result kind。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 定义 TextSearchKind = Literal["llm", "agent"]。
@@ -331,7 +372,7 @@ write_mixed_results 新增 keyword-only kind: TextSearchKind="llm"，校验后�
 不新增 Agent writer，也不改变旧结果前缀。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_request_ids.py tests/unit/test_result_writer.py -q
@@ -340,7 +381,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只消除新 kind 校验中的明显重复；保留现有 open('x') 和 unlink-on-failure 路径。错误文件回滚测试优先复用原有 failure fixtures。
 
@@ -363,12 +404,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/runtime/test_quota_manager.py`
 - Docs: `docs/designs/architectures/20261022-agent-search-antigravity.md` §3 Concurrency
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_quota_is_independent_of_same_named_llm_quota`：agent 与 llm 都有 alias="same"，占住 Agent lease 后 LLM lease 仍可获得。
 再测试 Agent limit=1 的第二个 lease 等待、释放后继续；limit=2 可同时进入；取消等待者不损坏 gate；省略 agent_limits 不影响所有旧 constructor 调用。用 asyncio.Event 证明顺序，不靠 sleep 时长。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -378,7 +419,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_quota_manager.py::
 
 Expected: FAIL：独立 Agent quota 尚不存在；先用接口断言保证测试正常收集。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 ProviderQuotaManager 增加可选 agent_limits=None。
@@ -387,7 +428,7 @@ get_agent(name) 返回该 gate。
 不修改 CapacityGate 的 acquire/release/cancellation 算法，也不将 Agent gate 放入 _llm。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_quota_manager.py tests/scheduler -q
@@ -396,7 +437,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 沿用三种现有 quota map 的结构即可；无需引入 quota registry 或新调度器。
 
@@ -420,13 +461,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Create/Test: `tests/providers/agent/test_antigravity_cli.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §4.1-4.2
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_terminal_envelope_returns_only_success_response`：给 decoder 退出码 0 和包含 conversation_id/status/response/usage 的完整 JSON，断言仅返回原 response 文本。
 每个 failure case 单独迭代：非零退出（即使 SUCCESS）、所有非 SUCCESS 状态（包括 INVALID/WAITING/RUNNING/未知字符串）、缺 status、status 类型错误、非 object JSON、无效 UTF-8、多个 JSON/额外文本、缺 response、response 非字符串、空白 response。
 合法 JSON 可包含未使用 metadata；不返回或保存 session ID。SUCCESS + 非空坏 Markdown 在此层仍返回，留给 parser。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -436,7 +477,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravit
 
 Expected: FAIL：终态 decoder 行为尚未实现；使用测试函数内部的清晰缺失接口 assertion，不以 collection error 代替。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 在 adapter 定义私有 _decode_terminal_response(stdout: bytes, returncode: int) -> str。
@@ -453,7 +494,7 @@ response 为 string 但 strip 后为空：
 异常只携带固定安全说明，不传播原 JSON/解码器内容。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_cli.py -q
@@ -462,7 +503,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将同类错误构造收敛为少量私有 helper；用现有 ProtocolFailure/ExecutionFailure.reason，不新建错误层级或公开状态模型。
 
@@ -486,12 +527,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/providers/agent/test_antigravity_cli.py`
 - Docs: `docs/designs/architectures/20261022-agent-search-antigravity.md` §5.5
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_runner_spawns_one_fresh_process_and_returns_markdown`：测试 helper 在 tmp_path 写入带 sys.executable shebang 的可执行假 agy，运行真实 create_subprocess_exec，输出完整 SUCCESS envelope；真实 runner 返回其中 Markdown。
 假程序向专用测试控制目录记录 pid/cwd/argv（仅测试哨兵数据）。核对一个 -p 参数、原 system/user 文本、--output-format json、--print-timeout "<配置秒数>s"。默认模型路径新增 `test_runner_omits_model_flag_when_model_is_none`：假进程遇到 --model 即失败，缺省时返回 fixture 的默认模型标记，断言真实 response 正常返回且 argv 没有 --model/占位值。显式 pin 路径新增 `test_runner_passes_only_explicit_model`：恰好一组 --model 与原字符串；两个路径的 JSON/timeout flags 均保持。prompt 包含空格、引号、换行、分号和 shell 元字符时仍是单个 argv，外部 marker 不被执行创建。两次调用 pid/cwd 独立，退出后目录删除。无 session resume/自动批准 flags。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -501,7 +542,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravit
 
 Expected: FAIL：异步 runner 尚未提供真实进程→终态 response 行为。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 定义 run_antigravity，参数严格按统一接口。
@@ -522,7 +563,7 @@ async with quota.lease():
 本步建立正常路径及并行排空；Task 8 补齐全部异常清理，Task 9 补齐累计 byte 上限。不得使用 shell=True 或 unbounded communicate()。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_cli.py -q
@@ -531,7 +572,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 假 CLI builder 只提供 fixture 所需的行为/控制目录；用系统 Python 和标准库，不依赖 agy 安装、网络或 psutil。夹具自己在 finally 清理测试子进程，保证 RED 也不会留下挂起进程。
 
@@ -555,12 +596,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/providers/agent/test_antigravity_cli.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §4.5
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_runner_passes_only_explicit_extra_environment`：用 monkeypatch 设置假 HOME/XDG/cache/locale、OPENAI_API_KEY/TAVILY_API_KEY 哨兵、TEST_HARNESS_SETTING 和另一未知变量；仅 pass_env=["TEST_HARNESS_SETTING"]。由真实假进程报告指定键的可见性，断言基础 auth-cache 位置保留，显式变量存在，其他 provider secrets/未知变量缺失。
 补充 pass_env 未设置值时省略；显式点名的敏感变量仅在用户配置指定时允许通过，但其值不得出现在日志/错误；调用前后 daemon os.environ 不变。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -570,7 +611,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravit
 
 Expected: FAIL：显式 pass_env 或完整基础执行/auth-cache 白名单尚未按约定传入；不能通过假 runner 自己返回预期字典。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 私有 _curated_environment(pass_env) 每次调用新建 env。
@@ -583,7 +624,7 @@ spawn 继续在新 cwd 中进行；保留 HOME/XDG 配置位置供 Harness 自�
 缺少认证时沿 provider failure 返回，不自动扩大 env 白名单或启动登录。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_cli.py -q
@@ -592,7 +633,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将白名单作为 adapter 内部固定常量，保持可审阅；不为 env 增加单独配置子系统或 secret 管理抽象。
 
@@ -617,13 +658,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/runtime/test_quota_manager.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §4.3
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_timeout_terminates_process_group_before_releasing_quota`：假 agy 通知 ready 后挂起并创建子进程；使用缩短的测试 deadline，断言 runner 抛固定 timeout failure，直属进程已 wait/reap、无存活后代、cwd 已移除，之后同一 gate 可再次进入。
 依次覆盖：SIGTERM 被忽略须 SIGKILL；父进程退出但子进程仍持有 pipe；外部 Task.cancel；取消排队中的 quota waiter（零 spawn）；取消发生在 spawn 刚建立、尚未返回 handle 的窗口；清理中的第二次 cancel；spawn FileNotFound/PermissionError；非零退出且有子进程；终态协议失败。每例都有测试自身的最终清理。
 通过真实 pid/process group 观察退出与 lease/cwd 后置条件，不能仅断言 kill mock 被调用。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -633,7 +674,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravit
 
 Expected: FAIL：runner 未在短的测试期限内完成清理/未释放可用 gate；外层测试 watchdog 必须有界并能清理假进程。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 quota acquired 后启动每调用 Python deadline = timeout_seconds + 5 秒，包含 spawn、stream IO 和 wait。
@@ -653,7 +694,7 @@ Gateway 可 wait/reap 直属子进程；后代以进程组终止并验证无存�
 不接入 retry_async。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_lifecycle.py tests/providers/agent/test_antigravity_cli.py tests/runtime/test_quota_manager.py -q
@@ -662,7 +703,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只在 adapter 内抽取清理 helper；将短超时/信号处理细节集中。测试 monkeypatch 私有时间常量或使用短 timeout，不添加仅为测试暴露的生产 API。
 
@@ -687,12 +728,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/providers/agent/test_antigravity_cli.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §4.4
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_stdout_over_limit_fails_and_reaps_child`：假进程先输出看似成功的 JSON，再持续写到超过 4 MiB；必须 output_limit failure，不能返回部分 response。独立测试 stderr 超过 256 KiB。
 边界覆盖恰好上限/上限+1 byte、多字节 UTF-8 按 bytes 计、stderr 先大量写入后 stdout 完成、两条流交错写入、一个 reader 超限时另一条仍阻塞。超限路径继续断言 process/group、reader task、cwd 和 quota 已收尾。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -702,7 +743,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravit
 
 Expected: FAIL：超量 stdout 被接受或没有及时触发 output_limit；测试使用外层有界 watchdog。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 stdout/stderr 并行 drain，以例如 64 KiB 固定 chunk 读取。
@@ -715,7 +756,7 @@ overflow -> ExecutionFailure(..., reason="output_limit")。
 不能截断 JSON、不能接受超时/超限前的部分有效输出。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent -q
@@ -724,7 +765,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将 stream byte-limit 逻辑复用为一个私有读取 helper；异常清理只保留 Task 8 的一份实现。保留边界值与真实双管道回归。
 
@@ -753,12 +794,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Modify: `tests/integration/test_live_tavily_and_openai.py:10`
 - Test: `tests/unit/test_llm_stages.py`, `tests/unit/test_llm_paper_stage.py`, `tests/unit/test_llm_judge_stage.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_web_stage_uses_existing_prompt_messages`：注入记录参数的 async callable，调用 agent_search_markdown；断言 model 等于 invocation.model，完整 messages 精确等于现有 llm_search_messages(prompt)，返回既有 strip/nonempty 约定的文本。
 再添加 paper prompt equality；Web/Paper 两个 facade 均参数化 model=None 与显式字符串，断言原样传递，不用 fetch/LLM model 补值。另覆盖同名 Agent/LLM alias 分离、missing runner 安全失败、空文本拒绝、CancelledError 重抛。Agent 不调用 complete_text/complete_json，也不触发 llm_stage_*；六个旧方法继续只调用 LLMClient，错误和日志不变。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -768,7 +809,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_agent_stages.py::test
 
 Expected: FAIL：Agent facade 尚未存在/未把真实 prompt sequence 交给 callable。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 在 contracts.py 添加 AgentTextRunner 类型别名。
@@ -781,7 +822,7 @@ facade 不知道 subprocess，不解析 Markdown，不接触 URLStore。
 现有六个方法和 LLMClient 协议保持原实现。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_agent_stages.py tests/unit/test_llm_stages.py tests/unit/test_llm_paper_stage.py tests/unit/test_llm_judge_stage.py -q
@@ -790,7 +831,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 在 GREEN 后机械移动 OpenAI adapter/test 到 llm/。adapter 原 ..concurrency/errors/models/observability/retry 改为 ...；原 .contracts/.http 改为 ..；更新上述 runtime 和 integration imports。保留类、HTTP payload/headers/retry/extra_body/quota/aclose 原样，不增加旧路径 shim。旧测试按新路径完整执行；普通集成模块仍保持 opt-in skipped。
 
@@ -818,12 +859,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/orchestrators/test_scoped_llm_search.py`
 - Test: `tests/orchestrators/test_keyword_search_pipeline.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_web_search_writes_existing_web_schema`：真实 stages/store/writer，注入 Agent callable 返回 ## Result；agent_search 产出 agent-<id>.jsonl，内容逐字节为 url/abstract 两键，URL 已在同一 store。
 逐个加入默认/显式 web 等价、URL normalization/dedup、完成顺序相反仍按 invocation 顺序写入、一个坏 Markdown provider 不污染 store 且其他结果存活、合法空 abstract 形成成功空结果、全部失败无文件。LLM 默认/显式 Web bytes 与原日志继续通过。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -833,7 +874,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search
 
 Expected: FAIL：尚无 Agent Web workflow。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 constructor 新增可选 agent_invocations=()，保存独立 tuple；不覆盖 _llm_invocations。
@@ -848,7 +889,7 @@ LLM Web 使用原 llm facade、原 label/error/log/filename；Agent 使用 agent
 不改 keyword pipelines、parse_search_markdown 或 URLStore。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search.py tests/orchestrators/test_llm_search.py tests/orchestrators/test_scoped_llm_search.py tests/orchestrators/test_keyword_search_pipeline.py -q
@@ -857,7 +898,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 使用受约束 TypeVar + typed generation callable；避免 Any/cast(LLMInvocation, agent)。将测试辅助仅包含的 runner 记录与组装放入 tests/support/agent_search.py；测试断言真实文件和 admission，而非仅 fake call count。
 
@@ -883,7 +924,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/orchestrators/test_llm_provider_model_filtering.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §3.1-3.2
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_provider_filter_executes_only_matching_invocations`：多个 alias/model（包含 model=None 与显式 pin），选择一个 provider，实际输出与 runner 记录包含该 alias 的默认及显式模型 entry，后续无 selector 请求仍执行全部。
 逐个加入 model-only、intersection、精确大小写、重复 entry（含重复默认模型 entry）两次执行、缺 provider/model/两者均缺/两者各自存在但组合不存在、显式空白 selectors、Agent 配置为空且 selectors 无效的优先级。
@@ -892,7 +933,7 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 补充直接调用 agent_search 的无效 request ID、空 prompt、非法 scope：零 runner 调用、无文件；空 prompt/非法 scope 优先于空 Agent 配置错误。
 先覆盖 web；Tasks 14-15 把同矩阵扩展到 paper/all。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -902,7 +943,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_provid
 
 Expected: FAIL：选择一个 Agent provider 仍执行了未选 entry。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 将现有 LLM 选择算法提取为 _select_text_invocations，参数包含 typed tuple、label、no-provider code。
@@ -917,7 +958,7 @@ model selector 为 None 时不过滤模型，保留 default/pinned entries；sel
 无可用 Agent 配置先报 no-provider；CLI 显式空 selector 在 socket 前拒绝是另一层。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_provider_model_filtering.py tests/orchestrators/test_llm_invocation_selection.py tests/orchestrators/test_llm_provider_model_filtering.py -q
@@ -926,7 +967,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 LLM 和 Agent 仅保留小 wrapper，不复制两套筛选矩阵。以旧测试所有精确 messages/额外参数 assertions 作为提取约束。
 
@@ -952,13 +993,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/academic/test_paper_aggregator_merge.py`
 - Test: `tests/academic/test_identifier_normalization.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_paper_parser_tags_agent_source_when_requested`：相同严格 Paper block，通过 source_kind="agent" 得到 agent:X；未传 source_kind 仍为 llm:X，其他字段逐项相同。
 增加 academic/LLM/Agent 具有相同 DOI/arXiv 的 hits：academic 非空 metadata 优先，generated sources 按配置 priority 确定，旧 llm 相对顺序完全保留；未配置 agent source 同 llm 使用 generated fallback rank。
 覆盖相同强 ID 聚合、不同 source native ID 不碰撞、弱 fingerprint 限制、sources/citation_counts 保留完整命名空间。原坏 URL/date/grammar/identifier 用例保持严格。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -968,7 +1009,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_paper_search_parser.p
 
 Expected: FAIL：source_kind 扩展尚未提供，或输出仍被标为 llm:X；用清晰接口断言而非意外 TypeError 作为首个 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 parse_paper_markdown 新增 keyword-only source_kind: TextSearchKind="llm"。
@@ -980,7 +1021,7 @@ PaperAggregator 将 _LLM_PREFIX 替换为 generated prefixes ("llm:", "agent:")�
 academic.normalization 已支持非特定 provider 的 source_id，验证其兼容即可，无需改写。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_paper_search_parser.py tests/academic -q
@@ -989,7 +1030,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只复用一个 generated-prefix tuple/判定，避免修改一处漏掉另一处；不建立第二份 Agent parser 或论文 aggregator。
 
@@ -1015,13 +1056,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/orchestrators/test_scoped_llm_search.py`
 - Test: `tests/academic/test_oa_enrichment.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_paper_search_uses_shared_aggregation_and_admission`：两个 Agent 返回重复 DOI Paper block、一个返回坏 grammar；真实 PaperAggregator/finalize_paper_hits 加 FakeOAResolver，输出一个去重的 agent-* PaperRecord，sources 为幸存 agent:*，OA 调用仅一次，landing URL 入库而 PDF 不入库。
 依次覆盖每 entry 仅生成/解析一次、独立有效 hits、parser 成功但 aggregation 全丢弃仍是成功空结果；paper-only 无 type。
 将 Task 12 选择器矩阵纳入 paper，确保未选择 entry 不参与 resolver/store。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1031,7 +1072,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search
 
 Expected: FAIL：Agent paper 流程未连接共享 parser/finalization，或来源/结果 schema 不正确。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 提取 _run_text_paper_pipeline：一次 await generate，一次 parse_paper_markdown(..., source_kind=kind)。
@@ -1044,7 +1085,7 @@ SearchOrchestrator 默认 aggregator priority 在既有 llm:* 后追加 agent:*�
 通过 writer.write_paper_results(kind, records, request_id=...) 写出。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search.py tests/orchestrators/test_agent_provider_model_filtering.py tests/orchestrators/test_scoped_llm_search.py tests/academic/test_oa_enrichment.py -q
@@ -1053,7 +1094,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 把两种后端的 Paper 记录处理收敛为同一 helper；保留 Task 13 的 parser default，以免旧直接调用意外得到 agent:。
 
@@ -1078,13 +1119,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/orchestrators/test_scoped_llm_search.py`
 - Test: `tests/orchestrators/test_llm_provider_model_filtering.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_all_schedules_both_branches_and_writes_web_then_paper`：用 Event 屏障证明两分支都被调度，再允许各自返回，真实 mixed writer 输出 Web 在前/Paper 在后。
 逐个覆盖双成功、仅 Web 成功、仅 Paper 成功、双失败、Web 成功空 list + Paper 失败、Paper 聚合成功空 list + Web 失败、parser 失败但 sibling 存活。双失败无文件；空成功不能按 truthiness 当失败。
 使用绑定真实 gate 的 runner：limit=2 的两分支重叠，limit=1 排队串行；每个分支是独立调用。Agent selector 矩阵扩展 all，包括重复 entry 每分支各运行一次。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1094,7 +1135,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search
 
 Expected: FAIL：Agent all 尚未同时运行两分支或未生成正确的 mixed 结果。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 完成 _text_search(prompt, request_id, scope, kind, invocations, generate_web, generate_paper)。
@@ -1109,7 +1150,7 @@ llm_search / agent_search 仅保留各自校验、选择和 typed facade 注入�
 outer task cancellation 必须取消并收束所有 gather children；不把外部取消变成 partial success。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search.py tests/orchestrators/test_agent_provider_model_filtering.py tests/orchestrators/test_scoped_llm_search.py tests/orchestrators/test_llm_provider_model_filtering.py -q
@@ -1119,7 +1160,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 删除已被共享 helper 完整替代的重复 LLM records/pipeline 实现，但保留原 _select_llm_invocations wrapper。禁止用全部结果非空作为成功条件；保留每个失败矩阵的精确字节/错误断言。
 
@@ -1145,12 +1186,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/providers/agent/test_antigravity_lifecycle.py`
 - Docs: `docs/designs/error-handlings/20261022-agent-search-antigravity.md` §4.3
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_workflow_deadline_cancels_running_and_queued_invocations`：同一 limit=1 provider 有两个 entry，首个运行、第二个排队，缩短 _AGENT_WORKFLOW_TIMEOUT_SECONDS；断言整体 ALL_PROVIDERS_FAILED、安全 timeout message、reason=timeout、无结果文件、排队任务不再启动、全部 lease 回收。
 分别覆盖 Web/Paper/All，含一个 all branch 已成功而另一个不结束、OA finalization 阻塞、请求显式取消。超时不能把已完成 sibling 写为成功；普通单 provider timeout 仍按原 partial-failure 处理。LLM 请求不受这个新增 deadline 影响。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1160,7 +1201,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search
 
 Expected: FAIL：请求仍挂起/排队调用仍启动或成功写文件；测试外层 watchdog 有界。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 定义私有 _AGENT_WORKFLOW_TIMEOUT_SECONDS=1140.0。
@@ -1174,7 +1215,7 @@ writer 只在正常完成共享 workflow 后路径中执行，不在 timeout/取
 保持既有 store admission 行为，不增加跨分支 URLStore rollback。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_agent_search_deadline.py tests/orchestrators/test_agent_search.py tests/providers/agent/test_antigravity_lifecycle.py -q
@@ -1183,7 +1224,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 统一 Agent workflow deadline 常量；测试缩短该常量即可，不增加用户 timeout flag 或无期限 override。不得把 llm_search 包进新 deadline。
 
@@ -1209,14 +1250,14 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/runtime/test_request_filtering.py`
 - Modify: `tests/support/agent_cli.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_runtime_agent_search_uses_configured_cli_without_llm_transport`：真实 resolve_config + Runtime.build，Agent command 指向假 CLI，search_agent entry 省略 model，HTTP transport 为离线 MockTransport；执行 Agent Web 后文件正确，实际进程 argv 无 --model，搜索阶段没有 LLM HTTP 请求。随后加入显式 pin 变体，断言 argv 精确传递该值；启动时不解析/缓存 Harness 默认模型。
 逐个覆盖多个 alias 的 command/timeout/pass_env 正确绑定（防闭包晚绑定）、重复 entry 共用 alias gate但独立执行、与 LLM alias 同名、只有 Agent search 但 fetch 有效、无 Agent config 的旧 runtime、未选择 alias 零执行、无 agy 安装也能 build。
 另设 retry.max_attempts=3 且假 Agent 非零退出，断言每个选中 entry 只启动一次，证明未套用 HTTP/LLM retry。
 验证 runtime.aclose 原 HTTP 资源只关闭一次；runner 不需要 aclose/持久会话；真实论文 priority 包含 academic、旧 llm、agent 且旧序不变。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1226,7 +1267,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_agent_runtime_asse
 
 Expected: FAIL：Runtime 未注入 Agent invocations/runners，或错误走 LLM/no-provider。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 ProviderQuotaManager 传 agent_limits={name:max_concurrency}。
@@ -1241,7 +1282,7 @@ _build_llm_clients 和 Runtime.aclose 保持 HTTP 所有权；active process 的
 无需新增通用 registry、AgentClient 类或为测试暴露 runtime 内部 maps。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_agent_runtime_assembly.py tests/runtime/test_runtime_assembly.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_request_filtering.py -q
@@ -1251,7 +1292,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 factory 只做首个 Harness 的最小分派。所有 per-alias 参数在绑定时固定；不要依赖循环变量的延迟捕获。
 
@@ -1278,13 +1319,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/unit/test_socket_client.py`
 - Docs: `docs/designs/testings/20261022-agent-search-antigravity.md` §3.2
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_search_frame_round_trips_without_default_fields`：从现有 decode_request_frame 输入 {"type":"agent_search","prompt":"topic"}，首先断言不返回 ErrorResponse，再核对 typed fields、默认 web、编码回原 bytes。
 逐一覆盖 paper/all/provider/model/组合、缺字段、非字符串/null selectors、未知字段、scope 非法、未知 request type、响应错误 code round-trip。空 selector 字符串保留给业务校验，不能 codec 默默删掉。
 socket 用受控 stream/timeout recorder：Agent 默认1200、其他全部旧请求默认300、显式0.01/自定义数值覆盖默认；保留响应 framing、oversize 和 disconnect tests。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1294,7 +1335,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_protocol_codec.py::te
 
 Expected: FAIL：当前 decoder 返回 Unknown request type；旧 frame 用例仍应正常通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 复用 Task 1 已定义的 SearchScope / LLMSearchScope 兼容 alias。
@@ -1308,7 +1349,7 @@ send_request 的 response_timeout_seconds 改为 float|None=None：
 保持 reader limit、连接失败、ErrorResponse 和最终关闭行为。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_protocol_codec.py tests/unit/test_search_request_selectors.py tests/unit/test_socket_client.py -q
@@ -1317,7 +1358,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 可复用少量 schema 字段检查，但不要把 Agent 解码成 LLM request，或改动旧 request/response bytes。
 
@@ -1342,13 +1383,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Modify: `README.md`（新增独立 Agent search 小节与最小可解析示例）
 - Docs: `docs/designs/testings/20261022-agent-search-antigravity.md` §3.1
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_cli_builds_independent_request`：build_parser + run_command 使用记录 socket request 的 fake client，默认命令构造 AgentSearchRequest，成功 stdout 仅绝对结果路径及单个换行。
 参数化 scope/provider/model/组合、prompt与selectors trim、空 prompt/空 selectors 在 client 前失败、非法 scope、旧命令不接受 Agent-only 不适用 flags；错误 stderr/nonzero exit。
 同步现有 README/CLI 子命令集合测试，不能出现 CLI 新命令已实现但 docs contract suite 必然失败的中间状态。旧 provider/model 小节的精确示例集合保持不变，Agent 示例放独立小节。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1358,7 +1399,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/cli/test_cli.py::test_agent_cli
 
 Expected: FAIL：argparse 当前不识别 agent-search；将 SystemExit 以预期命令缺失 assertion 表达。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 新增 agent-search parser：prompt、--scope(web|paper|all, default web)、
@@ -1371,7 +1412,7 @@ README 增加独立章节及不带 --model 的最小 agent-search 示例；注�
 完整配置/限制文档由 Task 23 补齐。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/cli/test_cli.py tests/docs/test_documented_config.py -q
@@ -1380,7 +1421,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 CLI 继续是薄客户端。不要在 CLI 执行 agy、读 provider 配置或保存 request state。
 
@@ -1407,13 +1448,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Create/Test: `tests/daemon/test_agent_shutdown.py`
 - Test support: `tests/support/agent_cli.py`, `tests/support/agent_search.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_daemon_dispatches_agent_request_with_selectors_and_reserved_id`：真实 Unix socket，recording runtime 接收全部 Agent 参数与 reserved request_id，命令日志为 agent-search；固定 ID 工厂验证 agent 文件碰撞会重选。
 加入并发请求不同 selector 的独立结果、后续无 selector 调用无污染、无配置/坏选择直接返回 typed errors。
 专用 shutdown 测试用真实 fake-CLI runner，在 ready 后通过已有 shutdown_waiter seam 触发原10秒grace到期路径；stop 后无存活进程、gate可用、cwd删除、runtime关闭一次、socket删除。新增请求在 shutting_down 时仍被拒绝。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1423,7 +1464,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/daemon/test_daemon_dispatch.py:
 
 Expected: FAIL：daemon 当前把 Agent request 当未知请求，或没有正确转发参数。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 _SearchOrchestratorLike 新增与真实 agent_search 一致的方法。
@@ -1437,7 +1478,7 @@ runner cleanup 由任务取消触发，不添加第二套 daemon process registr
 若测试证明收束链存在缺口，只在已有取消/await链最小修补，不修改 grace 和旧 stop 语义。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/daemon -q
@@ -1447,7 +1488,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 统一新增类型分支，防止 _command_name 或 _invoke_workflow 默认落到 url-fetch。明确 shutdown readiness 只有任务 cleanup 完成后才置位；保留旧错误净化流程。
 
@@ -1473,14 +1514,14 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/acceptance/test_gateway_workflows.py`
 - Docs: `docs/designs/testings/20261022-agent-search-antigravity.md` §7.2、§9
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_agent_cli_socket_to_fake_cli_and_followup_fetch`：有效 TOML 经真实 resolve_config/Runtime.build；command 为假 agy；所有 HTTP 走 MockTransport；真实 CLI run_command → send_request → Unix socket → daemon → shared orchestrator → subprocess → parser/store/writer。
 断言 stdout 只有实际绝对 agent JSONL 路径，Web/Paper/All 三类 schema 正确、paper 来源为 agent:*。从结果取得 landing URL 后执行原 url-fetch，实际使用同一 store 和既有 fetch LLM 阶段；PDF-only URL 不能因 metadata 自动 admission。
 首个验收使用省略 model 的 Agent entry，假 CLI 在收到 --model 时拒绝并在缺省时产出默认模型标记；断言标记出现在真实结果中，证明默认路径贯穿配置、socket、runtime 和 subprocess。独立场景覆盖显式 model 配置并用 provider/model 选择、default-only 配置加 model selector 无匹配且零 spawn、不选调用未触发、重复默认 entry 独立、并发与后续无 selector 请求、部分成功、全失败没有新文件、只有 Agent search 的 runtime 仍需有效 fetch。
 所有断言基于返回文件/HTTP边界/进程观察，不替换 parser、finalization、URLStore 或 writer。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1490,7 +1531,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance/test_agent_search_wo
 
 Expected: 若任一 CLI/codec/dispatch/runtime 接缝遗漏，FAIL 在对应真实结果或 admission 断言。若前序实现已完整使其直接 PASS，记录为集成验收证据；本任务不为制造 RED 回退正确实现。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 先运行完整真实离线链路。
@@ -1501,7 +1542,7 @@ Expected: 若任一 CLI/codec/dispatch/runtime 接缝遗漏，FAIL 在对应真�
 本任务不增加新产品行为，验证前序任务组合。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_gateway_workflows.py tests/daemon/test_agent_shutdown.py -q
@@ -1510,7 +1551,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只提取被多个验收场景实际复用的 fixture。保留旧 acceptance suite，不合并/删减其对旧命令的精确 assertions。
 
@@ -1536,13 +1577,13 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Test: `tests/doctor/test_config.py`, `tests/doctor/test_no_network.py`
 - Inspect only: `src/agent_search_gateway/doctor.py:111-153`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_failure_logs_allowlisted_reason_without_payload`：真实失败 runner（stderr、JSON error、prompt、response、env 值各含不同哨兵）经共享搜索路径触发 provider_failed；断言 provider/model/stage/elapsed_ms 和固定 reason 完整，全部哨兵不出现在 DEBUG/stderr/用户错误中。
 分别覆盖成功、invalid_json、nonzero_exit、terminal_status_failure、invalid_markdown、timeout、output_limit、取消、未知 RuntimeError、恶意 reason 值；Agent 两个 stage 名分别正确，没有 llm_stage_*。
 默认模型路径的 Agent 事件传入 model=None，断言已有 formatter 输出 model=null；显式 pin 记录配置值，不读取/伪造实际默认模型。补充 doctor：省略 model 的有效 Agent config + 不存在 command 仍只进行本地检查；显式 model 空白/错误类型等无效 Agent TOML 返回 configuration invalid；用失败哨兵禁止 subprocess/HTTP/远程模型发现。既有 LLM事件精确 assertions 不变。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1552,7 +1593,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_agent_event_
 
 Expected: FAIL：共享日志尚未记录完整 Agent reason/model，或意外把不可信内容放入日志；doctor 既有本地校验用例可直接作为回归通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Agent provider_started/completed/failed 在 shared pipeline 发出，
@@ -1565,7 +1606,7 @@ doctor 继续调用 resolve_config；不新增 agy availability/auth/network pro
 除非回归暴露实际问题，不修改 doctor.py。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability tests/doctor tests/unit/test_llm_stages.py tests/unit/test_llm_paper_stage.py -q
@@ -1574,7 +1615,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 固定分类只维护一处 allowlist/映射；不要依赖动态字符串净化 raw stderr。把需要诊断的信息限制在已有安全元数据。
 
@@ -1602,12 +1643,12 @@ Expected: 对应回归与质量检查全部通过；既有行为断言保持。
 - Run unchanged: `scripts/build_docs.py`
 - Docs: 三份 `20261022-agent-search-antigravity.md` spec
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个用例 `test_agent_example_config_matches_documented_command`：load_toml(config.example.toml) 经真实 resolve_config + stub LLM secrets，断言合法的 antigravity_main 配置和 model=None 的 Agent invocation；再为同一 entry 填入显式 model 验证 pin 路径。README 默认示例不带 --model，pin 示例须说明先配置同名 model，再通过 build_parser 产生对应 request 参数；不运行 agy 或解析实时模型列表。
 再验证公共 policy 与 Unreleased 覆盖 agent-search、scope/provider/model、agent-*、agent: provenance，以及 fetch mandatory/search optional。保留原命令/配置/LLM示例 assertions，不用宽松 substring 替代原明确命令集合。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run:
 
@@ -1617,7 +1658,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/docs/test_documented_config.py:
 
 Expected: FAIL：当前 config.example/public documentation 未包含完整 Agent 契约。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 README/示例配置写清：
@@ -1639,7 +1680,7 @@ CHANGELOG 的 Unreleased/Added 记录功能；不变更版本号。
 保持自动测试离线；真实 smoke 仅在后续已有明确运行授权时执行。
 ```
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/docs -q
@@ -1648,7 +1689,7 @@ WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 Expected: 目标行为及全部普通测试通过；没有真实 provider/Agent 调用。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 整理文档重复解释，核对每条示例确实被 CLI/parser/config 接受。执行下方最终质量门；按构建流程生成 site/，不手改生成文件，不提交运行时/cache/认证文件。
 
@@ -1759,4 +1800,4 @@ agent-search-gateway agent-search "Find papers and reference sites for agent too
 
 2026-10-23 修订自查：同步三份 spec 与 Tasks 1-2、6-7、10、12、17、19、21-23；补齐省略/显式非法 model 的区别、optional callable 类型、条件 argv、默认/显式模型端到端验收、model=null 日志及默认 smoke 示例。Gateway 的 --model 筛选语义、JSON envelope 和三层 timeout 保持不变。
 
-23 个实现任务及其 115 个执行步骤仍保持未完成；本次仅修订计划与 spec，未执行功能实现、测试套件或真实 Agent smoke。
+计划修订时，23 个实现任务及其 115 个执行步骤尚未执行。后续实施已在本工作树完成并逐项勾选；实际质量门和真实环境限制见上方“实施与验收记录”，不以历史 Expected 代替实测。

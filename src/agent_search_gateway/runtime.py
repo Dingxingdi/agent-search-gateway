@@ -2,6 +2,7 @@
 
 import logging
 from collections.abc import Callable, Mapping
+from functools import partial
 from typing import cast
 
 import httpx
@@ -10,6 +11,7 @@ from .academic.aggregator import PaperAggregator
 from .concurrency import ProviderQuotaManager
 from .config import (
     ResolvedAcademicProviderConfig,
+    ResolvedAgentConfig,
     ResolvedConfig,
     ResolvedOAResolverConfig,
     ResolvedWebProviderConfig,
@@ -26,8 +28,10 @@ from .providers.academic.defaults import (
     build_default_oa_resolver_registry,
 )
 from .providers.academic.registry import AcademicProviderRegistry, OAResolverRegistry
+from .providers.agent.antigravity_cli import run_antigravity
 from .providers.contracts import (
     AcademicSearchProvider,
+    AgentTextRunner,
     KeywordSearchProvider,
     LLMClient,
     OAResolver,
@@ -35,7 +39,7 @@ from .providers.contracts import (
 )
 from .providers.defaults import build_default_registry
 from .providers.http import HttpJsonExecutor
-from .providers.openai_chat import OpenAIChatCompletionsClient
+from .providers.llm.openai_chat import OpenAIChatCompletionsClient
 from .providers.registry import ProviderRegistry
 from .result_writer import ResultWriter
 from .scheduler.fetch import FetchScheduler
@@ -101,7 +105,9 @@ class Runtime:
             web_limits={item.name: item.max_concurrency for item in enabled_web},
             llm_limits={item.name: item.max_concurrency for item in config.llm.providers},
             academic_limits={item.name: item.max_concurrency for item in enabled_academic},
+            agent_limits={item.name: item.max_concurrency for item in config.agent.providers},
         )
+        agent_runners = cls._build_agent_runners(config.agent, quotas)
         web_search, web_fetch, web_executors = cls._build_web_providers(
             enabled_web,
             provider_registry,
@@ -127,6 +133,7 @@ class Runtime:
             safety=config.llm.safety,
             content_clean=config.llm.content_clean,
             focus_summary=config.llm.focus_summary,
+            agent_runners=agent_runners,
         )
         store = URLStore()
         result_writer = ResultWriter(paths.results_dir)
@@ -134,11 +141,13 @@ class Runtime:
             (
                 *(provider.name for provider in academic_search),
                 *(f"llm:{item.provider}" for item in config.llm.search_invocations),
+                *(f"agent:{item.provider}" for item in config.agent.search_invocations),
             )
         )
         search_orchestrator = SearchOrchestrator(
             keyword_providers=web_search,
             llm_invocations=config.llm.search_invocations,
+            agent_invocations=config.agent.search_invocations,
             quotas=quotas,
             stages=stages,
             store=store,
@@ -348,6 +357,24 @@ class Runtime:
                 f"Invalid configuration for OA resolver {resolver_config.name}",
             ) from exc
         return cast(OAResolver, adapter), (executor,)
+
+    @staticmethod
+    def _build_agent_runners(
+        config: ResolvedAgentConfig,
+        quotas: ProviderQuotaManager,
+    ) -> dict[str, AgentTextRunner]:
+        runners: dict[str, AgentTextRunner] = {}
+        for provider in config.providers:
+            if provider.harness != "antigravity":
+                raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Unsupported Agent harness")
+            runners[provider.name] = partial(
+                run_antigravity,
+                command=provider.command,
+                timeout_seconds=provider.timeout_seconds,
+                pass_env=provider.pass_env,
+                quota=quotas.get_agent(provider.name),
+            )
+        return runners
 
     @staticmethod
     def _build_llm_clients(

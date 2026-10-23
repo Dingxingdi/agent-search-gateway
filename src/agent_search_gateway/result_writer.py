@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Literal
 
 from .errors import InputFailure
-from .models import PaperRecord, SearchRecord
+from .models import PaperRecord, SearchRecord, TextSearchKind
 from .request_ids import ResultKind, result_filename
 from .url_normalization import normalize_url
 
-PaperResultKind = Literal["paper", "llm"]
+PaperResultKind = Literal["paper", "llm", "agent"]
 
 
 def _web_payload(record: SearchRecord) -> dict[str, object]:
@@ -166,7 +166,7 @@ class ResultWriter:
         *,
         request_id: str,
     ) -> Path:
-        if kind not in {"paper", "llm"}:
+        if kind not in {"paper", "llm", "agent"}:
             raise ValueError(f"invalid paper result kind: {kind}")
         filename = result_filename(kind, request_id)
         serialized = tuple(_serialize_paper_record(record) for record in records)
@@ -178,8 +178,11 @@ class ResultWriter:
         paper_records: Iterable[PaperRecord],
         *,
         request_id: str,
+        kind: TextSearchKind = "llm",
     ) -> Path:
-        filename = result_filename("llm", request_id)
+        if kind not in {"llm", "agent"}:
+            raise ValueError(f"invalid mixed result kind: {kind}")
+        filename = result_filename(kind, request_id)
         serialized_web = tuple(_serialize_mixed_web(record) for record in web_records)
         serialized_paper = tuple(_serialize_mixed_paper(record) for record in paper_records)
         return self._write_serialized(filename, (*serialized_web, *serialized_paper))

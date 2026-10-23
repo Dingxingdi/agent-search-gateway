@@ -129,6 +129,7 @@ class ProviderQuotaManager:
         web_limits: Mapping[str, int],
         llm_limits: Mapping[str, int],
         academic_limits: Mapping[str, int] | None = None,
+        agent_limits: Mapping[str, int] | None = None,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -163,6 +164,20 @@ class ProviderQuotaManager:
             )
             for name, limit in (academic_limits or {}).items()
         }
+
+        self._agent = {
+            name: CapacityGate(
+                limit,
+                provider=name,
+                quota_kind="agent",
+                logger=event_logger,
+                monotonic=monotonic,
+            )
+            for name, limit in (agent_limits or {}).items()
+        }
+
+    def get_agent(self, name: str) -> CapacityGate:
+        return self._agent[name]
 
     def get_web(self, name: str) -> CapacityGate:
         return self._web[name]

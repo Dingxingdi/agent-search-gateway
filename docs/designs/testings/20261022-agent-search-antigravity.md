@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; specification only, no new code has been implemented.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live timeout/cancellation cleanup verified; successful live retrieval remains unverified because the installed Harness did not return. See the implementation plan's execution evidence.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
@@ -13,6 +13,15 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 - `uv run pytest -q`: **871 passed, 4 skipped**.
 - `uv run ruff check .`: pass.
 - `uv run mypy src tests scripts`: pass.
+
+**Implementation evidence (2026-10-23):** The final ordinary suite has **1195 passed, 4 skipped**;
+Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
+Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
+timeouts, cancellation, output bounds, and daemon shutdown. Authorized live checks verify
+timeout/cancellation cleanup, but successful live retrieval and a verified model slug remain
+unavailable because the installed Harness did not return. See the
+[execution record](../plans/20261022-agent-search-antigravity.md#实施与验收记录2026-10-23)
+for exact evidence and the missing installed-fetch environment variable.
 
 **Primary acceptance requirements:**
 

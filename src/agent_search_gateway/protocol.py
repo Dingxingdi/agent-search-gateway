@@ -9,6 +9,7 @@ from typing import TypeAlias
 
 from .errors import DaemonUnavailable, ErrorCode, ProtocolFailure
 from .models import (
+    AgentSearchRequest,
     ErrorResponse,
     KeywordSearchRequest,
     LLMSearchRequest,
@@ -26,6 +27,7 @@ RequestParser = Callable[[Mapping[str, object]], Request]
 _MAX_REQUEST_FRAME_BYTES = 1 << 20
 _MAX_RESPONSE_FRAME_BYTES = 8 << 20
 _RESPONSE_TIMEOUT_SECONDS = 300.0
+_AGENT_RESPONSE_TIMEOUT_SECONDS = 1200.0
 
 
 def _bad_request(message: str) -> ErrorResponse:
@@ -82,6 +84,24 @@ def _parse_llm(payload: Mapping[str, object]) -> Request:
     raise ValueError("scope must be web, paper, or all")
 
 
+def _parse_agent(payload: Mapping[str, object]) -> Request:
+    if not {"type", "prompt"} <= set(payload) <= {"type", "prompt", "scope", "provider", "model"}:
+        raise ValueError("request fields do not match schema")
+    prompt = payload["prompt"]
+    if not isinstance(prompt, str):
+        raise ValueError("prompt must be a string")
+    provider = _optional_string(payload, "provider")
+    model = _optional_string(payload, "model")
+    scope = payload.get("scope", "web")
+    if scope == "web":
+        return AgentSearchRequest(prompt, "web", provider=provider, model=model)
+    if scope == "paper":
+        return AgentSearchRequest(prompt, "paper", provider=provider, model=model)
+    if scope == "all":
+        return AgentSearchRequest(prompt, "all", provider=provider, model=model)
+    raise ValueError("scope must be web, paper, or all")
+
+
 def _parse_fetch(payload: Mapping[str, object]) -> Request:
     _require_exact_keys(payload, {"type", "url", "focus"})
     url = payload["url"]
@@ -102,6 +122,7 @@ _REQUEST_PARSERS: dict[str, RequestParser] = {
     "keyword_search": _parse_keyword,
     "paper_search": _parse_paper,
     "llm_search": _parse_llm,
+    "agent_search": _parse_agent,
     "url_fetch": _parse_fetch,
     "shutdown": _parse_shutdown,
 }
@@ -178,13 +199,17 @@ def _request_payload(request: Request) -> dict[str, object]:
         payload = {"type": "llm_search", "prompt": request.prompt}
         if request.scope != "web":
             payload["scope"] = request.scope
+    elif isinstance(request, AgentSearchRequest):
+        payload = {"type": "agent_search", "prompt": request.prompt}
+        if request.scope != "web":
+            payload["scope"] = request.scope
     elif isinstance(request, URLFetchRequest):
         return {"type": "url_fetch", "url": request.url, "focus": request.focus}
     else:
         return {"type": "shutdown"}
     if request.provider is not None:
         payload["provider"] = request.provider
-    if isinstance(request, LLMSearchRequest) and request.model is not None:
+    if isinstance(request, (LLMSearchRequest, AgentSearchRequest)) and request.model is not None:
         payload["model"] = request.model
     return payload
 
@@ -240,8 +265,14 @@ async def send_request(
     socket_path: Path,
     request: Request,
     *,
-    response_timeout_seconds: float = _RESPONSE_TIMEOUT_SECONDS,
+    response_timeout_seconds: float | None = None,
 ) -> Response:
+    if response_timeout_seconds is None:
+        response_timeout_seconds = (
+            _AGENT_RESPONSE_TIMEOUT_SECONDS
+            if isinstance(request, AgentSearchRequest)
+            else _RESPONSE_TIMEOUT_SECONDS
+        )
     try:
         reader, writer = await asyncio.open_unix_connection(
             path=socket_path,

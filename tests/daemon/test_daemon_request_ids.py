@@ -36,6 +36,17 @@ class _RecordingSearch:
         self.calls.append(("llm", request_id, current_request_id()))
         return f"llm-{request_id}.jsonl"
 
+    async def agent_search(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        return f"agent:{prompt}"
+
 
 class _RecordingPaper:
     async def paper_search(

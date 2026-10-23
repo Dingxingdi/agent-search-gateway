@@ -1,6 +1,6 @@
 ## Error Handling: Agent Search with Antigravity CLI
 
-**Status:** Approved by user on 2026-10-22; model selection revised per user request on 2026-10-23; implementation not started.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live timeout/cancellation cleanup verified; successful live retrieval remains unverified because the installed Harness did not return. See the implementation plan's execution evidence.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Testing:** [20261022-agent-search-antigravity.md](../testings/20261022-agent-search-antigravity.md).
 
