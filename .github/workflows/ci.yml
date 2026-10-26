@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.1"
           python-version: "3.12"
@@ -71,7 +71,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.1"
           python-version: ${{ matrix.python-version }}
@@ -93,7 +93,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.1"
           python-version: "3.12"
@@ -120,7 +120,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           version: "0.12.1"
           python-version: "3.12"
@@ -151,7 +151,7 @@ jobs:
       - name: Reject credential-bearing non-example URLs
         run: python scripts/check_sensitive_urls.py --github-event "$GITHUB_EVENT_PATH"
       - name: Scan changed commits for secrets
-        uses: trufflesecurity/trufflehog@20652fbbdefffcdaa493a5bf57ab2ac6b1db715b # v3.97.1
+        uses: trufflesecurity/trufflehog@e63326d6545de8f425d93ce24078c6e68d83f70e # v3.99.3
         with:
           # Reserved URI fixtures are handled by the preceding structural scan.
           extra_args: --results=verified,unknown --exclude-detectors=URI
