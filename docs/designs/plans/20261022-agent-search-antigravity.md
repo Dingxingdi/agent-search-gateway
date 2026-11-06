@@ -115,6 +115,38 @@ All 的部分成功验证了 mixed schema、分支隔离与有效结果保留；
 仓库仅保留这里的安全摘要。两个外部前提（Harness 所需工具权限、fetch 配置凭据）
 具备后，应继续复验尚未通过的真实场景。
 
+### 沙箱配置后的真实续验（2026-11-06）
+
+本节更新上方 2026-10-23 的历史性阻塞结论。LocalHost 重新提供
+`CODEXPRO_TOOL_HTTP_PROXY` 和 `CODEXPRO_TOOL_HTTPS_PROXY`（`CODEXPRO_TOOL_ALL_PROXY`
+仍不存在），测试只在进程中临时映射标准代理变量；未更改保存的
+Antigravity 配置、代理服务或 ngrok。CLI 版本为 **1.4.7**，`agy models`
+可正常列出模型。
+
+- 最小默认模型请求在 45 秒后返回空 `SUCCESS`、零 token；显式
+  `gemini-3.8-flash-high` 和 `gemini-3.8-flash-medium` 均在生成前超时。
+  对 medium 模型临时关闭沙箱后仍超时，因此这次零 token 问题不是
+  `proceed-in-sandbox` 直接造成的。显式 `claude-sonnet-4-6` 的最小
+  非交互请求则约 10 秒成功回复 `OK`。
+- 使用 Claude、真实 `agy -p`、独立临时配置和拒绝意外 HTTP 请求的
+  MockTransport，完成 CLI → Unix socket → daemon → Runtime → Agent →
+  parser/store/writer 端到端验收；**未调用 LLM API**：
+  - `--scope web`：约 33 秒成功，6 条 Web JSONL。
+  - `--scope paper`：明确查询 *Attention Is All You Need* (2017)，
+    约 13 秒成功，1 条 Paper JSONL，`sources=["agent:agy"]`。
+  - `--scope all`：同一明确论文查询，约 13 秒成功，
+    1 条 Web + 1 条 Paper，两分支均成功且顺序、来源正确。
+  - 三项均正确生成 `agent-*.jsonl`，Agent quota 归零，临时 Socket 和目录清理。
+- CLI 流式事件验证 `permission_mode=proceed-in-sandbox`；Agent 在工作树
+  主动使用 `run_command` 执行只读 `pwd`，真实退出码 0、返回工作目录，
+  已证实沙箱内终端工具不再被 headless 自动拒绝。
+- 一次较宽泛的 Paper 查询在 150 秒预算内未返回完整结果，之后确认
+  无遗留 Agent/验收进程；因此不宣称任意论文查询均有稳定延迟。
+  **沙箱外路径的自动拒绝尚未实际验证**。按用户约定忽略旧 fetch 凭据
+  问题，本轮也未执行真实 `url-fetch`。
+- 普通离线测试和质量门复跑：**1195 passed、4 skipped**，Ruff、mypy、
+  格式检查和文档构建均通过。
+
 ### 计划编写检查单
 
 - [x] 阅读三份已批准 spec，核对架构、错误处理、测试要求。

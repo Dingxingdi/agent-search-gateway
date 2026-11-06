@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live pinned-model Web retrieval, All partial success, and process/shutdown cleanup are verified with temporary proxy mappings. A reproduced Paper failure is blocked by the Harness's headless command permission; default-model retrieval, successful Paper/All branches, and live follow-up fetch remain unverified. See the implementation plan's execution evidence and environment prerequisites.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. On 2026-11-06, live pinned-model Web, Paper, and both-branch All search succeeded with `claude-sonnet-4-6` through the Gateway CLI/socket/daemon path and temporary proxy mappings. With `proceed-in-sandbox`, the Agent successfully ran a read-only terminal command in the workspace. Default/Gemini model generation still times out; broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified. See the implementation plan's 2026-11-06 continuation record.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
