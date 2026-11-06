@@ -178,6 +178,30 @@ Antigravity 配置、代理服务或 ngrok。CLI 版本为 **1.4.7**，`agy mode
 操作系统完成；旧实现稳定失败，修复后通过，并断言取消异常、临时目录清理和 quota 释放。
 完整离线套件更新为 **1196 passed、4 skipped**；格式、Ruff、mypy 和文档构建在提交前复验。
 
+### 维护者审查中的 Gemini 续验（2026-11-06）
+
+本轮继续验证 PR #90 的 `577b5ec`，保持 `agy 1.5.2`、540 秒预算、独立临时
+Runtime/socket/结果目录和仅测试进程内的代理映射，没有修改持久 Harness 设置。
+
+- 旧示例 `gemini-3.1-pro-high` 的请求约 9.3 秒失败，未生成结果文件，进程组、
+  临时 cwd、socket 和 quota 全部正常清理。随后由操作员执行的 `agy models`
+  列出了 `gemini-3.8-flash-high/medium/low`，没有该旧型号；示例 slug 不是可用性保证。
+  此模型查询仅用于人工验收，没有增加 Gateway startup / doctor 的模型发现行为。
+- 改用已列出的 `gemini-3.8-flash-high` 后，真实 CLI → Unix socket → daemon →
+  Runtime → `agy -p` → parser/store/writer 的 Web 查询约 **51.7 秒成功**，
+  得到 2 条 Python 官方文档结果。确认 argv 中 `--model` 值与配置及 selector 一致。
+- stdout 仍只有 `agent-*.jsonl` 的绝对路径，每行只有 `url` / `abstract`，两条 URL
+  均进入 URLStore；测试 transport 实际 **0 Gateway HTTP calls**。子进程退出码 0，
+  所属进程组不存在，临时 cwd、socket、Runtime 临时目录已删除，quota 归零。
+- 另做独立的只读 Harness `stream-json` 检查，约 **95.4 秒**完成，捕获 69 条有效事件，
+  其中出现 `search_web`、`ACTIVE` / `DONE` 生命周期状态，终态为 `SUCCESS`，
+  退出码 0；进程组和临时目录也已清理。该检查请求检索 Python 官方 cancellation
+  文档，没有启用权限绕过、执行终端命令或修改配置；仅保留事件元数据。
+- 上述工具轨迹属于独立 Harness 调用，不是 51.7 秒 Gateway 请求的逐步轨迹。
+  它提供真实 Agent 工具活动的证据，但不独立证明每条 Gateway 引用都已访问、内容准确
+  或任意查询均会使用工具。**Gemini Paper/All、宽泛 Paper 延迟、沙箱外拒绝和真实后续
+  `url-fetch` 仍未验证**；已有 Claude Paper/All 成功记录与离线回归覆盖保持有效。
+
 ### 计划编写检查单
 
 - [x] 阅读三份已批准 spec，核对架构、错误处理、测试要求。

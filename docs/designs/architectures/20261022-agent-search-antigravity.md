@@ -1,6 +1,6 @@
 ## Architecture: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. A later maintainer smoke with `agy 1.5.2` also completed unpinned default-model Web search in 71.8 seconds with zero Gateway HTTP calls. Gemini-specific retrieval, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; successful parsing does not independently verify source retrieval. See the implementation plan's 2026-11-06 records.
+**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. With `agy 1.5.2`, unpinned default-model Web (71.8 seconds) and pinned `gemini-3.8-flash-high` Web (51.7 seconds) also passed without Gateway HTTP calls. A separate Gemini Harness trace observed `search_web` and terminal `SUCCESS`. Gemini Paper/All, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; per-result source access and general retrieval accuracy were not independently established. See the implementation plan's 2026-11-06 records.
 **Date:** 2026-10-22
 **Last revised:** 2026-11-06
 **Base revision:** `fe72cc1` (`main`).

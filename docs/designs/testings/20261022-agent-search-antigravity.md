@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. A later maintainer smoke with `agy 1.5.2` also completed unpinned default-model Web search in 71.8 seconds with zero Gateway HTTP calls. Gemini-specific retrieval, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; successful parsing does not independently verify source retrieval. See the implementation plan's 2026-11-06 records.
+**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. With `agy 1.5.2`, unpinned default-model Web (71.8 seconds) and pinned `gemini-3.8-flash-high` Web (51.7 seconds) also passed without Gateway HTTP calls. A separate Gemini Harness trace observed `search_web` and terminal `SUCCESS`. Gemini Paper/All, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; per-result source access and general retrieval accuracy were not independently established. See the implementation plan's 2026-11-06 records.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
@@ -17,17 +17,20 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 **Implementation evidence (updated 2026-11-06):** The ordinary suite has **1196 passed, 4 skipped**;
 Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
 Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
-timeouts, repeated cancellation, output bounds, and daemon shutdown. Live pinned-model
-Web, Paper, and both-branch All searches succeeded with `claude-sonnet-4-6` through the
-CLI/socket/daemon path. A later maintainer smoke with `agy 1.5.2` also completed unpinned
-default-model Web search in 71.8 seconds, producing two valid and admitted Web rows without
-an execution `--model` flag or any Gateway HTTP calls. Process-group, quota, temporary-cwd,
-and socket cleanup passed. The effective Harness default was not discovered, so this does
-not establish Gemini-specific success. Gemini-specific retrieval, broad Paper latency,
-sandbox-outside denial, and live follow-up fetch remain unverified; parsing and URL admission
-do not independently verify source retrieval by the Harness. See the
-[live continuation](../plans/20261022-agent-search-antigravity.md#沙箱配置后的真实续验2026-11-06)
-and [maintainer default-model smoke](../plans/20261022-agent-search-antigravity.md#维护者审查中的默认模型续验2026-11-06)
+timeouts, repeated cancellation, denied signal-zero probes, output bounds, and daemon shutdown.
+Live Web, Paper, and both-branch All searches succeeded with `claude-sonnet-4-6` through the
+CLI/socket/daemon path. With `agy 1.5.2`, later maintainer Web smokes passed for an unpinned
+default (71.8 seconds) and the available `gemini-3.8-flash-high` pin (51.7 seconds). Each produced
+two valid, admitted Web rows without Gateway HTTP calls and passed process-group, quota,
+temporary-cwd, and socket cleanup. The pinned run confirmed the exact `--model` argument;
+the unpinned run's effective saved model was not discovered.
+A separate direct Harness `stream-json` check observed `search_web`, lifecycle states
+`ACTIVE`/`DONE`, and terminal `SUCCESS` in 95.4 seconds. This was not the same Gateway request
+and does not independently establish that every returned citation was accessed or is accurate.
+Gemini Paper/All, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain
+unverified. See the [live continuation](../plans/20261022-agent-search-antigravity.md#沙箱配置后的真实续验2026-11-06),
+[default-model smoke](../plans/20261022-agent-search-antigravity.md#维护者审查中的默认模型续验2026-11-06),
+and [Gemini continuation](../plans/20261022-agent-search-antigravity.md#维护者审查中的-gemini-续验2026-11-06)
 for the completed checks and their limits.
 
 **Primary acceptance requirements:**
