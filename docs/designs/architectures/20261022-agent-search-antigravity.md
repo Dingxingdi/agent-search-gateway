@@ -1,8 +1,8 @@
 ## Architecture: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. Live pinned-model Web retrieval, All partial success, and process/shutdown cleanup are verified with temporary proxy mappings. A reproduced Paper failure is blocked by the Harness's headless command permission; default-model retrieval, successful Paper/All branches, and live follow-up fetch remain unverified. See the implementation plan's execution evidence and environment prerequisites.
+**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. On 2026-11-06, live pinned-model Web, Paper, and both-branch All search succeeded with `claude-sonnet-4-6` through the Gateway CLI/socket/daemon path and temporary proxy mappings. With `proceed-in-sandbox`, the Agent successfully ran a read-only terminal command in the workspace. Default/Gemini requests did not complete successfully within the recorded smoke-test budgets; broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified. See the implementation plan's 2026-11-06 continuation record.
 **Date:** 2026-10-22
-**Last revised:** 2026-10-23
+**Last revised:** 2026-11-06
 **Base revision:** `fe72cc1` (`main`).
 **Companion documents:** [Error handling](../error-handlings/20261022-agent-search-antigravity.md) and [Testing](../testings/20261022-agent-search-antigravity.md).
 
@@ -173,7 +173,7 @@ provider = "antigravity_main"
 # model = "gemini-3.1-pro-high"  # Optional pin for this invocation.
 ```
 
-This is a **proposed config**, not a currently supported schema. `provider` must still be configured; omitting `model` does not auto-create an invocation or inherit `global_default_llm`. An explicit model identifier should be checked by the user against the installed `agy models`; neither `doctor` nor startup performs model discovery or reads Antigravity settings. Gateway passes an explicit model only for that invocation and never changes the saved default.
+In the implemented schema, `provider` must still be configured; omitting `model` does not auto-create an invocation or inherit `global_default_llm`. An explicit model identifier should be checked by the user against the installed `agy models`; neither `doctor` nor startup performs model discovery or reads Antigravity settings. Gateway passes an explicit model only for that invocation and never changes the saved default.
 
 #### Concurrency / Scheduling
 
