@@ -2,14 +2,15 @@
 
 import asyncio
 import json
+import logging
 import os
 import signal
 from collections.abc import Sequence
-from contextlib import suppress
 from tempfile import TemporaryDirectory
 
 from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
+from ...observability import log_event
 from ..contracts import ChatMessage
 
 _BASE_ENVIRONMENT = (
@@ -100,11 +101,18 @@ async def _read_stream(stream: asyncio.StreamReader, *, capture: bool, limit: in
 
 _HARD_TIMEOUT_MARGIN_SECONDS = 5.0
 _TERMINATE_GRACE_SECONDS = 2.0
+_DRAIN_TIMEOUT_SECONDS = 2.0
+_REAP_TIMEOUT_SECONDS = 2.0
 
 
-def _signal_group(pid: int, sig: signal.Signals) -> None:
-    with suppress(ProcessLookupError):
+def _signal_group(pid: int, sig: signal.Signals) -> bool:
+    try:
         os.killpg(pid, sig)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _group_exists(pid: int) -> bool:
@@ -112,8 +120,8 @@ def _group_exists(pid: int) -> bool:
         os.killpg(pid, 0)
     except ProcessLookupError:
         return False
-    except PermissionError:
-        # A denied existence probe must not bypass bounded termination and reaping.
+    except OSError:
+        # An inconclusive probe must not bypass bounded termination and reaping.
         return True
     return True
 
@@ -124,36 +132,68 @@ async def _discard_remaining(stream: asyncio.StreamReader | None) -> None:
             pass
 
 
+async def _drain_and_reap(process: asyncio.subprocess.Process, timeout: float) -> bool:
+    try:
+        async with asyncio.timeout(timeout):
+            results = await asyncio.gather(
+                _discard_remaining(process.stdout),
+                _discard_remaining(process.stderr),
+                process.wait(),
+                return_exceptions=True,
+            )
+    except TimeoutError:
+        return False
+    return not any(isinstance(result, BaseException) for result in results)
+
+
 async def _cleanup_process(
     spawn: asyncio.Task[asyncio.subprocess.Process] | None,
     tasks: Sequence[asyncio.Task[bytes] | asyncio.Task[int]],
-) -> None:
+) -> str | None:
     if spawn is None:
-        return
+        return None
     try:
         process = await spawn
     except (Exception, asyncio.CancelledError):
-        return
-    # The leader can already have exited while its descendants still own pipes.
-    _signal_group(process.pid, signal.SIGTERM)
+        return None
+    # A signalling error must not skip reader cancellation or bounded pipe cleanup.
+    failed = not _signal_group(process.pid, signal.SIGTERM)
     deadline = asyncio.get_running_loop().time() + _TERMINATE_GRACE_SECONDS
     while _group_exists(process.pid):
         remaining = deadline - asyncio.get_running_loop().time()
         if remaining <= 0:
-            _signal_group(process.pid, signal.SIGKILL)
+            killed = _signal_group(process.pid, signal.SIGKILL)
+            failed = failed or not killed
             break
         await asyncio.sleep(min(0.02, remaining))
     for task in tasks:
         if not task.done():
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
-    # Drain after termination so a full pipe cannot prevent transport closure/reaping.
-    await asyncio.gather(
-        _discard_remaining(process.stdout), _discard_remaining(process.stderr), process.wait()
-    )
+    drained = await _drain_and_reap(process, _DRAIN_TIMEOUT_SECONDS)
+    failed = failed or not drained
+    try:
+        # Process has no public close API. CPython's transport closes inherited
+        # pipes and attempts to kill the leader; pipe EOF can otherwise wait forever.
+        process._transport.close()  # type: ignore[attr-defined]
+    except OSError:
+        failed = True
+    if not drained:
+        reaped = await _drain_and_reap(process, _REAP_TIMEOUT_SECONDS)
+        failed = failed or not reaped
+    if failed:
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "agent_cleanup_failed",
+            stage="agent_process_cleanup",
+            reason="execution_failure",
+        )
+        return "execution_failure"
+    return None
 
 
-async def _finish_cleanup(task: asyncio.Task[None]) -> None:
+async def _finish_cleanup(task: asyncio.Task[str | None]) -> str | None:
     # Retain and await the shielded task even when shutdown cancels us twice.
     cancelled = False
     while not task.done():
@@ -161,9 +201,10 @@ async def _finish_cleanup(task: asyncio.Task[None]) -> None:
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
-    task.result()
+    reason = task.result()
     if cancelled:
         raise asyncio.CancelledError
+    return reason
 
 
 async def run_antigravity(
@@ -193,6 +234,7 @@ async def run_antigravity(
         with TemporaryDirectory(prefix="agent-search-") as directory:
             spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
             tasks: list[asyncio.Task[bytes] | asyncio.Task[int]] = []
+            succeeded = False
             try:
                 async with asyncio.timeout(timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS):
                     spawn = asyncio.create_task(
@@ -217,11 +259,15 @@ async def run_antigravity(
                     wait = asyncio.create_task(process.wait())
                     tasks.extend((stdout, stderr, wait))
                     await asyncio.gather(*tasks)
-                    return _decode_terminal_response(stdout.result(), wait.result())
+                    response = _decode_terminal_response(stdout.result(), wait.result())
+                    succeeded = True
+                    return response
             except TimeoutError:
                 raise _execution_failure("timeout") from None
             except OSError:
                 raise _execution_failure("spawn_failure") from None
             finally:
                 cleanup = asyncio.create_task(_cleanup_process(spawn, tasks))
-                await _finish_cleanup(cleanup)
+                cleanup_reason = await _finish_cleanup(cleanup)
+                if succeeded and cleanup_reason is not None:
+                    raise _execution_failure(cleanup_reason)

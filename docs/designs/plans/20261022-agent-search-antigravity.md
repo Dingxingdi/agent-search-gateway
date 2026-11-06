@@ -202,6 +202,26 @@ Runtime/socket/结果目录和仅测试进程内的代理映射，没有修改�
   或任意查询均会使用工具。**Gemini Paper/All、宽泛 Paper 延迟、沙箱外拒绝和真实后续
   `url-fetch` 仍未验证**；已有 Claude Paper/All 成功记录与离线回归覆盖保持有效。
 
+### 维护者审查中的有界清理回归（2026-11-06）
+
+Qodo 对 `9fef070` 提出的两项问题均在真实子进程回归中复现：脱离进程组的后代
+持有 stdout/stderr 时，最终 drain/wait 永不完成；SIGTERM / SIGKILL 权限错误则会
+跳过清理并覆盖原有取消、超时或终态错误。新增 7 个参数化用例在旧实现上全部失败。
+
+修复将清理分成最多 2 秒的进程组终止宽限、2 秒的 drain/reap，以及关闭本调用持有的
+transport/管道后最多 2 秒的最终回收等待。CPython 3.11–3.14 的相关实现已核对；
+高层 Process 没有公开 close 接口，因此此处有一处局部、明确的私有 transport 访问。
+操作系统信号或关闭错误不会阻止后续清理；日志仅记录固定的
+`agent_cleanup_failed` / `execution_failure`，不包含原始异常文本。
+
+错误优先级已与 Qodo 讨论确认：保留调用方取消、已有 timeout 或其他 invocation 错误；
+只有调用本身成功而清理失败时，改为安全的 ExecutionFailure。对逃离进程组或被操作系统
+拒绝终止的进程，不声称适配器能强制回收；有界等待后释放本调用的管道、quota 和临时目录，
+并记录失败。真实 escaped-child 测试会在自身 finally 中显式终止该测试进程。
+
+修复后生命周期、daemon shutdown 和 workflow deadline 定向套件 **37 passed**；
+完整离线套件 **1203 passed、4 skipped**。未增加真实网络请求或更改 Harness 配置。
+
 ### 计划编写检查单
 
 - [x] 阅读三份已批准 spec，核对架构、错误处理、测试要求。

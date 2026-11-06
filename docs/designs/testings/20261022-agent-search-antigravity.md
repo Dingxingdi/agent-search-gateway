@@ -14,10 +14,11 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 - `uv run ruff check .`: pass.
 - `uv run mypy src tests scripts`: pass.
 
-**Implementation evidence (updated 2026-11-06):** The ordinary suite has **1196 passed, 4 skipped**;
+**Implementation evidence (updated 2026-11-06):** The ordinary suite has **1203 passed, 4 skipped**;
 Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
 Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
-timeouts, repeated cancellation, denied signal-zero probes, output bounds, and daemon shutdown.
+timeouts, repeated cancellation, denied signal-zero/termination signals, detached pipe holders,
+bounded transport closure, output bounds, and daemon shutdown.
 Live Web, Paper, and both-branch All searches succeeded with `claude-sonnet-4-6` through the
 CLI/socket/daemon path. With `agy 1.5.2`, later maintainer Web smokes passed for an unpinned
 default (71.8 seconds) and the available `gemini-3.8-flash-high` pin (51.7 seconds). Each produced
@@ -263,6 +264,8 @@ Check that when every selected Agent fails, `agent-*.jsonl` is not produced; whe
 - Fake script hangs or spawns child/grandchild; per-run timeout kills and reaps its process group, leaves no temporary working directory.
 - Cancel an in-flight asyncio task and simulate the daemon 10-second shutdown cancellation; verify the process group is reaped and quota lease released.
 - Deny signal-zero process-group probes during cancellation while retaining real termination signals. Cleanup must still escalate after its grace period, drain pipes, reap the process, remove its temporary directory, release quota, and propagate `CancelledError`.
+- Start a real new-session descendant that retains inherited stdout/stderr. Cancellation and invocation timeout must finish within a fixed test deadline, reap the owned leader, close owned pipes, release quota and remove temporary cwd while the detached child remains alive. The fixture explicitly kills that escaped child in `finally`.
+- Deny SIGTERM, signal-zero probes and SIGKILL; also exercise a denied direct leader kill. Reader tasks and pipe handles must still finish, waits must be bounded, and cancellation/timeout/terminal-failure precedence must survive. A successful envelope plus failed cleanup becomes `execution_failure`; logs contain only the fixed diagnostic, without exception text.
 - Ensure status/error handling never logs raw stderr, JSON, prompt, tokens, secret names' values, or full exception text.
 
 The real CLI binary on the local developer machine is **not used** by ordinary tests.
@@ -347,7 +350,7 @@ The feature is ready for implementation review only after all of the following a
 - Agent Web/Paper/All produce the documented JSONL rows with correct source attribution.
 - The default-model path works through config, runtime, stages, subprocess argv and socket acceptance without a model flag; the pinned-model path remains explicitly selectable. JSON output and timeout flags remain present in both.
 - No Agent calls occur for invalid/empty selectors or missing search Agent configuration.
-- No subprocess remains after timeout, cancellation or daemon stop.
+- Owned process groups are terminated and reaped after timeout, cancellation or daemon stop when OS permissions permit it. Escaped descendants and denied termination cannot hold cleanup indefinitely; their documented failure path releases local resources without reporting successful cleanup.
 - No unrelated LLM/Web API credentials enter Agent subprocesses by default or appear in logs.
 - No real provider API or live Agent credentials are needed for the ordinary test suite.
 - Documentation and changelog capture the new public command and configuration surface.

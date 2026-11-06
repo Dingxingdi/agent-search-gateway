@@ -12,7 +12,7 @@
 - Treat the headless CLI as a **fallible external process**, not as a guaranteed successful model completion. Nonzero process exit or JSON `status != SUCCESS` cannot count as success.
 - Never log raw prompt, raw response, Antigravity stderr, CLI error payloads, authentication values, API keys or unredacted exception messages. Emit a small allowlisted failure category.
 - Each Agent invocation/branch can fail independently. Keep `llm-search`'s existing partial success semantics: one surviving provider/branch is enough; both `all` branches failing produces no result.
-- Never leave orphaned child processes after a timeout, parent-task cancellation, daemon shutdown or stdout/stderr over-limit event.
+- Terminate and reap the owned process group after a timeout, cancellation, shutdown or output overflow. Cleanup must remain bounded if a descendant leaves the group or the OS denies termination; never report a cleanup failure as successful execution.
 - Preserve existing fetch LLM configuration/validation and all keyword/fetch error semantics.
 
 ### 2. Error Matrix
@@ -37,7 +37,8 @@
 | Both `all` branches fail | `ExecutionFailure(ALL_PROVIDERS_FAILED)` | Error | No new file |
 | Per-process timeout / oversized output | Provider execution failure | Existing all-provider failure if all fail | Kill process group and reap |
 | Whole Agent request exceeds workflow deadline | `ExecutionFailure(ALL_PROVIDERS_FAILED)` with safe timeout message | Error | Cancel all children, no file |
-| External cancellation / daemon stop | Propagate `CancelledError` | Existing daemon cancellation behavior | Kill process group, cleanup temp directory |
+| External cancellation / daemon stop | Propagate `CancelledError` | Existing daemon cancellation behavior | Attempt group termination and bounded drain/reap; release local resources |
+| Cleanup signal / transport error or drain/reap deadline | Safe `execution_failure` diagnostic | Preserve an existing cancellation or invocation failure; otherwise provider `ExecutionFailure` | Continue cleanup, close owned pipes, release quota and temporary cwd after bounded attempts |
 | Filesystem write/collision/error | Existing writer/daemon failure path | Existing sanitized error | Writer rolls back newly created file |
 
 The classification shown for a provider failure is internal; the existing `SearchOrchestrator` aggregation determines the final result. A `ProtocolFailure` from one invocation should not override an otherwise successful sibling.
@@ -117,12 +118,14 @@ Use three independent bounds:
 | Complete `agent-search` workflow | 1,140 seconds | Cancels queued and running jobs, including both `all` branches |
 | CLI-to-daemon socket for `AgentSearchRequest` | 1,200 seconds | Leaves room for error delivery/process cleanup; all existing commands keep 300 seconds |
 
-- Acquire Agent per-provider quota **before** launching the child and release after reaping.
-- On `TimeoutError`, mark the invocation failed and terminate the child's process group; after bounded graceful termination use forced kill and await process reaping.
-- On `asyncio.CancelledError`, perform the same cleanup and re-raise rather than treating cancellation as a normal failed provider.
-- On daemon shutdown, the existing 10-second grace period applies; after daemon cancellation all Agent children must be terminated and reaped.
-- On oversized stdout/stderr, terminate and reap before reporting `output_limit`. Do not use unbounded `communicate()` buffering.
-- Place temporary working directory removal in `finally`; ensure it is not deleted until the child has terminated.
+- Acquire Agent per-provider quota **before** launching the child and retain it through cleanup. Normal cleanup terminates and reaps the group before releasing quota and removing the temporary cwd.
+- On `TimeoutError`, mark the invocation failed, send SIGTERM to the owned process group, allow at most 2 seconds of graceful termination, then attempt SIGKILL. An inconclusive existence probe must not bypass that escalation.
+- Bound the final combined pipe drain and process wait to 2 seconds. Close the subprocess transport and its owned pipes afterward; if the first wait did not complete, allow a final 2-second drain/reap attempt. A descendant that calls `setsid()` and keeps inherited pipes open must not make the shielded cleanup wait forever.
+- Catch OS errors at the signal and transport boundaries so reader cancellation and bounded drain/reap still run. Record the fixed `agent_cleanup_failed` event with `reason=execution_failure`, without raw exception text. Preserve an already-pending cancellation, timeout, or invocation failure; turn an otherwise successful invocation into `ExecutionFailure` when cleanup fails.
+- On `asyncio.CancelledError`, finish the same bounded cleanup and re-raise rather than treating cancellation as a normal failed provider. Repeated cancellation must not abandon cleanup.
+- On daemon shutdown, the existing 10-second grace period applies before cancellation; the adapter then uses these bounded cleanup attempts.
+- On oversized stdout/stderr, perform cleanup before reporting `output_limit`. Do not use unbounded `communicate()` buffering.
+- If the OS refuses termination or a descendant leaves the group, process-group signalling cannot guarantee that every descendant is dead. Close the handles owned by this call and release quota/temporary cwd after the bounded attempts, while reporting the cleanup failure. This exception to normal termination-before-release prevents a permanently blocked request; it is not process sandboxing.
 - A process timeout must never become a success because partial stdout happens to resemble a valid Markdown result.
 
 #### 4.4 Bounded Output and Secret-safe Diagnostics
@@ -131,7 +134,7 @@ Proposed adapter limits: stdout up to **4 MiB**, stderr up to **256 KiB**. Read 
 
 The safe `model` metadata is the configured string or `None` (rendered as `model=null` by the existing formatter). It does not claim to identify the Harness's effective default; do not read settings or call `agy models` to fill it.
 
-Log only these categories (or equivalent fixed codes): `spawn_failure`, `nonzero_exit`, `terminal_status_failure`, `invalid_json`, `empty_response`, `invalid_markdown`, `timeout`, `output_limit`, `cancelled`. Do not log raw text even at DEBUG level.
+Log only these categories (or equivalent fixed codes): `spawn_failure`, `nonzero_exit`, `terminal_status_failure`, `invalid_json`, `empty_response`, `invalid_markdown`, `timeout`, `output_limit`, `cancelled`, `execution_failure`. Do not log raw text even at DEBUG level.
 
 **Trade-off:** `agy -p TEXT` necessarily places the research prompt in subprocess argv, which might be visible in local process inspection while the child runs. This is an explicit limitation of choosing minimal non-interactive `-p` integration; switching to streaming stdin is a separate future hardening effort. Do not use a shell to construct argv.
 
