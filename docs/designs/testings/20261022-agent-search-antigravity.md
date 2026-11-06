@@ -1,6 +1,6 @@
 ## Testing: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. On 2026-11-06, live pinned-model Web, Paper, and both-branch All search succeeded with `claude-sonnet-4-6` through the Gateway CLI/socket/daemon path and temporary proxy mappings. With `proceed-in-sandbox`, the Agent successfully ran a read-only terminal command in the workspace. Default/Gemini requests did not complete successfully within the recorded smoke-test budgets; broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified. See the implementation plan's 2026-11-06 continuation record.
+**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. A later maintainer smoke with `agy 1.5.2` also completed unpinned default-model Web search in 71.8 seconds with zero Gateway HTTP calls. Gemini-specific retrieval, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; successful parsing does not independently verify source retrieval. See the implementation plan's 2026-11-06 records.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Errors:** [20261022-agent-search-antigravity.md](../error-handlings/20261022-agent-search-antigravity.md).
 
@@ -14,18 +14,21 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 - `uv run ruff check .`: pass.
 - `uv run mypy src tests scripts`: pass.
 
-**Implementation evidence (2026-10-23):** The final ordinary suite has **1195 passed, 4 skipped**;
+**Implementation evidence (updated 2026-11-06):** The ordinary suite has **1195 passed, 4 skipped**;
 Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
 Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
-timeouts, cancellation, output bounds, and daemon shutdown. Temporary proxy mappings now
-allow live model discovery and pinned-model Web success through the real CLI/socket/daemon
-path. All-scope partial success and cleanup also pass. Paper still returns an empty terminal
-response; a diagnostic invocation explicitly identifies auto-denied headless command
-permission. Default-model retrieval, successful Paper retrieval, both-branch All success,
-and live follow-up fetch remain unverified. The installed fetch configuration's required
-environment variable is missing. See the
-[execution record](../plans/20261022-agent-search-antigravity.md#实施与验收记录2026-10-23)
-for exact evidence, limits, and the environment prerequisites for the remaining live checks.
+timeouts, repeated cancellation, output bounds, and daemon shutdown. Live pinned-model
+Web, Paper, and both-branch All searches succeeded with `claude-sonnet-4-6` through the
+CLI/socket/daemon path. A later maintainer smoke with `agy 1.5.2` also completed unpinned
+default-model Web search in 71.8 seconds, producing two valid and admitted Web rows without
+an execution `--model` flag or any Gateway HTTP calls. Process-group, quota, temporary-cwd,
+and socket cleanup passed. The effective Harness default was not discovered, so this does
+not establish Gemini-specific success. Gemini-specific retrieval, broad Paper latency,
+sandbox-outside denial, and live follow-up fetch remain unverified; parsing and URL admission
+do not independently verify source retrieval by the Harness. See the
+[live continuation](../plans/20261022-agent-search-antigravity.md#沙箱配置后的真实续验2026-11-06)
+and [maintainer default-model smoke](../plans/20261022-agent-search-antigravity.md#维护者审查中的默认模型续验2026-11-06)
+for the completed checks and their limits.
 
 **Primary acceptance requirements:**
 

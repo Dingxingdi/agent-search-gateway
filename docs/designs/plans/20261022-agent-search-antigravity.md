@@ -147,6 +147,26 @@ Antigravity 配置、代理服务或 ngrok。CLI 版本为 **1.4.7**，`agy mode
 - 普通离线测试和质量门复跑：**1195 passed、4 skipped**，Ruff、mypy、
   格式检查和文档构建均通过。
 
+### 维护者审查中的默认模型续验（2026-11-06）
+
+本轮在维护者的独立审查工作树中验证 PR #90 的 `cd02e386`，实际安装的 CLI 为
+`agy 1.5.2`。使用独立临时 Runtime、Unix socket 和结果目录；Agent invocation
+省略 `model`，单次 `timeout_seconds` 设为 540，以容纳服务端首字延迟。
+仅在测试进程中映射已有代理变量，并通过 `pass_env` 明确传递；没有修改持久配置。
+
+- 真实 CLI → socket → daemon → Runtime → `agy -p` → parser/store/writer
+  的默认模型 Web 搜索约 **71.8 秒成功**，输出 2 条 Python 官方文档结果。
+- 确认子进程 argv **没有 `--model`**，stdout 只有 `agent-*.jsonl` 的绝对路径，
+  每行只有 `url` / `abstract`，两个 URL 均已进入共享 URLStore。
+- Gateway HTTP transport 拒绝意外调用，本轮实际 **0 Gateway HTTP calls**，
+  因而没有使用 Gateway 的 LLM API 搜索或内容处理阶段。
+- 请求结束时 Agent quota 为 0，子进程已退出、所属进程组不存在、Agent 临时 cwd
+  已删除；随后独立 daemon 的 socket 和 Runtime 临时目录也已清理。
+- 本轮没有读取或推断 Harness 实际选择的默认模型。默认模型 Web 路径已真实通过，
+  但不能据此宣称 Gemini 专项检索已通过。此前的 Claude Paper / All 成功证据仍见上节。
+- 宽泛 Paper 查询延迟、沙箱外路径拒绝和真实后续 `url-fetch` 仍未验证；结果格式和
+  URL admission 也不独立证明 Harness 实际访问过来源。原有 2026-10-23 记录作为历史证据保留。
+
 ### 计划编写检查单
 
 - [x] 阅读三份已批准 spec，核对架构、错误处理、测试要求。

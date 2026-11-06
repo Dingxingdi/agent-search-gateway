@@ -1,6 +1,6 @@
 ## Error Handling: Agent Search with Antigravity CLI
 
-**Status:** Implemented and offline-verified on 2026-10-23, including optional model selection. On 2026-11-06, live pinned-model Web, Paper, and both-branch All search succeeded with `claude-sonnet-4-6` through the Gateway CLI/socket/daemon path and temporary proxy mappings. With `proceed-in-sandbox`, the Agent successfully ran a read-only terminal command in the workspace. Default/Gemini requests did not complete successfully within the recorded smoke-test budgets; broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified. See the implementation plan's 2026-11-06 continuation record.
+**Status:** Implemented and offline-verified, including optional model selection. Live Web, Paper, and both-branch All succeeded with `claude-sonnet-4-6` on 2026-11-06. A later maintainer smoke with `agy 1.5.2` also completed unpinned default-model Web search in 71.8 seconds with zero Gateway HTTP calls. Gemini-specific retrieval, broad Paper latency, sandbox-outside denial, and live follow-up fetch remain unverified; successful parsing does not independently verify source retrieval. See the implementation plan's 2026-11-06 records.
 **Architecture:** [20261022-agent-search-antigravity.md](../architectures/20261022-agent-search-antigravity.md).
 **Testing:** [20261022-agent-search-antigravity.md](../testings/20261022-agent-search-antigravity.md).
 
