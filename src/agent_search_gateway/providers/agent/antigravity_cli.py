@@ -112,6 +112,9 @@ def _group_exists(pid: int) -> bool:
         os.killpg(pid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        # A denied existence probe must not bypass bounded termination and reaping.
+        return True
     return True
 
 

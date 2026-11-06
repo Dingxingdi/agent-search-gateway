@@ -14,7 +14,7 @@ Pre-change verification on `main` at `fe72cc1` (completed in discussion, not a t
 - `uv run ruff check .`: pass.
 - `uv run mypy src tests scripts`: pass.
 
-**Implementation evidence (updated 2026-11-06):** The ordinary suite has **1195 passed, 4 skipped**;
+**Implementation evidence (updated 2026-11-06):** The ordinary suite has **1196 passed, 4 skipped**;
 Ruff formatting/lint, strict mypy (195 files), and the documentation build pass.
 Real-executable offline tests cover all three scopes, follow-up fetch, process descendants,
 timeouts, repeated cancellation, output bounds, and daemon shutdown. Live pinned-model
@@ -259,6 +259,7 @@ Check that when every selected Agent fails, `agent-*.jsonl` is not produced; whe
 - stdout over 4 MiB / stderr over 256 KiB terminates the child and rejects the invocation; no truncated success.
 - Fake script hangs or spawns child/grandchild; per-run timeout kills and reaps its process group, leaves no temporary working directory.
 - Cancel an in-flight asyncio task and simulate the daemon 10-second shutdown cancellation; verify the process group is reaped and quota lease released.
+- Deny signal-zero process-group probes during cancellation while retaining real termination signals. Cleanup must still escalate after its grace period, drain pipes, reap the process, remove its temporary directory, release quota, and propagate `CancelledError`.
 - Ensure status/error handling never logs raw stderr, JSON, prompt, tokens, secret names' values, or full exception text.
 
 The real CLI binary on the local developer machine is **not used** by ordinary tests.

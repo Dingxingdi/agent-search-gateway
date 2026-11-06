@@ -167,6 +167,17 @@ Antigravity 配置、代理服务或 ngrok。CLI 版本为 **1.4.7**，`agy mode
 - 宽泛 Paper 查询延迟、沙箱外路径拒绝和真实后续 `url-fetch` 仍未验证；结果格式和
   URL admission 也不独立证明 Harness 实际访问过来源。原有 2026-10-23 记录作为历史证据保留。
 
+### 维护者审查中的进程组探测回归（2026-11-06）
+
+`8dcdf15` 的 [macOS / Python 3.12 CI](https://github.com/Dingxingdi/agent-search-gateway/actions/runs/42214241551/job/127880180958)
+在 spawn 返回期间取消请求时复现了真实缺陷：`os.killpg(pid, 0)` 的 `PermissionError`
+中断清理并覆盖 `CancelledError`。存在性探测被拒绝不代表进程组已经消失；适配器现在
+继续有时限的 SIGTERM / SIGKILL 流程，而不提前退出。实际终止信号的权限错误仍不会被隐藏。
+
+回归测试在真实进程及后代上仅注入 signal-zero 探测失败，实际终止、管道排空与回收仍由
+操作系统完成；旧实现稳定失败，修复后通过，并断言取消异常、临时目录清理和 quota 释放。
+完整离线套件更新为 **1196 passed、4 skipped**；格式、Ruff、mypy 和文档构建在提交前复验。
+
 ### 计划编写检查单
 
 - [x] 阅读三份已批准 spec，核对架构、错误处理、测试要求。

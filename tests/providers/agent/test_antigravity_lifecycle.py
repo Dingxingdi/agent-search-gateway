@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -266,12 +267,14 @@ async def test_terminal_exit_cleans_remaining_descendants(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize("deny_group_probe", [False, True])
 async def test_cancel_while_spawn_is_returning_keeps_process_handle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    deny_group_probe: bool,
 ) -> None:
     monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.05, raising=False)
-    command, ready = hanging_cli(tmp_path)
+    command, ready = hanging_cli(tmp_path, ignore_term=deny_group_probe)
     original = asyncio.create_subprocess_exec
     created, release = asyncio.Event(), asyncio.Event()
 
@@ -294,6 +297,18 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
         )
     )
     state = await wait_for_json(ready)
+    signals: list[int] = []
+    original_killpg = os.killpg
+
+    def denied_probe(pid: int, sig: int) -> None:
+        if pid == state["pid"]:
+            signals.append(sig)
+            if sig == 0:
+                raise PermissionError("process-group probe denied")
+        original_killpg(pid, sig)
+
+    if deny_group_probe:
+        monkeypatch.setattr(os, "killpg", denied_probe)
     try:
         await created.wait()
         task.cancel()
@@ -301,6 +316,10 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
         assert_clean(state, gate)
+        if deny_group_probe:
+            assert 0 in signals
+            assert signal.SIGTERM in signals
+            assert signal.SIGKILL in signals
     finally:
         release.set()
         force_cleanup(state)
