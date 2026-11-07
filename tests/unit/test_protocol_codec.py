@@ -180,3 +180,79 @@ def test_selector_frames_buffer_and_split_without_losing_metadata() -> None:
     decoder = NDJSONDecoder()
     assert decoder.feed(wire[:17]) == []
     assert decoder.feed(wire[17:]) == requests
+
+
+def test_agent_search_frame_round_trips_without_default_fields() -> None:
+    frame = b'{"type":"agent_search","prompt":"topic"}\n'
+    request = decode_request_frame(frame)
+    assert not isinstance(request, ErrorResponse)
+    from agent_search_gateway.models import AgentSearchRequest
+
+    assert request == AgentSearchRequest("topic")
+    assert encode_request(request) == frame
+
+
+@pytest.mark.parametrize("scope", ["web", "paper", "all"])
+@pytest.mark.parametrize("provider", [None, "alias", ""])
+@pytest.mark.parametrize("model", [None, "pinned-model", ""])
+def test_agent_selector_frame_round_trip(
+    scope: str,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    payload: dict[str, object] = {"type": "agent_search", "prompt": "topic"}
+    if scope != "web":
+        payload["scope"] = scope
+    if provider is not None:
+        payload["provider"] = provider
+    if model is not None:
+        payload["model"] = model
+    frame = json.dumps(payload, separators=(",", ":")).encode() + b"\n"
+    request = decode_request_frame(frame)
+    assert not isinstance(request, ErrorResponse)
+    assert encode_request(request) == frame
+    from agent_search_gateway.models import AgentSearchRequest
+
+    assert isinstance(request, AgentSearchRequest)
+    assert (request.scope, request.provider, request.model) == (scope, provider, model)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("prompt", None),
+        ("prompt", 7),
+        ("provider", None),
+        ("provider", True),
+        ("provider", []),
+        ("provider", {}),
+        ("model", None),
+        ("model", 7),
+        ("model", []),
+        ("model", {}),
+        ("scope", None),
+        ("scope", 7),
+        ("scope", []),
+        ("scope", "invalid"),
+        ("extra", "ignored"),
+    ],
+)
+def test_agent_frame_rejects_invalid_fields(field: str, value: object) -> None:
+    payload = {"type": "agent_search", "prompt": "topic", field: value}
+    assert decode_request_frame(json.dumps(payload).encode()) == ErrorResponse(
+        ErrorCode.BAD_REQUEST,
+        "Request fields do not match schema",
+    )
+
+
+def test_agent_frame_requires_prompt_and_round_trips_no_provider_error() -> None:
+    from agent_search_gateway.protocol import parse_response_frame
+
+    assert decode_request_frame(b'{"type":"agent_search"}') == ErrorResponse(
+        ErrorCode.BAD_REQUEST,
+        "Request fields do not match schema",
+    )
+    error = ErrorResponse(
+        ErrorCode.NO_AGENT_SEARCH_PROVIDERS, "No Agent search providers are configured"
+    )
+    assert parse_response_frame(encode_response(error)) == error

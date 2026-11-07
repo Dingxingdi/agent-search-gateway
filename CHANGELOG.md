@@ -10,6 +10,7 @@ The first public release is `v0.1.0`.
 
 ### Added
 
+- Added Antigravity-backed `agent-search` with `--scope web|paper|all`, exact `--provider` / `--model` selection, independent `agent_providers` and `search_agent` configuration, and optional Harness-default models. Results use `agent-<request_id>.jsonl`, shared Web/Paper schemas, and `agent:<alias>` paper provenance. Fresh subprocess invocations have bounded output, per-alias concurrency, process-group cleanup, workflow deadlines, and safe diagnostics without whole-Agent retries. `fetch_llm` still must resolve; LLM and Agent search are independently optional.
 - Added request-scoped `--provider` filtering to `keyword-search`, `paper-search`, and `llm-search`, plus independent `--model` filtering for `llm-search`. Filters select configured search backends before execution, preserve unfiltered defaults, and report distinct provider/model mismatch errors without falling back to other backends.
 
 ### Fixed

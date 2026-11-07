@@ -3,7 +3,7 @@
 [![CI](https://github.com/Dingxingdi/agent-search-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/Dingxingdi/agent-search-gateway/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`agent-search-gateway` is a local foreground daemon plus a thin CLI for aggregated keyword search, LLM-assisted search, and fetching URLs that were admitted by search.
+`agent-search-gateway` is a local foreground daemon plus a thin CLI for aggregated keyword search, LLM and Agent search, academic discovery, and fetching URLs admitted by search.
 
 Version 0.1 keeps URL admission and body state in daemon memory. Restarting the daemon clears that state. The daemon communicates over a local Unix-domain socket, so this version targets Unix-like environments. It does not provide persistent URL state, remote daemon access, automatic repairs, or live provider checks in `doctor`.
 
@@ -184,6 +184,134 @@ Selection lasts for one request; the next command without flags uses the full co
 
 For a smoke test, start the daemon with `--debug` and correlate the result filename's request ID with the search-stage provider/model events. Only the selected search pipelines should execute; legitimate judge or OA enrichment events may name other services. Successful search stdout remains only the absolute result-file path.
 
+## Agent search
+
+Agent search uses the installed and authenticated Antigravity CLI (`agy`).
+Add this configuration alongside the required `fetch_llm` configuration:
+
+```toml
+[agent_providers.antigravity_main]
+harness = "antigravity"
+command = "agy"
+max_concurrency = 1
+timeout_seconds = 300
+pass_env = []
+
+[[search_agent.providers]]
+provider = "antigravity_main"
+# Omit model to use the Harness default.
+# model = "MODEL"
+```
+
+```bash
+agent-search-gateway agent-search "Find sources about agent evaluation"
+agent-search-gateway agent-search "Find papers about agent evaluation" --scope paper
+agent-search-gateway agent-search "Find sources and papers about agent evaluation" --scope all
+```
+
+The default scope is `web`. Each invocation starts a fresh Agent process.
+`--provider` selects an exact configured alias; `--model` only filters explicitly
+configured model entries. It does not override or discover the Harness default.
+Search results are written to `agent-<request_id>.jsonl`; stdout contains only
+the absolute result path. Agent and LLM search configuration are independent.
+
+
+### Agent configuration and selection
+
+The provider key `antigravity_main` is your configuration alias; `harness = "antigravity"`
+selects the supported executable adapter. Agent aliases and quotas are independent of
+LLM provider aliases, even when their names match.
+
+| Setting | Type and default | Constraint |
+|---|---|---|
+| `harness` | Required string | Only `"antigravity"` is supported |
+| `command` | String, `"agy"` | One executable name or path; relative paths are anchored to the daemon's startup cwd, bare names use PATH; no shell command, embedded flags, or expansion |
+| `max_concurrency` | Integer, `1` | Positive; shared by every invocation of that alias |
+| `timeout_seconds` | Number, `300` | Positive, finite, at most `540` |
+| `pass_env` | Array of strings, `[]` | Additional environment-variable names, never values |
+| Invocation `provider` | Required string | Exact key in `agent_providers` |
+| Invocation `model` | Optional string | If present, nonempty; omission delegates to the Harness default |
+
+The four `fetch_llm` stages (judge, safety, content_clean, focus_summary) must still
+resolve through the existing explicit or inherited LLM configuration.
+`search_llm` and `search_agent` are independently optional. Omit `search_agent`, or
+replace its entries with `[search_agent]` and `providers = []`, to disable Agent
+search. An Agent-only search setup still needs valid fetch LLM configuration.
+
+Install, authenticate, and choose a saved default model in Antigravity before use.
+The gateway does not install it, log in, discover models, or inherit a model from
+`global_default_llm`. `doctor` validates Agent configuration locally without
+checking executable availability, authentication, or model access.
+
+To pin a model, obtain its exact slug from your installed version's `agy models`
+and set `model` on the same invocation. For example, after configuring
+`model = "MODEL"` (replace `MODEL` with an available slug), select it with:
+
+```bash
+agent-search-gateway agent-search "Find sources about agent evaluation" --provider antigravity_main --model MODEL
+```
+
+Gateway selectors are exact and case-sensitive after CLI whitespace trimming.
+Provider-only selection retains both default and pinned entries for that alias;
+model-only selection matches pinned entries across aliases; both flags select their
+intersection. A default entry never matches an explicit model selector, even when
+the Harness currently uses that model. No match fails before any Agent starts.
+Every matching entry executes independently, including duplicates, in configured
+result order. A later request without selectors uses the full configuration.
+
+### Agent results and execution limits
+
+Web rows keep exactly `url` and `abstract`. Paper rows use the existing paper schema,
+with `agent:<alias>` in `sources` and source-specific citation counts. Academic
+provider metadata retains precedence over generated Agent and LLM metadata.
+`--scope all` emits Web rows first with `"type":"web"`, then paper rows with
+`"type":"paper"`. It schedules separate fresh calls for both branches; a quota of
+one makes them queue. Each call has its own temporary working directory and does
+not resume a previous conversation.
+
+A successful branch may return no admissible rows and still create an empty file.
+Individual invocation or branch failures do not discard successful siblings.
+If all selected invocations or both branches fail, no result file is created.
+A whole-workflow timeout cancels unfinished work and does not write partial output.
+Only parsed and admitted landing URLs can be fetched; PDF metadata is not admitted.
+
+| Budget | Limit |
+|---|---|
+| Harness print timeout | `timeout_seconds`, explicitly passed on every call |
+| Python process deadline | Print timeout plus 5 seconds, starting after quota acquisition |
+| Process termination | SIGTERM to the process group, then SIGKILL after up to 2 seconds |
+| Whole Agent workflow | 1140 seconds, including quota queues and paper enrichment |
+| Agent socket response wait | 1200 seconds; other requests retain 300 seconds |
+| Captured output | stdout 4 MiB; stderr 256 KiB; overflow fails without accepting truncated output |
+
+These asynchronous deadlines cannot interrupt synchronous OS process creation if
+the operating system stalls before Python receives the process handle.
+
+Agent calls are not retried by the gateway; the HTTP retry configuration does not
+apply. Success requires exit code zero and one valid JSON terminal object with
+`status = "SUCCESS"` and a nonempty response, followed by normal Markdown parsing.
+A soft denial, successful status, or well-formed result does not prove that the
+Agent used tools or accessed the cited sources.
+
+The gateway requests JSON output and uses stdin from `DEVNULL`. It does not add
+automatic approval flags or manage Harness tools, MCP servers, or permissions.
+The serialized prompt is passed as the `-p` argument and may be visible to local
+process inspection. OS limits apply to individual arguments and the combined
+arguments/environment; an `E2BIG` rejection is reported with the safe diagnostic
+`argument_limit`, not `spawn_failure`. The protocol's 1 MiB request-frame ceiling
+does not guarantee that an external Harness can accept an equally large prompt.
+A private temporary cwd and a reduced environment are not a sandbox: Harness
+settings, auth caches, home files, and permitted tools remain under the Harness's
+control.
+
+The child environment keeps `PATH`, `HOME`, standard XDG config/cache/data/state/runtime
+paths, temporary-directory variables, and locale variables, plus explicitly named
+`pass_env` entries that exist in the daemon environment. It does not copy arbitrary
+gateway credentials. Use `pass_env` only for variables your Harness needs; configuration
+contains names, not secret values. Debug events record alias, configured model
+(`null` when omitted), stage, timing, counts, and fixed failure classifications;
+they do not record prompts, responses, raw stderr, or environment values.
+
 ## Academic paper search
 
 Direct paper discovery queries enabled academic providers concurrently and merges records by DOI, arXiv id, provider-native id, then a conservative bibliographic fallback. The built-in discovery order is arXiv, Semantic Scholar, OpenAlex, dblp, Crossref, then CORE. Unpaywall is not a discovery provider; it runs after deduplication and only for DOI-bearing papers.
@@ -240,15 +368,15 @@ Fetch a URL that has already been admitted by a successful search. The final pos
 agent-search-gateway url-fetch "https://example.com/article" "pricing details"
 ```
 
-`keyword-search` and `llm-search --scope web` print the absolute path of a newly created JSONL result file. Each line contains exactly two public fields:
+`keyword-search`, `llm-search --scope web`, and `agent-search --scope web` print the absolute path of a newly created JSONL result file. Each line contains exactly two public fields:
 
 ```json
 {"url":"https://example.com/article","abstract":"Short search abstract"}
 ```
 
-A successful search result filename has the form `keyword-<request_id>.jsonl` or `llm-<request_id>.jsonl`. In DEBUG mode that same eight-hex-character request ID appears on the daemon's internal events, making the result file a direct correlation key for the trace.
+Successful search files use `keyword-<request_id>.jsonl`, `llm-<request_id>.jsonl`, `paper-<request_id>.jsonl`, or `agent-<request_id>.jsonl`. In DEBUG mode that same eight-hex-character request ID appears on the daemon's internal events, making the result file a direct correlation key for the trace.
 
-A URL must first be admitted by keyword or LLM search before `url-fetch` can use it. Admission, cached body content, and unavailable state are in memory only. A daemon restart therefore requires searching again before fetching the same URL.
+A URL must first be admitted by keyword, LLM, Agent, or academic paper search before `url-fetch` can use it. Admission, cached body content, and unavailable state are in memory only. A daemon restart therefore requires searching again before fetching the same URL.
 
 Business command stdout is final-output-only: successful search commands print only the absolute result path, and successful fetch commands print only their final text. DEBUG events are emitted by the daemon process to its stderr and debug log, not into a requesting business CLI's stdout.
 

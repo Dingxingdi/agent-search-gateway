@@ -21,6 +21,51 @@ from agent_search_gateway.url_normalization import normalize_url
 _ROOT = Path(__file__).parents[2]
 
 
+def test_agent_example_config_matches_documented_command() -> None:
+    from agent_search_gateway.models import AgentInvocation
+
+    raw = load_toml(_ROOT / "config.example.toml")
+    resolved = resolve_config(raw, build_default_registry(), _stub_environment(raw))
+    assert resolved.agent.search_invocations == (AgentInvocation("antigravity_main"),)
+    [provider] = resolved.agent.providers
+    assert (provider.name, provider.harness, provider.command) == (
+        "antigravity_main",
+        "antigravity",
+        "agy",
+    )
+    assert (provider.max_concurrency, provider.timeout_seconds, provider.pass_env) == (1, 300.0, ())
+    search = raw["search_agent"]
+    assert isinstance(search, dict)
+    entries = search["providers"]
+    assert isinstance(entries, list) and len(entries) == 1
+    entries[0]["model"] = "MODEL"
+    pinned = resolve_config(raw, build_default_registry(), _stub_environment(raw))
+    assert pinned.agent.search_invocations == (AgentInvocation("antigravity_main", "MODEL"),)
+
+    readme = (_ROOT / "README.md").read_text()
+    section = readme.split("## Agent search", 1)[1].split("\n## ", 1)[0]
+    commands = re.findall(r"^agent-search-gateway agent-search .+$", section, re.MULTILINE)
+    parsed = [build_parser().parse_args(shlex.split(command)[1:]) for command in commands]
+    assert parsed[0].scope == "web" and parsed[0].model is None
+    assert {args.scope for args in parsed} == {"web", "paper", "all"}
+    assert any(args.provider == "antigravity_main" and args.model == "MODEL" for args in parsed)
+    for document in ("docs/public-interface.md", "CHANGELOG.md"):
+        text = (_ROOT / document).read_text()
+        if document == "CHANGELOG.md":
+            text = text.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
+        for token in (
+            "agent-search",
+            "--scope",
+            "--provider",
+            "--model",
+            "agent-",
+            "agent:",
+            "fetch_llm",
+            "search_agent",
+        ):
+            assert token in text
+
+
 def test_readme_documents_request_scoped_provider_and_model_filters() -> None:
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     heading = "### Request-scoped provider and model filters"
@@ -139,7 +184,7 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
         re.findall(
             (
                 r"^agent-search-gateway "
-                r"(start|stop|doctor|keyword-search|paper-search|llm-search|url-fetch)\b"
+                r"(start|stop|doctor|keyword-search|paper-search|llm-search|agent-search|url-fetch)\b"
             ),
             readme,
             flags=re.MULTILINE,
@@ -152,6 +197,7 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
         "keyword-search",
         "paper-search",
         "llm-search",
+        "agent-search",
         "url-fetch",
     }
 

@@ -2,6 +2,7 @@
 
 import copy
 import math
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -10,7 +11,7 @@ from types import MappingProxyType
 from urllib.parse import urlsplit
 
 from .errors import ConfigFailure, ErrorCode
-from .models import LLMInvocation, RetryPolicy
+from .models import AgentInvocation, LLMInvocation, RetryPolicy
 from .observability import SecretValue
 from .providers.academic.registry import (
     AcademicProviderRegistration,
@@ -410,12 +411,29 @@ class ResolvedLLMConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentProviderConfig:
+    name: str
+    harness: str
+    command: str
+    max_concurrency: int
+    timeout_seconds: float
+    pass_env: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedAgentConfig:
+    providers: tuple[AgentProviderConfig, ...] = ()
+    search_invocations: tuple[AgentInvocation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedConfig:
     web: ResolvedWebProviderGroup
     llm: ResolvedLLMConfig
     retry: RetryPolicy
     academic: ResolvedAcademicProviderGroup = field(default_factory=ResolvedAcademicProviderGroup)
     oa_resolver: ResolvedOAResolverConfig | None = None
+    agent: ResolvedAgentConfig = field(default_factory=ResolvedAgentConfig)
 
 
 def _required_string(table: Mapping[str, object], key: str, label: str) -> str:
@@ -588,6 +606,76 @@ def _positive_float(value: object, label: str) -> float:
     return float(value)
 
 
+def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
+    search = _require_mapping(data.get("search_agent", {}), "search_agent")
+    if set(search) - {"providers"}:
+        raise _config_error("search_agent contains unsupported fields")
+    group = _require_mapping(data.get("agent_providers", {}), "agent_providers")
+    entries = search.get("providers", [])
+    if not isinstance(entries, list):
+        raise _config_error("search_agent.providers must be an array of tables")
+    invocations: list[AgentInvocation] = []
+    for index, raw_entry in enumerate(entries):
+        label = f"search_agent.providers[{index}]"
+        entry = _require_mapping(raw_entry, label)
+        if set(entry) - {"provider", "model"}:
+            raise _config_error(f"{label} contains unsupported fields")
+        invocations.append(
+            AgentInvocation(
+                _required_string(entry, "provider", label),
+                _required_string(entry, "model", label) if "model" in entry else None,
+            )
+        )
+    referenced = {invocation.provider for invocation in invocations}
+    providers: list[AgentProviderConfig] = []
+    for name, raw_table in group.items():
+        if name not in referenced:
+            continue
+        label = f"agent_providers.{name}"
+        table = _require_mapping(raw_table, label)
+        if set(table) - {"harness", "command", "max_concurrency", "timeout_seconds", "pass_env"}:
+            raise _config_error(f"{label} contains unsupported fields")
+        harness = _required_string(table, "harness", label)
+        if harness != "antigravity":
+            raise _config_error(f"{label}.harness must be antigravity")
+        command = _required_string(table, "command", label) if "command" in table else "agy"
+        if (
+            command != command.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in command)
+            or any(character in command for character in "|&;<>`$()")
+            or re.search(r"(?:^|\s)-", command)
+            or ("/" not in command and any(character.isspace() for character in command))
+        ):
+            raise _config_error(
+                f"{label}.command must be one executable name or path without flags"
+            )
+        timeout_value = table.get("timeout_seconds", 300)
+        if isinstance(timeout_value, int | float) and timeout_value > 540:
+            raise _config_error(f"{label}.timeout_seconds must not exceed 540")
+        timeout = _positive_float(timeout_value, f"{label}.timeout_seconds")
+        pass_env = table.get("pass_env", [])
+        if not isinstance(pass_env, list) or not all(
+            isinstance(item, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", item)
+            for item in pass_env
+        ):
+            raise _config_error(f"{label}.pass_env must be an array of environment variable names")
+        providers.append(
+            AgentProviderConfig(
+                name=name,
+                harness=harness,
+                command=command,
+                max_concurrency=_positive_int(
+                    table.get("max_concurrency", 1), f"{label}.max_concurrency"
+                ),
+                timeout_seconds=timeout,
+                pass_env=tuple(pass_env),
+            )
+        )
+    if referenced - {provider.name for provider in providers}:
+        raise _config_error("search_agent references an unconfigured Agent provider")
+    return ResolvedAgentConfig(tuple(providers), tuple(invocations))
+
+
 def resolve_retry_policy(data: Mapping[str, object]) -> RetryPolicy:
     retry_table = _require_mapping(data.get("retry", {}), "retry")
     return RetryPolicy(
@@ -631,6 +719,7 @@ def resolve_config(
         retry=resolve_retry_policy(data),
         academic=academic,
         oa_resolver=oa_resolver,
+        agent=resolve_agent_config(data),
     )
 
 

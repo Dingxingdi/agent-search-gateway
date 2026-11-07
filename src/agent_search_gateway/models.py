@@ -75,6 +75,12 @@ class LLMInvocation:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentInvocation:
+    provider: str
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RetryPolicy:
     max_attempts: int
     base_delay_seconds: float
@@ -100,13 +106,23 @@ class PaperSearchRequest:
     provider: str | None = None
 
 
-LLMSearchScope = Literal["web", "paper", "all"]
+SearchScope = Literal["web", "paper", "all"]
+LLMSearchScope = SearchScope
+TextSearchKind = Literal["llm", "agent"]
 
 
 @dataclass(frozen=True, slots=True)
 class LLMSearchRequest:
     prompt: str
     scope: LLMSearchScope = "web"
+    provider: str | None = None
+    model: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class AgentSearchRequest:
+    prompt: str
+    scope: SearchScope = "web"
     provider: str | None = None
     model: str | None = None
 
@@ -123,7 +139,12 @@ class ShutdownRequest:
 
 
 Request: TypeAlias = (
-    KeywordSearchRequest | PaperSearchRequest | LLMSearchRequest | URLFetchRequest | ShutdownRequest
+    KeywordSearchRequest
+    | PaperSearchRequest
+    | LLMSearchRequest
+    | AgentSearchRequest
+    | URLFetchRequest
+    | ShutdownRequest
 )
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 
 from .errors import InputFailure, ParserFailure
+from .models import TextSearchKind
 from .providers.contracts import PaperSearchHit
 from .url_normalization import normalize_url
 
@@ -29,7 +30,9 @@ _FIELDS = (
 _BLOCK_LINES = 1 + len(_FIELDS)
 
 
-def parse_paper_markdown(markdown: str, *, provider: str) -> list[PaperSearchHit]:
+def parse_paper_markdown(
+    markdown: str, *, provider: str, source_kind: TextSearchKind = "llm"
+) -> list[PaperSearchHit]:
     """Parse only exact repeated ``## Paper`` blocks into provider candidates."""
 
     if not isinstance(markdown, str) or not markdown.strip():
@@ -45,11 +48,11 @@ def parse_paper_markdown(markdown: str, *, provider: str) -> list[PaperSearchHit
     hits: list[PaperSearchHit] = []
     for start in range(0, len(lines), _BLOCK_LINES):
         block = lines[start : start + _BLOCK_LINES]
-        hits.append(_parse_block(block, provider_name))
+        hits.append(_parse_block(block, provider_name, source_kind))
     return hits
 
 
-def _parse_block(lines: list[str], provider: str) -> PaperSearchHit:
+def _parse_block(lines: list[str], provider: str, source_kind: TextSearchKind) -> PaperSearchHit:
     if len(lines) != _BLOCK_LINES or lines[0] != _HEADING:
         raise ParserFailure("Paper block heading is invalid")
 
@@ -72,7 +75,7 @@ def _parse_block(lines: list[str], provider: str) -> PaperSearchHit:
     is_open_access = _parse_open_access(values["Open Access"])
 
     return PaperSearchHit(
-        source=f"llm:{provider}",
+        source=f"{source_kind}:{provider}",
         source_id=str(url),
         title=title,
         authors=_split_semicolon(values["Authors"]),

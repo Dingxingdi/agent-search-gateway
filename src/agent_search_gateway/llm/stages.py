@@ -3,13 +3,13 @@
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TypeVar
 
 from ..errors import ErrorCode, ExecutionFailure
-from ..models import LLMInvocation, StageDecision
+from ..models import AgentInvocation, LLMInvocation, StageDecision
 from ..observability import elapsed_ms, log_event
-from ..providers.contracts import LLMClient
+from ..providers.contracts import AgentTextRunner, ChatMessage, LLMClient
 from .prompts import (
     content_clean_messages,
     focus_summary_messages,
@@ -35,10 +35,12 @@ class LLMStages:
         safety: LLMInvocation,
         content_clean: LLMInvocation,
         focus_summary: LLMInvocation,
+        agent_runners: Mapping[str, AgentTextRunner] | None = None,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._clients = dict(clients)
+        self._agent_runners = dict(agent_runners or {})
         self._judge = judge
         self._safety = safety
         self._content_clean = content_clean
@@ -123,6 +125,29 @@ class LLMStages:
                 llm_paper_search_messages(prompt),
             ),
         )
+
+    async def agent_search_markdown(self, invocation: AgentInvocation, prompt: str) -> str:
+        return await self._agent_markdown(invocation, llm_search_messages(prompt))
+
+    async def agent_paper_search_markdown(self, invocation: AgentInvocation, prompt: str) -> str:
+        return await self._agent_markdown(invocation, llm_paper_search_messages(prompt))
+
+    async def _agent_markdown(
+        self, invocation: AgentInvocation, messages: Sequence[ChatMessage]
+    ) -> str:
+        runner = self._agent_runners.get(invocation.provider)
+        if runner is None:
+            raise ExecutionFailure(
+                ErrorCode.ALL_PROVIDERS_FAILED,
+                "Agent provider is not initialized",
+                reason="execution_failure",
+            )
+        text = await runner(invocation.model, messages)
+        if not isinstance(text, str) or not text.strip():
+            raise ExecutionFailure(
+                ErrorCode.ALL_PROVIDERS_FAILED, "Agent returned empty text", reason="empty_response"
+            )
+        return text.strip()
 
     async def _run_decision_stage(
         self,

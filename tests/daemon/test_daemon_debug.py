@@ -33,6 +33,17 @@ class _Search:
     ) -> str:
         return prompt
 
+    async def agent_search(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        return f"agent:{prompt}"
+
 
 class _Paper:
     async def paper_search(
@@ -231,6 +242,17 @@ async def test_debug_workflow_lifecycle_logs_are_correlated_and_payload_safe(
             return "result"
 
         async def llm_search(
+            self,
+            prompt: str,
+            *,
+            request_id: str,
+            scope: str = "web",
+            provider: str | None = None,
+            model: str | None = None,
+        ) -> str:
+            return "unused"
+
+        async def agent_search(
             self,
             prompt: str,
             *,

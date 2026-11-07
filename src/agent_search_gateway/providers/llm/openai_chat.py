@@ -5,13 +5,13 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-from ..concurrency import CapacityGate
-from ..errors import ErrorCode, ExecutionFailure, ProtocolFailure
-from ..models import LLMInvocation, RetryPolicy
-from ..observability import SecretValue, log_event
-from ..retry import retry_async
-from .contracts import ChatMessage
-from .http import HttpJsonExecutor
+from ...concurrency import CapacityGate
+from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
+from ...models import LLMInvocation, RetryPolicy
+from ...observability import SecretValue, log_event
+from ...retry import retry_async
+from ..contracts import ChatMessage
+from ..http import HttpJsonExecutor
 
 _RESERVED_EXTRA_BODY_KEYS = frozenset({"model", "messages"})
 

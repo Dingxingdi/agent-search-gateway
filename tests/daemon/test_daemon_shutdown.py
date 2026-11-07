@@ -42,6 +42,17 @@ class _SlowSearch:
     ) -> str:
         return f"llm:{prompt}"
 
+    async def agent_search(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        return f"agent:{prompt}"
+
 
 class _Paper:
     async def paper_search(

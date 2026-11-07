@@ -7,7 +7,7 @@ from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
-from agent_search_gateway.providers.openai_chat import OpenAIChatCompletionsClient
+from agent_search_gateway.providers.llm.openai_chat import OpenAIChatCompletionsClient
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 
 pytestmark = pytest.mark.skipif(

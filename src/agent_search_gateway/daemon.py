@@ -13,6 +13,7 @@ from typing import Protocol
 from .config import load_toml, resolve_config
 from .errors import ConfigFailure, ErrorCode, GatewayError
 from .models import (
+    AgentSearchRequest,
     ErrorResponse,
     KeywordSearchRequest,
     LLMSearchRequest,
@@ -20,6 +21,7 @@ from .models import (
     PaperSearchRequest,
     Request,
     Response,
+    SearchScope,
     ShutdownRequest,
     SuccessResponse,
     URLFetchRequest,
@@ -51,6 +53,16 @@ class _SearchOrchestratorLike(Protocol):
         *,
         request_id: str,
         scope: LLMSearchScope = "web",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str: ...
+
+    async def agent_search(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        scope: SearchScope = "web",
         provider: str | None = None,
         model: str | None = None,
     ) -> str: ...
@@ -96,7 +108,11 @@ async def _default_shutdown_waiter(
 
 
 def _command_name(
-    request: KeywordSearchRequest | PaperSearchRequest | LLMSearchRequest | URLFetchRequest,
+    request: KeywordSearchRequest
+    | PaperSearchRequest
+    | LLMSearchRequest
+    | AgentSearchRequest
+    | URLFetchRequest,
 ) -> str:
     if isinstance(request, KeywordSearchRequest):
         return "keyword-search"
@@ -104,6 +120,8 @@ def _command_name(
         return "paper-search"
     if isinstance(request, LLMSearchRequest):
         return "llm-search"
+    if isinstance(request, AgentSearchRequest):
+        return "agent-search"
     return "url-fetch"
 
 
@@ -328,13 +346,19 @@ class ForegroundDaemon:
             return SuccessResponse("Daemon stopped.")
         if not isinstance(
             request,
-            (KeywordSearchRequest, PaperSearchRequest, LLMSearchRequest, URLFetchRequest),
+            (
+                KeywordSearchRequest,
+                PaperSearchRequest,
+                LLMSearchRequest,
+                AgentSearchRequest,
+                URLFetchRequest,
+            ),
         ):
             return ErrorResponse(ErrorCode.BAD_REQUEST, "Unknown request type")
 
         is_search = isinstance(
             request,
-            (KeywordSearchRequest, PaperSearchRequest, LLMSearchRequest),
+            (KeywordSearchRequest, PaperSearchRequest, LLMSearchRequest, AgentSearchRequest),
         )
         with (
             self._request_ids.reserve(may_write_search_result=is_search) as request_id,
@@ -344,7 +368,11 @@ class ForegroundDaemon:
 
     async def _dispatch_business(
         self,
-        request: KeywordSearchRequest | PaperSearchRequest | LLMSearchRequest | URLFetchRequest,
+        request: KeywordSearchRequest
+        | PaperSearchRequest
+        | LLMSearchRequest
+        | AgentSearchRequest
+        | URLFetchRequest,
         *,
         request_id: str,
     ) -> Response:
@@ -410,7 +438,11 @@ class ForegroundDaemon:
 
     async def _invoke_workflow(
         self,
-        request: KeywordSearchRequest | PaperSearchRequest | LLMSearchRequest | URLFetchRequest,
+        request: KeywordSearchRequest
+        | PaperSearchRequest
+        | LLMSearchRequest
+        | AgentSearchRequest
+        | URLFetchRequest,
         *,
         request_id: str,
     ) -> str:
@@ -429,6 +461,14 @@ class ForegroundDaemon:
             )
         if isinstance(request, LLMSearchRequest):
             return await runtime.search_orchestrator.llm_search(
+                request.prompt,
+                request_id=request_id,
+                scope=request.scope,
+                provider=request.provider,
+                model=request.model,
+            )
+        if isinstance(request, AgentSearchRequest):
+            return await runtime.search_orchestrator.agent_search(
                 request.prompt,
                 request_id=request_id,
                 scope=request.scope,

@@ -17,6 +17,42 @@ Changes to those interfaces require tests, documentation, and a changelog entry.
 
 The request-scoped `--provider` flag on `keyword-search`, `paper-search`, and `llm-search`, and the independent `--model` flag on `llm-search`, are supported CLI interfaces. Selection is exact and case-sensitive within the enabled search-provider or configured search-invocation namespace; LLM providers are configuration aliases, not protocol names. Both LLM filters select their intersection. Omitted filters preserve default behavior, and invalid selections fail without falling back to unselected backends. Filters do not apply to `url-fetch` or change normal post-search processing.
 
+### Agent search contract
+
+`agent-search PROMPT --scope web|paper|all` is a supported CLI command with default
+scope `web` and independent `--provider` and `--model` filters. Agent providers use
+the `agent_providers` namespace and `search_agent.providers` invocation list.
+`harness = "antigravity"`, `command`, `max_concurrency`, `timeout_seconds`, and
+`pass_env` follow the documented types, defaults, and bounds in the README.
+Proxy variables, like other extra environment variables, must exist in the daemon's
+environment and be explicitly named in `pass_env`; the gateway does not assign their
+values or load shell startup files. Configure the uppercase and/or lowercase
+`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` names required by the Harness
+in this allowlist. If the launcher stores proxy addresses under different names,
+map them to the standard names only in the daemon launch environment; keep addresses
+and credentials out of TOML. Restart the daemon after changing its environment or
+configuration.
+
+Invocation `model` is optional. Omission uses the Harness's saved default by
+omitting its execution `--model` flag; it never inherits an LLM model.
+The gateway's `--model` only matches explicitly configured models and never
+overrides an unpinned invocation. Exact case-sensitive selectors preserve order
+and duplicate invocations; a mismatch performs no Agent work and has no fallback.
+
+Successful stdout is only the absolute `agent-<request_id>.jsonl` path.
+Web rows retain exactly `url` and `abstract`; paper rows retain the existing
+paper schema with `agent:<alias>` provenance. Mixed results add a `type`
+discriminator and put Web rows before paper rows. Empty successful branches and
+partial success follow the documented search behavior; complete failure writes
+no result file. Paper landing admission and PDF metadata rules are shared.
+
+`fetch_llm` remains mandatory through existing stage inheritance, while
+`search_llm` and `search_agent` are independently optional. Agent execution is a
+fresh noninteractive process per invocation, without gateway retries. The
+documented process, workflow, socket, and output limits apply. The gateway does
+not promise tool execution or source access based solely on terminal success.
+These additions do not turn Python imports or the socket protocol into a stable SDK.
+
 ## Diagnostic interfaces
 
 `doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve during the `0.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.

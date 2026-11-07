@@ -25,6 +25,7 @@ class _FakeSearch:
     def __init__(self) -> None:
         self.keyword_calls: list[tuple[str, str, str | None]] = []
         self.llm_calls: list[tuple[str, str, str, str | None, str | None]] = []
+        self.agent_calls: list[tuple[str, str, str, str | None, str | None]] = []
 
     async def keyword_search(
         self, query: str, *, request_id: str, provider: str | None = None
@@ -47,6 +48,85 @@ class _FakeSearch:
     ) -> str:
         self.llm_calls.append((prompt, request_id, scope, provider, model))
         return f"llm:{prompt}" if scope == "web" else f"llm:{scope}:{prompt}"
+
+    async def agent_search(
+        self,
+        prompt: str,
+        *,
+        request_id: str,
+        scope: str = "web",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> str:
+        from agent_search_gateway.errors import InputFailure
+
+        self.agent_calls.append((prompt, request_id, scope, provider, model))
+        if prompt == "no-config":
+            raise ExecutionFailure(
+                ErrorCode.NO_AGENT_SEARCH_PROVIDERS, "No Agent search providers are configured"
+            )
+        if prompt == "bad-filter":
+            raise InputFailure(
+                ErrorCode.BAD_REQUEST, "No Agent search invocation matches provider 'missing'"
+            )
+        return f"agent:{prompt}"
+
+
+async def test_daemon_dispatches_agent_request_with_selectors_and_reserved_id(
+    tmp_path: Path,
+) -> None:
+    from agent_search_gateway.models import AgentSearchRequest
+    from tests.support.logging import structured_test_logger
+
+    paths = RuntimePaths.from_home(tmp_path)
+    paths.results_dir.mkdir(parents=True)
+    collision = paths.results_dir / "agent-11111111.jsonl"
+    collision.write_text("existing\n")
+    runtime = _FakeRuntime()
+    ids = iter(["11111111", "22222222", "33333333", "44444444", "55555555", "66666666"])
+    logger, stream = structured_test_logger("test.agent.dispatch")
+    daemon = ForegroundDaemon(
+        paths,
+        runtime_factory=lambda: runtime,
+        request_id_factory=ids.__next__,
+        logger=logger,
+    )
+    task = asyncio.create_task(daemon.start())
+    try:
+        async with asyncio.timeout(2):
+            await daemon.ready.wait()
+            results = await asyncio.gather(
+                send_request(paths.socket_file, AgentSearchRequest("one", "all", "a", "m")),
+                send_request(paths.socket_file, AgentSearchRequest("two", "paper", "b")),
+            )
+            assert list(results) == [SuccessResponse("agent:one"), SuccessResponse("agent:two")]
+            assert await send_request(
+                paths.socket_file, AgentSearchRequest("three")
+            ) == SuccessResponse("agent:three")
+            assert await send_request(
+                paths.socket_file, AgentSearchRequest("no-config")
+            ) == ErrorResponse(
+                ErrorCode.NO_AGENT_SEARCH_PROVIDERS,
+                "No Agent search providers are configured",
+            )
+            assert await send_request(
+                paths.socket_file, AgentSearchRequest("bad-filter")
+            ) == ErrorResponse(
+                ErrorCode.BAD_REQUEST,
+                "No Agent search invocation matches provider 'missing'",
+            )
+        assert runtime.search_orchestrator.agent_calls[:3] == [
+            ("one", "22222222", "all", "a", "m"),
+            ("two", "33333333", "paper", "b", None),
+            ("three", "44444444", "web", None, None),
+        ]
+        assert not runtime.search_orchestrator.llm_calls
+        assert collision.read_text() == "existing\n"
+        assert "command=agent-search" in stream.getvalue()
+    finally:
+        await daemon.stop_for_test()
+        await task
+    assert runtime.close_calls == 1
 
 
 class _FakePaper:

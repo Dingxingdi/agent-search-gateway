@@ -105,3 +105,15 @@ def test_parser_errors_do_not_include_raw_model_payload() -> None:
     with pytest.raises(ParserFailure) as caught:
         parse_paper_markdown(malformed, provider="provider-a")
     assert sentinel not in caught.value.message
+
+
+def test_paper_parser_tags_agent_source_when_requested() -> None:
+    import inspect
+    from dataclasses import replace
+
+    assert "source_kind" in inspect.signature(parse_paper_markdown).parameters
+    llm = parse_paper_markdown(VALID_BLOCK, provider="provider-a")[0]
+    agent = parse_paper_markdown(VALID_BLOCK, provider="provider-a", source_kind="agent")[0]
+    assert llm.source == "llm:provider-a"
+    assert agent.source == "agent:provider-a"
+    assert replace(agent, source=llm.source) == llm

@@ -23,7 +23,7 @@ from .normalization import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_LLM_PREFIX = "llm:"
+_GENERATED_PREFIXES = ("llm:", "agent:")
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +192,12 @@ class PaperAggregator:
             oa_status=normalize_topic(hit.oa_status) if isinstance(hit.oa_status, str) else "",
             license=normalize_topic(hit.license) if isinstance(hit.license, str) else "",
             origin_rank=(rank, discovery_index),
-            precedence=(1 if source.startswith(_LLM_PREFIX) else 0, rank, source, source_id),
+            precedence=(
+                1 if source.startswith(_GENERATED_PREFIXES) else 0,
+                rank,
+                source,
+                source_id,
+            ),
         )
 
     @staticmethod
@@ -259,7 +264,7 @@ class PaperAggregator:
     def _source_rank(self, source: str) -> int:
         if source in self._priority:
             return self._priority[source]
-        if source.startswith(_LLM_PREFIX):
+        if source.startswith(_GENERATED_PREFIXES):
             return self._fallback_rank + 2
         return self._fallback_rank + 1
 

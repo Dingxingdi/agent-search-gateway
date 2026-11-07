@@ -1,6 +1,6 @@
 """Provider-facing contracts and candidate value objects."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Protocol, runtime_checkable
@@ -9,6 +9,7 @@ from ..models import LLMInvocation, OAResolution
 from ..url_normalization import NormalizedURL
 
 ChatMessage = Mapping[str, str]
+AgentTextRunner = Callable[[str | None, Sequence[ChatMessage]], Awaitable[str]]
 
 
 @dataclass(frozen=True, slots=True)
