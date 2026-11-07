@@ -1,6 +1,7 @@
 """Resolved runtime assembly for the foreground daemon."""
 
 import logging
+import os
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import cast
@@ -367,9 +368,12 @@ class Runtime:
         for provider in config.providers:
             if provider.harness != "antigravity":
                 raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Unsupported Agent harness")
+            command = provider.command
+            if "/" in command:
+                command = os.path.abspath(command)
             runners[provider.name] = partial(
                 run_antigravity,
-                command=provider.command,
+                command=command,
                 timeout_seconds=provider.timeout_seconds,
                 pass_env=provider.pass_env,
                 quota=quotas.get_agent(provider.name),

@@ -78,6 +78,34 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
         await runtime.aclose()
 
 
+@pytest.mark.parametrize("command", ["bin/agy", "./bin/agy", "agy"])
+async def test_runtime_anchors_agent_paths_before_invocation_cwd_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    write_fake_cli(
+        tmp_path / "bin",
+        'print(json.dumps({"status": "SUCCESS", "response": os.getcwd()}))',
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    resolved = resolve_config(agent_config(command), build_default_registry(), _environment())
+    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, agent_limits={"primary": 1})
+    runners = Runtime._build_agent_runners(resolved.agent, quotas)
+    later_cwd = tmp_path / "later"
+    later_cwd.mkdir()
+    monkeypatch.chdir(later_cwd)
+
+    invocation_cwd = Path(await runners["primary"](None, []))
+
+    assert invocation_cwd.is_absolute()
+    assert invocation_cwd not in (tmp_path, later_cwd)
+    assert invocation_cwd.name.startswith("agent-search-")
+    assert not invocation_cwd.exists()
+    assert quotas.get_agent("primary").in_use == 0
+
+
 async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

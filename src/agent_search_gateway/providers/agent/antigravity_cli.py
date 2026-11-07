@@ -1,6 +1,7 @@
 """Antigravity headless process boundary; returns only terminal response text."""
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -153,6 +154,9 @@ async def _cleanup_process(
     if spawn is None:
         return None
     try:
+        # Keep ownership until CPython POSIX returns the process handle. Popen is
+        # synchronous; only local pipe setup yields. An asyncio deadline cannot
+        # preempt a blocked OS process-creation call.
         process = await spawn
     except (Exception, asyncio.CancelledError):
         return None
@@ -264,8 +268,9 @@ async def run_antigravity(
                     return response
             except TimeoutError:
                 raise _execution_failure("timeout") from None
-            except OSError:
-                raise _execution_failure("spawn_failure") from None
+            except OSError as exc:
+                reason = "argument_limit" if exc.errno == errno.E2BIG else "spawn_failure"
+                raise _execution_failure(reason) from None
             finally:
                 cleanup = asyncio.create_task(_cleanup_process(spawn, tasks))
                 cleanup_reason = await _finish_cleanup(cleanup)

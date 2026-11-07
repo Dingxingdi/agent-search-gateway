@@ -225,7 +225,7 @@ LLM provider aliases, even when their names match.
 | Setting | Type and default | Constraint |
 |---|---|---|
 | `harness` | Required string | Only `"antigravity"` is supported |
-| `command` | String, `"agy"` | One executable name or path; no shell command, embedded flags, or expansion |
+| `command` | String, `"agy"` | One executable name or path; relative paths are anchored to the daemon's startup cwd, bare names use PATH; no shell command, embedded flags, or expansion |
 | `max_concurrency` | Integer, `1` | Positive; shared by every invocation of that alias |
 | `timeout_seconds` | Number, `300` | Positive, finite, at most `540` |
 | `pass_env` | Array of strings, `[]` | Additional environment-variable names, never values |
@@ -284,6 +284,9 @@ Only parsed and admitted landing URLs can be fetched; PDF metadata is not admitt
 | Agent socket response wait | 1200 seconds; other requests retain 300 seconds |
 | Captured output | stdout 4 MiB; stderr 256 KiB; overflow fails without accepting truncated output |
 
+These asynchronous deadlines cannot interrupt synchronous OS process creation if
+the operating system stalls before Python receives the process handle.
+
 Agent calls are not retried by the gateway; the HTTP retry configuration does not
 apply. Success requires exit code zero and one valid JSON terminal object with
 `status = "SUCCESS"` and a nonempty response, followed by normal Markdown parsing.
@@ -293,9 +296,13 @@ Agent used tools or accessed the cited sources.
 The gateway requests JSON output and uses stdin from `DEVNULL`. It does not add
 automatic approval flags or manage Harness tools, MCP servers, or permissions.
 The serialized prompt is passed as the `-p` argument and may be visible to local
-process inspection. A private temporary cwd and a reduced environment are not a
-sandbox: Harness settings, auth caches, home files, and permitted tools remain
-under the Harness's control.
+process inspection. OS limits apply to individual arguments and the combined
+arguments/environment; an `E2BIG` rejection is reported with the safe diagnostic
+`argument_limit`, not `spawn_failure`. The protocol's 1 MiB request-frame ceiling
+does not guarantee that an external Harness can accept an equally large prompt.
+A private temporary cwd and a reduced environment are not a sandbox: Harness
+settings, auth caches, home files, and permitted tools remain under the Harness's
+control.
 
 The child environment keeps `PATH`, `HOME`, standard XDG config/cache/data/state/runtime
 paths, temporary-directory variables, and locale variables, plus explicitly named

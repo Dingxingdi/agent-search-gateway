@@ -1,4 +1,5 @@
 import asyncio
+import errno
 from collections.abc import Sequence
 from functools import partial
 from io import StringIO
@@ -153,6 +154,48 @@ async def test_agent_real_process_failure_classification(
     assert f"reason={reason}" in failed
     assert "model=pin" in failed and "stage=agent_paper_search" in failed
     assert "SENTINEL" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("error_number", "reason"),
+    [(errno.E2BIG, "argument_limit"), (errno.EACCES, "spawn_failure")],
+)
+async def test_agent_spawn_os_error_is_safe_and_releases_resources(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_number: int,
+    reason: str,
+) -> None:
+    invocation_directories: list[Path] = []
+
+    async def fail_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        directory = kwargs["cwd"]
+        assert isinstance(directory, str)
+        invocation_directories.append(Path(directory))
+        assert invocation_directories[-1].is_dir()
+        raise OSError(error_number, "OS_ERROR_SENTINEL", "COMMAND_SENTINEL")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fail_spawn)
+    gate = CapacityGate(1)
+    runner = partial(
+        adapter.run_antigravity,
+        command="COMMAND_SENTINEL",
+        timeout_seconds=5,
+        pass_env=(),
+        quota=gate,
+    )
+    logger, stream = structured_test_logger("test.agent.spawn.failure")
+    search = agent_orchestrator(
+        tmp_path / "results", [AgentInvocation("agy")], {"agy": runner}, logger=logger
+    )
+    with pytest.raises(ExecutionFailure) as caught:
+        await search.agent_search("PROMPT_SENTINEL", request_id="11111111")
+
+    assert f"reason={reason}" in stream.getvalue()
+    assert "SENTINEL" not in stream.getvalue() + str(caught.value)
+    assert len(invocation_directories) == 1
+    assert not invocation_directories[0].exists()
+    assert gate.in_use == 0
 
 
 @pytest.mark.parametrize(

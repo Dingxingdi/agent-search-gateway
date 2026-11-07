@@ -39,6 +39,7 @@ _AGENT_WORKFLOW_TIMEOUT_SECONDS = 1140.0
 _AGENT_FAILURE_REASONS = frozenset(
     {
         "spawn_failure",
+        "argument_limit",
         "nonzero_exit",
         "terminal_status_failure",
         "invalid_json",
