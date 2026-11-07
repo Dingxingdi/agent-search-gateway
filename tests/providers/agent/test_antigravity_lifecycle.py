@@ -191,6 +191,31 @@ async def test_cancellation_and_second_cancel_wait_for_cleanup(
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_cleanup_preserves_first_cancellation_after_repeated_requests() -> None:
+    release = asyncio.Event()
+
+    async def cleanup_work() -> str | None:
+        await release.wait()
+        return None
+
+    cleanup = asyncio.create_task(cleanup_work())
+    caller = asyncio.create_task(adapter._finish_cleanup(cleanup))
+    await asyncio.sleep(0)
+    caller.cancel("first-cancellation")
+    await asyncio.sleep(0)
+    caller.cancel("second-cancellation")
+    await asyncio.sleep(0)
+
+    assert not caller.done()
+    assert not cleanup.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await asyncio.wait_for(caller, 1)
+
+    assert caught.value.args == ("first-cancellation",)
+    assert cleanup.done() and cleanup.result() is None
+
+
 async def test_leader_exit_with_inherited_pipe_is_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

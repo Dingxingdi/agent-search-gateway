@@ -7,6 +7,7 @@ import logging
 import os
 import signal
 from collections.abc import Sequence
+from contextlib import suppress
 from tempfile import TemporaryDirectory
 
 from ...concurrency import CapacityGate
@@ -199,16 +200,14 @@ async def _cleanup_process(
 
 async def _finish_cleanup(task: asyncio.Task[str | None]) -> str | None:
     # Retain and await the shielded task even when shutdown cancels us twice.
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    reason = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return reason
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        task.result()
+        raise
 
 
 async def run_antigravity(
