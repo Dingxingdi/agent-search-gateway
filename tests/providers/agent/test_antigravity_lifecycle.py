@@ -503,7 +503,12 @@ async def test_detached_descendant_cannot_hold_cleanup_open(
     gate = CapacityGate(1)
     task = asyncio.create_task(
         adapter.run_antigravity(
-            None, [], command=str(command), timeout_seconds=0.3, pass_env=(), quota=gate
+            None,
+            [],
+            command=str(command),
+            timeout_seconds=0.3 if outcome == "timeout" else 5,
+            pass_env=(),
+            quota=gate,
         )
     )
     state = await wait_for_json(ready)
@@ -607,7 +612,12 @@ async def test_signal_errors_keep_cleanup_bounded_and_preserve_outcome(
     gate = CapacityGate(1)
     task = asyncio.create_task(
         adapter.run_antigravity(
-            None, [], command=str(command), timeout_seconds=0.3, pass_env=(), quota=gate
+            None,
+            [],
+            command=str(command),
+            timeout_seconds=0.3 if outcome == "timeout" else 5,
+            pass_env=(),
+            quota=gate,
         )
     )
     state = await wait_for_json(ready)
