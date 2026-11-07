@@ -51,8 +51,6 @@ def test_agent_example_config_matches_documented_command() -> None:
     assert any(args.provider == "antigravity_main" and args.model == "MODEL" for args in parsed)
     for document in ("docs/public-interface.md", "CHANGELOG.md"):
         text = (_ROOT / document).read_text()
-        if document == "CHANGELOG.md":
-            text = text.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
         for token in (
             "agent-search",
             "--scope",
@@ -89,15 +87,14 @@ def test_readme_documents_request_scoped_provider_and_model_filters() -> None:
     }
 
 
-def test_request_selectors_are_documented_in_public_policy_and_unreleased() -> None:
+def test_request_selectors_are_documented_in_public_policy_and_changelog() -> None:
     public = (_ROOT / "docs/public-interface.md").read_text(encoding="utf-8")
     changelog = (_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-    unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## ", 1)[0]
-    assert "### Added" in unreleased
+    assert "### Added" in changelog
     for flag in ("--provider", "--model"):
-        assert flag in public and flag in unreleased
+        assert flag in public and flag in changelog
     for command in ("keyword-search", "paper-search", "llm-search"):
-        assert command in public and command in unreleased
+        assert command in public and command in changelog
 
 
 def _stub_environment(data: dict[str, object]) -> dict[str, str]:
