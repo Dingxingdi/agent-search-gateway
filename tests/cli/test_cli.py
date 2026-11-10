@@ -5,7 +5,8 @@ from typing import cast
 
 import pytest
 
-from agent_search_gateway.cli import build_parser, run_command
+from agent_search_gateway import __version__
+from agent_search_gateway.cli import build_parser, main, run_command
 from agent_search_gateway.doctor import DoctorCheck, DoctorReport, DoctorStatus
 from agent_search_gateway.errors import ConfigFailure, DaemonUnavailable, ErrorCode, ProtocolFailure
 from agent_search_gateway.models import (
@@ -21,6 +22,43 @@ from agent_search_gateway.models import (
 )
 from agent_search_gateway.observability import DebugLoggingSession
 from agent_search_gateway.paths import RuntimePaths
+
+
+@pytest.mark.parametrize("flag", ["--version", "-v"])
+def test_cli_version_flags_exit_before_runtime(
+    flag: str, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_runtime() -> RuntimePaths:
+        raise AssertionError("Version output must not access runtime paths")
+
+    monkeypatch.setattr(RuntimePaths, "default", fail_runtime)
+    with pytest.raises(SystemExit) as caught:
+        main([flag])
+
+    captured = capsys.readouterr()
+    assert caught.value.code == 0
+    assert captured.out == f"agent-search-gateway {__version__}\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [],
+        ["start", "--version"],
+        ["stop", "-v"],
+        ["doctor", "--version"],
+        ["keyword-search", "query", "-v"],
+        ["paper-search", "query", "--version"],
+        ["llm-search", "prompt", "-v"],
+        ["agent-search", "prompt", "--version"],
+        ["url-fetch", "https://example.com", "-v"],
+    ],
+)
+def test_cli_version_does_not_change_required_command_or_child_flags(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        build_parser().parse_args(argv)
+    assert caught.value.code == 2
 
 
 async def _invoke_selector_cli(

@@ -2,10 +2,13 @@
 
 from urllib.parse import urlencode
 
+import httpx
+
 from ...errors import ExecutionFailure
 from ...observability import SecretValue
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
+from ..http import ProviderResponseFailure, is_retryable_http_status
 from .common import (
     HttpRequester,
     configured_string,
@@ -16,6 +19,28 @@ from .common import (
     require_list,
     require_object,
 )
+
+_RECOVERABLE_SEARCH_CODES = frozenset({"captcha", "timeout", "expect_element", "expect_body"})
+_SAFE_REDIRECT_REASON = "redirect location was rejected"
+
+
+def _bounded_header(headers: httpx.Headers, name: str, limit: int) -> tuple[str | None, bool]:
+    """Return one bounded classification value and whether its metadata is invalid."""
+    values = headers.get_list(name)
+    if not values:
+        return None, False
+    if len(values) != 1:
+        return None, True
+    value = values[0]
+    if (
+        not value
+        or len(value) > limit
+        or not value.isascii()
+        or "," in value
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        return None, True
+    return value, False
 
 
 class BrightDataAdapter:
@@ -44,6 +69,7 @@ class BrightDataAdapter:
             stage="search",
             headers={"Authorization": f"Bearer {self._secret.reveal()}"},
             json_body={"zone": self._search_zone, "url": google_url, "format": "raw"},
+            response_inspector=self._inspect_search_response,
         )
         root = require_object(payload, self.name, "search", "response")
         if root.get("error") is not None:
@@ -69,6 +95,66 @@ class BrightDataAdapter:
             except ExecutionFailure:
                 continue
         return hits
+
+    def _inspect_search_response(self, response: httpx.Response) -> ProviderResponseFailure | None:
+        code, invalid_code = _bounded_header(response.headers, "x-brd-error-code", 64)
+        raw_status, invalid_status = _bounded_header(response.headers, "x-brd-status-code", 3)
+        inner_status: int | None = None
+        if raw_status is not None:
+            if len(raw_status) == 3 and raw_status.isdigit() and 100 <= int(raw_status) <= 599:
+                inner_status = int(raw_status)
+            else:
+                invalid_status = True
+        explanations = response.headers.get_list("x-brd-error")
+        if not (
+            code is not None
+            or invalid_code
+            or invalid_status
+            or any(explanations)
+            or (inner_status is not None and not 200 <= inner_status < 300)
+        ):
+            return None
+
+        if (
+            code is None
+            and not invalid_code
+            and not invalid_status
+            and not any(explanations)
+            and inner_status is not None
+            and is_retryable_http_status(inner_status)
+            and is_retryable_http_status(response.status_code)
+        ):
+            return None
+
+        safe_code = "missing"
+        if invalid_code:
+            safe_code = "invalid"
+        elif code is not None:
+            safe_code = code if code in _RECOVERABLE_SEARCH_CODES else "unknown"
+        safe_reason = "provider_reported_failure"
+        if (
+            len(explanations) == 1
+            and len(explanations[0]) <= 160
+            and explanations[0] == _SAFE_REDIRECT_REASON
+        ):
+            safe_reason = _SAFE_REDIRECT_REASON
+        diagnostics: dict[str, object] = {"brightdata_error_code": safe_code}
+        if inner_status is not None:
+            diagnostics["brightdata_status"] = inner_status
+        return ProviderResponseFailure(
+            self.name,
+            "search",
+            status_code=response.status_code,
+            retryable=(
+                code in _RECOVERABLE_SEARCH_CODES
+                and not invalid_code
+                and not invalid_status
+                and response.status_code not in {401, 403}
+                and inner_status not in {401, 403}
+            ),
+            safe_reason=safe_reason,
+            diagnostics=diagnostics,
+        )
 
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:
         text = await self._http.request_text(

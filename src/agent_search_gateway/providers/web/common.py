@@ -5,6 +5,7 @@ from typing import Protocol
 
 from ...errors import ErrorCode, ExecutionFailure
 from ...url_normalization import NormalizedURL, normalize_url
+from ..http import ResponseInspector
 
 
 class JsonRequester(Protocol):
@@ -16,6 +17,7 @@ class JsonRequester(Protocol):
         stage: str,
         headers: Mapping[str, str] | None = None,
         json_body: object | None = None,
+        response_inspector: ResponseInspector | None = None,
     ) -> object: ...
 
 

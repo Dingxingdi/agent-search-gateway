@@ -207,6 +207,184 @@ def test_retry_config_rejects_invalid_values(retry_table: dict[str, object]) -> 
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
+async def test_retry_delay_adjuster_updates_sleep_and_retry_hook() -> None:
+    failures = [RuntimeError("first"), RuntimeError("second")]
+    calls = 0
+    adjustments: list[tuple[BaseException, float]] = []
+    sleeps: list[float] = []
+    retry_delays: list[float] = []
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls <= len(failures):
+            raise failures[calls - 1]
+        return "done"
+
+    def adjust_delay(exc: BaseException, delay: float) -> float:
+        adjustments.append((exc, delay))
+        return delay * 0.9
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    result = await retry_async(
+        resolve_retry_policy({}),
+        operation,
+        is_retryable=lambda exc: isinstance(exc, RuntimeError),
+        sleep=sleep,
+        adjust_delay=adjust_delay,
+        on_retry=lambda _attempt, _exc, delay: retry_delays.append(delay),
+    )
+    assert result == "done"
+    assert calls == 3
+    assert adjustments == [(failures[0], 0.25), (failures[1], 0.5)]
+    assert sleeps == pytest.approx([0.225, 0.45])
+    assert retry_delays == sleeps
+
+
+@pytest.mark.parametrize(
+    ("adjusted", "expected"),
+    [(-1.0, 0.0), (5.0, 0.1), (float("nan"), 0.1), (float("inf"), 0.1), (-float("inf"), 0.1)],
+)
+async def test_retry_delay_adjuster_clamps_invalid_delays(adjusted: float, expected: float) -> None:
+    calls = 0
+    bases: list[float] = []
+    sleeps: list[float] = []
+    hooks: list[float] = []
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("retry")
+        return "done"
+
+    def adjust_delay(_exc: BaseException, delay: float) -> float:
+        bases.append(delay)
+        return adjusted
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    assert (
+        await retry_async(
+            resolve_retry_policy({"retry": {"max_delay_seconds": 0.1}}),
+            operation,
+            is_retryable=lambda _exc: True,
+            sleep=sleep,
+            adjust_delay=adjust_delay,
+            on_retry=lambda _attempt, _exc, delay: hooks.append(delay),
+        )
+        == "done"
+    )
+    assert calls == 2
+    assert bases == [0.1]
+    assert sleeps == [expected]
+    assert hooks == sleeps
+
+
+async def test_retry_delay_adjuster_failure_preserves_retry_execution() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("retry")
+        return "done"
+
+    def broken_adjuster(_exc: BaseException, _delay: float) -> float:
+        raise ValueError("adjuster failed")
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    assert (
+        await retry_async(
+            resolve_retry_policy({}),
+            operation,
+            is_retryable=lambda _exc: True,
+            sleep=sleep,
+            adjust_delay=broken_adjuster,
+        )
+        == "done"
+    )
+    assert calls == 2
+    assert sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
+    ("max_attempts", "retryable", "failure"),
+    [
+        (1, True, RuntimeError("exhausted")),
+        (3, False, ValueError("terminal")),
+        (3, True, asyncio.CancelledError()),
+    ],
+)
+async def test_retry_delay_adjuster_is_skipped_when_no_retry_is_scheduled(
+    max_attempts: int, retryable: bool, failure: BaseException
+) -> None:
+    adjustments: list[float] = []
+    sleeps: list[float] = []
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        raise failure
+
+    def adjust_delay(_exc: BaseException, delay: float) -> float:
+        adjustments.append(delay)
+        return delay
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    with pytest.raises(type(failure)) as caught:
+        await retry_async(
+            resolve_retry_policy({"retry": {"max_attempts": max_attempts}}),
+            operation,
+            is_retryable=lambda _exc: retryable,
+            sleep=sleep,
+            adjust_delay=adjust_delay,
+        )
+    assert caught.value is failure
+    assert calls == 1
+    assert adjustments == sleeps == []
+
+
+@pytest.mark.parametrize("origin", ["adjuster", "sleep"])
+async def test_retry_cancellation_during_scheduling_propagates(origin: str) -> None:
+    cancellation = asyncio.CancelledError()
+    calls = 0
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("retry")
+
+    def adjust_delay(_exc: BaseException, delay: float) -> float:
+        if origin == "adjuster":
+            raise cancellation
+        return delay
+
+    async def sleep(_delay: float) -> None:
+        raise cancellation
+
+    with pytest.raises(asyncio.CancelledError) as caught:
+        await retry_async(
+            resolve_retry_policy({}),
+            operation,
+            is_retryable=lambda _exc: True,
+            sleep=sleep,
+            adjust_delay=adjust_delay,
+        )
+    assert caught.value is cancellation
+    assert calls == 1
+
+
 async def _ignore_sleep(_delay: float) -> None:
     return None
 

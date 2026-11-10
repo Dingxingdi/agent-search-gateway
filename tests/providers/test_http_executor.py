@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 
@@ -7,8 +8,351 @@ import pytest
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
-from agent_search_gateway.providers.http import HttpJsonExecutor, HttpStatusFailure
+from agent_search_gateway.providers.http import (
+    HttpJsonExecutor,
+    HttpStatusFailure,
+    ProviderResponseFailure,
+)
 from tests.support.logging import structured_test_logger
+
+
+async def test_json_response_inspector_runs_before_decode() -> None:
+    inspected: list[httpx.Response] = []
+    response = httpx.Response(200, json={"ok": True})
+
+    def inspect_response(value: httpx.Response) -> None:
+        inspected.append(value)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: response)
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0.25, 2.0, 30.0), provider_name="fake", sleep=_no_sleep
+        )
+        result = await executor.request_json(
+            "GET",
+            "https://provider.example.test/search",
+            stage="search",
+            response_inspector=inspect_response,
+        )
+
+    assert result == {"ok": True}
+    assert inspected == [response]
+
+
+async def test_json_response_failure_preempts_invalid_json() -> None:
+    failure = ProviderResponseFailure(
+        "fake",
+        "search",
+        status_code=200,
+        retryable=False,
+        safe_reason="fixture_failure",
+        diagnostics={"fixture_code": "terminal"},
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200)
+
+    logger, stream = structured_test_logger("tests.http.inspected-failure")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await executor.request_json(
+                "GET",
+                "https://provider.example.test/search",
+                stage="search",
+                response_inspector=lambda _response: failure,
+            )
+
+    assert caught.value is failure
+    assert failure.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert len(requests) == 1
+    assert "category=provider_header" in stream.getvalue()
+    assert "category=decode" not in stream.getvalue()
+    assert "transport_type=" not in stream.getvalue()
+
+
+@pytest.mark.parametrize("retryable", [False, True])
+async def test_json_response_failure_retries_only_when_marked_retryable(retryable: bool) -> None:
+    failure = ProviderResponseFailure(
+        "fake",
+        "search",
+        status_code=200,
+        retryable=retryable,
+        safe_reason="fixture_failure",
+        diagnostics={},
+    )
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def inspect_response(_response: httpx.Response) -> ProviderResponseFailure | None:
+        return failure if len(requests) == 1 else None
+
+    logger, stream = structured_test_logger("tests.http.inspected-retry")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        if retryable:
+            result = await executor.request_json(
+                "GET",
+                "https://provider.example.test/search",
+                stage="search",
+                response_inspector=inspect_response,
+            )
+            assert result == {"ok": True}
+        else:
+            with pytest.raises(ProviderResponseFailure) as caught:
+                await executor.request_json(
+                    "GET",
+                    "https://provider.example.test/search",
+                    stage="search",
+                    response_inspector=inspect_response,
+                )
+            assert caught.value is failure
+
+    assert len(requests) == (2 if retryable else 1)
+    assert len(sleeps) == (1 if retryable else 0)
+    assert "category=provider_header" in stream.getvalue()
+    assert "transport_type=" not in stream.getvalue()
+
+
+async def test_json_response_failures_share_http_attempt_budget() -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    failures: list[ProviderResponseFailure] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response((200, 500, 200)[len(requests) - 1])
+
+    def inspect_response(response: httpx.Response) -> ProviderResponseFailure | None:
+        if response.status_code != 200:
+            return None
+        failure = ProviderResponseFailure(
+            "fake",
+            "search",
+            status_code=200,
+            retryable=True,
+            safe_reason="fixture_failure",
+            diagnostics={"fixture_status": 502},
+        )
+        failures.append(failure)
+        return failure
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 37.0),
+            provider_name="fake",
+            sleep=sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await executor.request_json(
+                "GET",
+                "https://provider.example.test/search",
+                stage="search",
+                response_inspector=inspect_response,
+            )
+
+    assert len(requests) == 3
+    assert len(failures) == 2
+    assert caught.value is failures[-1]
+    assert len(sleeps) == 2
+    assert sleeps[1] == 0.5
+    for request in requests:
+        assert request.extensions["timeout"] == {
+            "connect": 37.0,
+            "read": 37.0,
+            "write": 37.0,
+            "pool": 37.0,
+        }
+
+
+async def test_json_response_inspection_is_per_call() -> None:
+    inspected: list[httpx.Response] = []
+    responses = [
+        httpx.Response(200, json={"first": True}),
+        httpx.Response(200, json={"second": True}),
+        httpx.Response(200, text="plain text"),
+    ]
+
+    def inspect_response(response: httpx.Response) -> None:
+        inspected.append(response)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: responses.pop(0))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            sleep=_no_sleep,
+        )
+        assert await executor.request_json(
+            "GET",
+            "https://provider.example.test/search",
+            stage="search",
+            response_inspector=inspect_response,
+        ) == {"first": True}
+        assert await executor.request_json(
+            "GET",
+            "https://provider.example.test/search",
+            stage="search",
+        ) == {"second": True}
+        assert (
+            await executor.request_text(
+                "GET",
+                "https://provider.example.test/fetch",
+                stage="fetch",
+            )
+            == "plain text"
+        )
+
+    assert len(inspected) == 1
+    assert responses == []
+
+
+@pytest.mark.parametrize("retryable", [False, True])
+async def test_provider_diagnostics_cannot_override_http_event_fields(retryable: bool) -> None:
+    diagnostics: dict[str, object] = dict.fromkeys(
+        [
+            "provider",
+            "stage",
+            "endpoint",
+            "attempt",
+            "status",
+            "category",
+            "elapsed_ms",
+            "delay_ms",
+            "transport_type",
+            "reason",
+            "retryable",
+            "retry_scheduled",
+            "terminal_reason",
+            "request",
+            "logger",
+            "level",
+            "event",
+            "exc_info",
+        ],
+        "OVERRIDE_MARKER",
+    )
+    diagnostics["fixture_code"] = "safe"
+    failure = ProviderResponseFailure(
+        "fake",
+        "search",
+        status_code=200,
+        retryable=retryable,
+        safe_reason="fixture_failure",
+        diagnostics=diagnostics,
+    )
+    diagnostics["fixture_code"] = "MUTATION_MARKER"
+    logger, stream = structured_test_logger("tests.http.reserved-provider-details")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=_no_sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await executor.request_json(
+                "GET",
+                "https://provider.example.test/search",
+                stage="search",
+                response_inspector=lambda _response: failure,
+            )
+    assert caught.value is failure
+    logged = stream.getvalue()
+    assert "OVERRIDE_MARKER" not in logged
+    assert "MUTATION_MARKER" not in logged
+    events = [
+        line
+        for line in logged.splitlines()
+        if "event=http_retrying" in line or "event=http_failed" in line
+    ]
+    assert len(events) == (2 if retryable else 1)
+    for line in events:
+        assert "fixture_code=safe" in line
+        assert "category=provider_header" in line
+        assert "provider=fake" in line and "stage=search" in line
+        assert "status=200" in line and "reason=fixture_failure" in line
+        assert "transport_type=" not in line
+    assert f"attempt={2 if retryable else 1}" in events[-1]
+
+
+@pytest.mark.parametrize("origin", ["send", "inspector", "sleep"])
+async def test_http_inspection_preserves_cancellation(origin: str) -> None:
+    cancellation = asyncio.CancelledError()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if origin == "send":
+            raise cancellation
+        return httpx.Response(200)
+
+    def inspect_response(_response: httpx.Response) -> ProviderResponseFailure:
+        if origin == "inspector":
+            raise cancellation
+        return ProviderResponseFailure(
+            "fake",
+            "search",
+            status_code=200,
+            retryable=True,
+            safe_reason="fixture_failure",
+            diagnostics={},
+        )
+
+    async def sleep(_delay: float) -> None:
+        raise cancellation
+
+    logger, stream = structured_test_logger("tests.http.inspection-cancellation")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await executor.request_json(
+                "GET",
+                "https://provider.example.test/search",
+                stage="search",
+                response_inspector=inspect_response,
+            )
+    assert caught.value is cancellation
+    assert len(requests) == 1
+    assert "event=http_failed" not in stream.getvalue()
 
 
 async def _no_sleep(_delay: float) -> None:

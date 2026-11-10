@@ -38,6 +38,8 @@ agent-search-gateway start --debug
 
 ## Configuration and runtime paths
 
+`config.example.toml` contains a selection of supported providers. ZenRows, Decodo, ScrapingDog, and ScrapeGraphAI remain supported but are omitted from this template. Its request timeout is 180.0 seconds; the runtime fallback when that setting is omitted remains 30.0 seconds. Changes to the template do not rewrite an existing user configuration.
+
 The daemon reads:
 
 ```text
@@ -102,6 +104,13 @@ ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.
 When destination URLs are required, use results from other search providers and set `enable_search = false` in the `[web_providers.scraperapi]` and `[web_providers.scrape_do]` configuration blocks. Their `enable_fetch` flags are independent and may remain enabled. Disabling search does not remove wrapper URLs already admitted to the running daemon; restarting clears that state and requires searching again before fetching URLs.
 
 ## Commands
+
+Print the installed CLI package version without configuration or a running daemon:
+
+```bash
+agent-search-gateway --version
+agent-search-gateway -v
+```
 
 Run the daemon in the foreground:
 
@@ -316,6 +325,13 @@ they do not record prompts, responses, raw stderr, or environment values.
 
 Direct paper discovery queries enabled academic providers concurrently and merges records by DOI, arXiv id, provider-native id, then a conservative bibliographic fallback. The built-in discovery order is arXiv, Semantic Scholar, OpenAlex, dblp, Crossref, then CORE. Unpaywall is not a discovery provider; it runs after deduplication and only for DOI-bearing papers.
 
+**dblp availability warning:** dblp has been observed to trigger bot verification even with infrequent API calls. Reducing request frequency does not guarantee availability. If this affects your searches, you can optionally disable dblp by editing `enabled` in the existing `[academic_providers.dblp]` table (do not append a duplicate table):
+
+```toml
+[academic_providers.dblp]
+enabled = false
+```
+
 Academic providers use a separate configuration namespace and concurrency budget:
 
 ```toml
@@ -397,6 +413,10 @@ DEBUG events expose operational metadata such as request ID, provider, semantic 
 The implementation does not intentionally log query/prompt/page/model-response bodies or authentication values. Central secret redaction is also applied to final rendered messages and debug tracebacks as defense in depth. DEBUG mode is diagnostic rather than a raw payload/TRACE mode.
 
 Transport retry (`http_retrying`) and terminal failure (`http_failed`) events include a `transport_type` field such as `ReadTimeout`, `ConnectTimeout`, or `ConnectError`. Only the concrete exception class name is recorded, not its message. HTTP status and JSON decode failures do not carry this field.
+
+Bright Data SERP Search can report a provider failure through response headers even when the HTTP status is 200. The gateway checks those headers before decoding JSON and retries validated `captcha`, `timeout`, `expect_element`, and `expect_body` errors within the configured total attempt budget, using bounded jitter.
+
+For these failures, DEBUG `http_retrying` and `http_failed` events include safe outer/inner statuses, error classifications, the actual retry wait, and whether another retry was scheduled or the budget was exhausted. Unknown errors and authentication failures are terminal. Normal search command output continues to use the documented result-path and aggregate-error contracts.
 
 Expected provider/retry/semantic failures are logged as concise events without tracebacks. Unexpected daemon workflow failures include a traceback only in DEBUG mode. Logging sink failures after successful startup do not change business workflow results.
 
