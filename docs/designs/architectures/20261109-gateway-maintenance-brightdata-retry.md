@@ -276,3 +276,9 @@ Existing unrelated HTTP event field meanings stay unchanged. Raw provider diagno
 - All-selected-providers-failed still returns the existing aggregate CLI message.
 - No changed socket request schema, result row fields, provider configuration schema, or runtime retry defaults.
 - Version flags are a new top-level CLI interface; omitted flags follow the exact existing parser flow.
+
+### PR #93 review amendment — CLI response deadline
+
+CodeRabbit identified that the existing 300-second non-Agent client wait can expire during the example's three 180-second HTTP attempts (540.75 seconds including ordinary backoff). The review therefore makes one narrow exception to the original unchanged-protocol scope: increase the existing non-Agent response wait to 600 seconds. Wire schemas, error messages, the 1200-second Agent wait, and explicit per-call timeout overrides remain unchanged.
+
+This client deadline accommodates the reported single-request retry sequence; it is not an end-to-end guarantee for arbitrary custom policies, HTTP activity, provider queues, or multi-stage workflows. A virtual-time acceptance regression exercises the real CLI, Unix socket, daemon dispatch, and HTTP retry loop, recovering after two full-duration timeouts. The original 300-second wait reproduces the premature CLI error.

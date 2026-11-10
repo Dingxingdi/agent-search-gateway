@@ -167,4 +167,4 @@ async def test_socket_timeout_depends_on_request_type_and_honors_override(
     finally:
         server.close()
         await server.wait_closed()
-    assert seen == [override if override is not None else (1200.0 if kind == "agent" else 300.0)]
+    assert seen == [override if override is not None else (1200.0 if kind == "agent" else 600.0)]

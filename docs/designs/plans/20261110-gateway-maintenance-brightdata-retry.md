@@ -710,3 +710,11 @@ Scope review confirmed changes are confined to the planned implementation, tests
 
 The optional live Bright Data smoke was not run. No running daemon was restarted and no installed user configuration was modified. The implementation is kept on the dedicated task branch. Pushing, releasing and opening a PR are outside this implementation plan.
 
+## PR #93 maintainer review follow-up
+
+CodeRabbit identified a mismatch between the 180-second example HTTP timeout with three total attempts and the existing 300-second non-Agent CLI response wait. The architecture review amendment permits a narrow increase of that client wait to 600 seconds, retaining the Agent-specific 1200 seconds, explicit overrides, and socket message contracts.
+
+The new `test_cli_waits_for_example_http_retry_budget` uses virtual elapsed time with a real CLI/Unix-socket/daemon boundary and the existing HTTP retry engine. With the original 300-second wait it failed with `Timed out waiting for daemon response` after two slow timeouts even though the server completed its third attempt. The regression checks recovery after 540.75 seconds of virtual provider/backoff time and an actual result file. Required format, lint, type, test, and documentation gates are rerun before publishing the review fix.
+
+CodeRabbit confirmed that its docstring coverage assessment is warning-only and identified no undocumented contract requiring bulk docstring changes. The deadline rationale and its finite scope are documented with the fix.
+

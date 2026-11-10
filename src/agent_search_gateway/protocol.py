@@ -26,7 +26,9 @@ RequestParser = Callable[[Mapping[str, object]], Request]
 
 _MAX_REQUEST_FRAME_BYTES = 1 << 20
 _MAX_RESPONSE_FRAME_BYTES = 8 << 20
-_RESPONSE_TIMEOUT_SECONDS = 300.0
+# Allow the example's three 180-second HTTP attempts plus backoff and response overhead.
+# This is a client wait limit, not a bound on arbitrary multi-stage workflows.
+_RESPONSE_TIMEOUT_SECONDS = 600.0
 _AGENT_RESPONSE_TIMEOUT_SECONDS = 1200.0
 
 

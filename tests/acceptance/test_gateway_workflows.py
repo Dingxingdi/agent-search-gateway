@@ -208,6 +208,80 @@ async def test_real_socket_workflows_match_public_contract_without_network(
         assert not paths.socket_file.exists()
 
 
+async def test_cli_waits_for_example_http_retry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the socket open through three slow attempts using virtual elapsed time."""
+    import httpx
+
+    from agent_search_gateway.config import load_toml, resolve_retry_policy
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    paths = RuntimePaths(
+        config_file=tmp_path / "config.toml",
+        socket_file=tmp_path / "gateway.sock",
+        results_dir=tmp_path / "results",
+    )
+    policy = resolve_retry_policy(load_toml(Path(__file__).parents[2] / "config.example.toml"))
+    runtime = build_acceptance_runtime(paths)
+    keyword_search = runtime.search_orchestrator.keyword_search
+    workflow_done = asyncio.Event()
+    attempts = 0
+    clock_offset = 0.0
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+
+    async def advance_time(seconds: float) -> None:
+        """Advance deadlines and let real socket and timeout callbacks run."""
+        nonlocal clock_offset
+        clock_offset += seconds
+        await asyncio.sleep(0.001)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        """Spend the configured timeout on each attempt, then recover on the last."""
+        nonlocal attempts
+        attempts += 1
+        assert request.extensions["timeout"]["read"] == policy.request_timeout_seconds
+        await advance_time(policy.request_timeout_seconds)
+        if attempts < policy.max_attempts:
+            raise httpx.ReadTimeout("simulated slow provider", request=request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(client, policy, provider_name="slow", sleep=advance_time)
+
+        async def slow_keyword_search(
+            query: str, *, request_id: str, provider: str | None = None
+        ) -> str:
+            """Exercise real HTTP retries before the normal acceptance pipeline."""
+            try:
+                await executor.request_json("GET", "https://provider.example.test", stage="search")
+                return await keyword_search(query, request_id=request_id, provider=provider)
+            finally:
+                workflow_done.set()
+
+        monkeypatch.setattr(runtime.search_orchestrator, "keyword_search", slow_keyword_search)
+        daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(loop, "time", lambda: real_time() + clock_offset)
+            async with _running_daemon(daemon):
+                code = await run_command(
+                    build_parser().parse_args(["keyword-search", "find article"]),
+                    paths,
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+                # Let the server finish even when the old client deadline fires early.
+                await workflow_done.wait()
+
+    assert attempts == 3
+    assert clock_offset == pytest.approx(540.75)
+    assert code == 0, stderr.getvalue()
+    assert stderr.getvalue() == ""
+    assert Path(stdout.getvalue().strip()).is_file()
+
+
 async def _filtering_cli(paths: RuntimePaths, argv: list[str]) -> tuple[int, str, str]:
     stdout, stderr = io.StringIO(), io.StringIO()
     code = await asyncio.wait_for(
