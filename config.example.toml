@@ -77,30 +77,6 @@ enable_fetch = true
 api_url = "https://api.scrape.do"
 api_key_env = "SCRAPE_DO_API_KEY"
 
-[web_providers.zenrows]
-enable_search = false
-enable_fetch = true
-api_url = "https://api.zenrows.com"
-api_key_env = "ZENROWS_API_KEY"
-
-[web_providers.decodo]
-enable_search = true
-enable_fetch = true
-api_url = "https://scraper-api.decodo.com"
-api_key_env = "DECODO_API_KEY"
-
-[web_providers.scrapingdog]
-enable_search = true
-enable_fetch = true
-api_url = "https://api.scrapingdog.com"
-api_key_env = "SCRAPINGDOG_API_KEY"
-
-[web_providers.scrapegraphai]
-enable_search = true
-enable_fetch = true
-api_url = "https://v2-api.scrapegraphai.com"
-api_key_env = "SCRAPEGRAPH_AI_API_KEY"
-
 [web_providers.scraperapi]
 # Search may return google.com/goto wrappers instead of destination URLs (issue #74).
 # See README.md#known-provider-limitations; search can be disabled independently of fetch.
@@ -224,4 +200,4 @@ provider = "antigravity_main"
 max_attempts = 3
 base_delay_seconds = 0.25
 max_delay_seconds = 2.0
-request_timeout_seconds = 30.0
+request_timeout_seconds = 180.0

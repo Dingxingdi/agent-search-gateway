@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
@@ -29,6 +30,32 @@ class HttpStatusFailure(ExecutionFailure):
             f"{provider_name}/{stage}: HTTP status {status_code}",
         )
         self.status_code = status_code
+
+
+class ProviderResponseFailure(ExecutionFailure):
+    """Provider-declared failure containing only inspector-approved safe diagnostics."""
+
+    def __init__(
+        self,
+        provider_name: str,
+        stage: str,
+        *,
+        status_code: int,
+        retryable: bool,
+        safe_reason: str,
+        diagnostics: Mapping[str, object],
+    ) -> None:
+        super().__init__(
+            ErrorCode.ALL_PROVIDERS_FAILED,
+            f"{provider_name}/{stage}: provider response failure: {safe_reason}",
+        )
+        self.status_code = status_code
+        self.retryable = retryable
+        self.safe_reason = safe_reason
+        self.diagnostics: Mapping[str, object] = dict(diagnostics)
+
+
+ResponseInspector = Callable[[httpx.Response], ProviderResponseFailure | None]
 
 
 class HttpJsonExecutor:
@@ -60,6 +87,7 @@ class HttpJsonExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        response_inspector: ResponseInspector | None = None,
     ) -> object:
         response, attempt, attempt_started = await self._request_response(
             method,
@@ -68,6 +96,7 @@ class HttpJsonExecutor:
             headers=headers,
             params=params,
             json_body=json_body,
+            response_inspector=response_inspector,
         )
         try:
             return response.json()
@@ -113,6 +142,7 @@ class HttpJsonExecutor:
         headers: Mapping[str, str] | None,
         params: Mapping[str, Any] | None,
         json_body: object | None,
+        response_inspector: ResponseInspector | None = None,
     ) -> tuple[httpx.Response, int, float]:
         attempt = 0
         attempt_started = self._monotonic()
@@ -135,6 +165,23 @@ class HttpJsonExecutor:
         def on_retry(current_attempt: int, exc: BaseException, delay: float) -> None:
             delay_ms = max(0, int(delay * 1000))
             attempt_elapsed_ms = elapsed_ms(self._monotonic, attempt_started)
+            if isinstance(exc, ProviderResponseFailure):
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "http_retrying",
+                    provider=self._provider_name,
+                    stage=stage,
+                    endpoint=log_endpoint,
+                    attempt=current_attempt,
+                    delay_ms=delay_ms,
+                    elapsed_ms=attempt_elapsed_ms,
+                    category="provider_header",
+                    retry_scheduled=True,
+                    exc_info=False,
+                    **self._provider_failure_details(exc),
+                )
+                return
             if isinstance(exc, _RetryableStatus):
                 log_event(
                     self._logger,
@@ -184,6 +231,10 @@ class HttpJsonExecutor:
                 status=response.status_code,
                 elapsed_ms=elapsed_ms(self._monotonic, attempt_started),
             )
+            if response_inspector is not None:
+                failure = response_inspector(response)
+                if failure is not None:
+                    raise failure
             if response.status_code in {408, 429} or response.status_code >= 500:
                 raise _RetryableStatus(response.status_code)
             return response
@@ -196,7 +247,18 @@ class HttpJsonExecutor:
                 sleep=self._sleep,
                 before_attempt=before_attempt,
                 on_retry=on_retry,
+                adjust_delay=self._adjust_retry_delay if response_inspector is not None else None,
             )
+        except ProviderResponseFailure as exc:
+            self._log_failed(
+                stage,
+                log_endpoint,
+                attempt,
+                attempt_started,
+                "provider_header",
+                provider_failure=exc,
+            )
+            raise
         except _RetryableStatus as exc:
             self._log_failed(
                 stage,
@@ -240,9 +302,16 @@ class HttpJsonExecutor:
         *,
         status: int | None = None,
         transport_type: str | None = None,
+        provider_failure: ProviderResponseFailure | None = None,
     ) -> None:
         attempt_elapsed_ms = elapsed_ms(self._monotonic, started)
         details: dict[str, object] = {}
+        if provider_failure is not None:
+            details.update(self._provider_failure_details(provider_failure))
+            details["retry_scheduled"] = False
+            details["terminal_reason"] = (
+                "exhausted" if provider_failure.retryable else "non_retryable"
+            )
         if status is not None:
             details["status"] = status
         if transport_type is not None:
@@ -261,11 +330,49 @@ class HttpJsonExecutor:
             **details,
         )
 
+    @staticmethod
+    def _provider_failure_details(failure: ProviderResponseFailure) -> dict[str, object]:
+        reserved = {
+            "logger",
+            "level",
+            "event",
+            "exc_info",
+            "request",
+            "provider",
+            "stage",
+            "endpoint",
+            "attempt",
+            "status",
+            "category",
+            "elapsed_ms",
+            "delay_ms",
+            "transport_type",
+            "reason",
+            "retryable",
+            "retry_scheduled",
+            "terminal_reason",
+        }
+        details = {key: value for key, value in failure.diagnostics.items() if key not in reserved}
+        details.update(
+            status=failure.status_code,
+            reason=failure.safe_reason,
+            retryable=failure.retryable,
+        )
+        return details
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
     @staticmethod
+    def _adjust_retry_delay(exc: BaseException, delay: float) -> float:
+        if isinstance(exc, ProviderResponseFailure) and exc.retryable:
+            return delay * random.uniform(0.8, 1.0)
+        return delay
+
+    @staticmethod
     def _is_retryable(exc: BaseException) -> bool:
+        if isinstance(exc, ProviderResponseFailure):
+            return exc.retryable
         return isinstance(
             exc,
             _RetryableStatus | httpx.TimeoutException | httpx.TransportError,

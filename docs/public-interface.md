@@ -7,11 +7,13 @@
 The following interfaces are public for the current `0.x` line:
 
 - the `agent-search-gateway` executable and the commands documented in the README and `--help` output;
-- the configuration path and TOML fields represented by `config.example.toml`;
+- the configuration path and documented TOML fields, including supported provider settings omitted from the selected examples in `config.example.toml`;
 - the rule that credential-bearing configuration fields name environment variables instead of storing credential values;
 - the successful business-command stdout contract described in the README;
 - the documented JSONL result schemas for keyword, LLM-assisted, mixed, and academic-paper searches;
 - the documented local runtime paths for the socket, result files, and debug log.
+
+The top-level `--version` and `-v` flags print `agent-search-gateway <version>` using the installed CLI package version and exit successfully without reading configuration or contacting a daemon. They are not subcommand-local flags.
 
 Changes to those interfaces require tests, documentation, and a changelog entry. A patch release should not intentionally break them.
 

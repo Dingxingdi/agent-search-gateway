@@ -1,13 +1,19 @@
+import random
+import shlex
 from urllib.parse import parse_qs, urlparse
 
+import httpx
 import pytest
 
-from agent_search_gateway.errors import ExecutionFailure
+from agent_search_gateway.errors import ErrorCode, ExecutionFailure
+from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.contracts import KeywordSearchHit, URLFetchCandidate
+from agent_search_gateway.providers.http import HttpJsonExecutor, ProviderResponseFailure
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingHttpExecutor
+from tests.support.logging import structured_test_logger
 
 
 async def test_brightdata_search_uses_serp_zone_and_maps_organic_results() -> None:
@@ -139,3 +145,591 @@ async def test_brightdata_fetch_rejects_empty_body(body: str) -> None:
     )
     with pytest.raises(ExecutionFailure, match="page body is empty"):
         await adapter.fetch(normalize_url("https://example.com"))
+
+
+_CAPTCHA_HEADERS = {
+    "x-brd-error-code": "captcha",
+    "x-brd-error": "redirect location was rejected",
+    "x-brd-status-code": "502",
+}
+
+
+@pytest.mark.parametrize(
+    "explanation",
+    [
+        "unexpected prose",
+        "x" * 161,
+        "https://example.test/private?q=EXPLANATION_MARKER",
+        "token=[REDACTED_SECRET]",
+        "redirect location was rejected\nEXPLANATION_MARKER",
+    ],
+)
+async def test_brightdata_untrusted_explanation_keeps_only_safe_reason(explanation: str) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers={**_CAPTCHA_HEADERS, "x-brd-error": explanation},
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert caught.value.retryable is True
+    assert caught.value.safe_reason == "provider_reported_failure"
+    assert explanation not in str(caught.value)
+
+
+@pytest.mark.parametrize("payload", [{"organic": {}}, {"error": "BODY_DETAIL", "organic": []}])
+async def test_brightdata_payload_failures_do_not_gain_header_retries(
+    payload: dict[str, object],
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+        )
+        with pytest.raises(ExecutionFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert type(caught.value) is ExecutionFailure
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_brightdata_auth_status_without_headers_preserves_http_failure(status: int) -> None:
+    from agent_search_gateway.providers.http import HttpStatusFailure
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+        )
+        with pytest.raises(HttpStatusFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert caught.value.status_code == status
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("factor", "cap", "expected"),
+    [(0.9, 2.0, [0.225, 0.45]), (0.8, 0.3, [0.2, 0.24]), (1.0, 0.3, [0.25, 0.3])],
+)
+async def test_brightdata_header_retry_uses_adjusted_delay(
+    monkeypatch: pytest.MonkeyPatch, factor: float, cap: float, expected: list[float]
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return factor
+
+    monkeypatch.setattr(random, "uniform", uniform)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(200, headers=_CAPTCHA_HEADERS)
+        return httpx.Response(200, json={"organic": []})
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, cap, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        assert await _brightdata_adapter(executor).search("query") == []
+
+    assert len(requests) == 3
+    assert sleeps == pytest.approx(expected)
+    assert draws == [(0.8, 1.0), (0.8, 1.0)]
+
+
+async def test_brightdata_mixed_failures_keep_one_budget_and_only_header_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return 0.9
+
+    monkeypatch.setattr(random, "uniform", uniform)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 2:
+            return httpx.Response(500)
+        return httpx.Response(200, headers=_CAPTCHA_HEADERS)
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+
+    assert len(requests) == 3
+    assert sleeps == pytest.approx([0.225, 0.5])
+    assert draws == [(0.8, 1.0)]
+    assert caught.value.diagnostics["brightdata_error_code"] == "captcha"
+    assert caught.value.diagnostics["brightdata_status"] == 502
+
+
+@pytest.mark.parametrize("kind", ["status", "transport"])
+async def test_brightdata_generic_failures_preserve_exact_backoff(
+    monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    draws: list[tuple[float, float]] = []
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return 0.9
+
+    monkeypatch.setattr(random, "uniform", uniform)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            if kind == "transport":
+                raise httpx.ReadTimeout("fixture timeout", request=request)
+            return httpx.Response(500)
+        return httpx.Response(200, json={"organic": []})
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        assert await _brightdata_adapter(executor).search("query") == []
+
+    assert len(requests) == 3
+    assert sleeps == [0.25, 0.5]
+    assert draws == []
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["recovery", "exhausted", "terminal", "invalid-code", "one-attempt"],
+)
+async def test_brightdata_header_events_expose_safe_metadata(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    draws: list[tuple[float, float]] = []
+    credential = SecretValue("credential-value")
+    logger, stream = structured_test_logger("tests.brightdata.safe-events", secrets=[credential])
+    code = "captcha"
+    safe_code = "captcha"
+    if outcome == "terminal":
+        code, safe_code = "other_code", "unknown"
+    elif outcome == "invalid-code":
+        code, safe_code = "CODE_MARKER" + "x" * 200, "invalid"
+    explanation = (
+        "https://example.test/TARGET_PATH_MARKER?q=HEADER_QUERY_MARKER "
+        "token=[REDACTED_SECRET]\r\nHEADER_CONTROL_MARKER"
+    )
+
+    def uniform(low: float, high: float) -> float:
+        draws.append((low, high))
+        return 0.9
+
+    monkeypatch.setattr(random, "uniform", uniform)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if outcome == "recovery" and len(requests) == 3:
+            return httpx.Response(
+                200,
+                json={
+                    "organic": [
+                        {
+                            "link": "https://example.test/RESULT_PATH_MARKER",
+                            "description": "BODY_MARKER",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            text="BODY_MARKER",
+            headers={
+                "x-brd-error-code": code,
+                "x-brd-status-code": "502",
+                "x-brd-error": explanation,
+            },
+        )
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    message = ""
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1 if outcome == "one-attempt" else 3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            logger=logger,
+            sleep=sleep,
+        )
+        adapter = _brightdata_adapter(executor, secret=credential)
+        query = "QUERY_MARKER https://example.test/QUERY_PATH_MARKER"
+        if outcome == "recovery":
+            assert len(await adapter.search(query)) == 1
+        else:
+            with pytest.raises(ProviderResponseFailure) as caught:
+                await adapter.search(query)
+            message = str(caught.value)
+
+    expected_attempts = 3 if outcome in {"recovery", "exhausted"} else 1
+    assert len(requests) == expected_attempts
+    assert len(draws) == len(sleeps)
+    logged = stream.getvalue()
+    for marker in (
+        "QUERY_MARKER",
+        "QUERY_PATH_MARKER",
+        "TARGET_PATH_MARKER",
+        "HEADER_QUERY_MARKER",
+        "HEADER_CONTROL_MARKER",
+        "RESULT_PATH_MARKER",
+        "BODY_MARKER",
+        "CODE_MARKER",
+        credential.reveal(),
+        "[REDACTED_SECRET]",
+        "other_code",
+        "traceback=",
+        "Traceback",
+    ):
+        assert marker not in logged + message
+
+    lines = logged.splitlines()
+    retry_lines = [line for line in lines if "event=http_retrying" in line]
+    failed_lines = [line for line in lines if "event=http_failed" in line]
+    assert len(retry_lines) == len(sleeps) == (2 if expected_attempts == 3 else 0)
+    assert len(failed_lines) == (0 if outcome == "recovery" else 1)
+    for line in [*retry_lines, *failed_lines]:
+        fields = dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        assert line.startswith("DEBUG ")
+        assert fields["provider"] == "brightdata"
+        assert fields["stage"] == "search"
+        assert fields["category"] == "provider_header"
+        assert fields["status"] == "200"
+        assert fields["brightdata_status"] == "502"
+        assert fields["brightdata_error_code"] == safe_code
+        assert fields["reason"] == "provider_reported_failure"
+        assert fields["retryable"] == (
+            "false" if outcome in {"terminal", "invalid-code"} else "true"
+        )
+        assert int(fields["elapsed_ms"]) >= 0
+        assert "transport_type" not in fields
+    for attempt, (line, delay) in enumerate(zip(retry_lines, sleeps, strict=True), start=1):
+        fields = dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        assert fields["attempt"] == str(attempt)
+        assert fields["retry_scheduled"] == "true"
+        assert fields["delay_ms"] == str(max(0, int(delay * 1000)))
+    if failed_lines:
+        fields = dict(token.split("=", 1) for token in shlex.split(failed_lines[0])[1:])
+        assert fields["attempt"] == str(expected_attempts)
+        assert fields["retry_scheduled"] == "false"
+        assert fields["terminal_reason"] == (
+            "non_retryable" if outcome in {"terminal", "invalid-code"} else "exhausted"
+        )
+
+
+def _brightdata_adapter(
+    executor: HttpJsonExecutor, *, secret: SecretValue | None = None
+) -> BrightDataAdapter:
+    return BrightDataAdapter(
+        name="brightdata",
+        api_url="https://api.brightdata.test",
+        search_zone="serp-zone",
+        fetch_zone="fetch-zone",
+        secret=secret if secret is not None else SecretValue("test-credential"),
+        http_executor=executor,
+    )
+
+
+async def test_brightdata_search_classifies_masked_captcha_before_json_decode() -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers=_CAPTCHA_HEADERS)
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+
+    failure = caught.value
+    assert failure.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert failure.status_code == 200
+    assert failure.retryable is True
+    assert failure.diagnostics == {"brightdata_error_code": "captcha", "brightdata_status": 502}
+    assert failure.safe_reason == "redirect location was rejected"
+    assert len(requests) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("code", ["captcha", "timeout", "expect_element", "expect_body"])
+@pytest.mark.parametrize("inner_status", [None, "200", "502"])
+async def test_brightdata_recoverable_headers_retry_and_preserve_mapping(
+    code: str, inner_status: str | None
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    headers = {"X-Brd-Error-Code": code}
+    if inner_status is not None:
+        headers["X-Brd-Status-Code"] = inner_status
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(200, headers=headers, json={"organic": []})
+        return httpx.Response(
+            200,
+            json={
+                "organic": [
+                    {"link": "https://example.com/a", "title": "A", "description": "Snippet A"}
+                ],
+            },
+        )
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        assert await _brightdata_adapter(executor).search("query") == [
+            KeywordSearchHit("https://example.com/a", "A", "Snippet A")
+        ]
+
+    assert len(requests) == 3
+    assert len(sleeps) == 2
+
+
+@pytest.mark.parametrize(
+    ("outer_status", "headers", "safe_code", "inner_status"),
+    [
+        (200, {"x-brd-error-code": "other_code"}, "unknown", None),
+        (200, {"x-brd-error-code": "invalid_zone"}, "unknown", None),
+        (200, {"x-brd-error-code": "auth_failed"}, "unknown", None),
+        (500, {"x-brd-error-code": "other_code"}, "unknown", None),
+        (200, {"x-brd-error": "explanation only"}, "missing", None),
+        (401, _CAPTCHA_HEADERS, "captcha", 502),
+        (403, _CAPTCHA_HEADERS, "captcha", 502),
+        (200, {"x-brd-error-code": "captcha", "x-brd-status-code": "401"}, "captcha", 401),
+        (200, {"x-brd-error-code": "captcha", "x-brd-status-code": "403"}, "captcha", 403),
+        (200, {"x-brd-status-code": "502"}, "missing", 502),
+        (200, {"x-brd-status-code": "302"}, "missing", 302),
+        (200, {"x-brd-status-code": "100"}, "missing", 100),
+        (200, {"x-brd-status-code": "599"}, "missing", 599),
+    ],
+)
+async def test_brightdata_terminal_header_failures_do_not_retry(
+    outer_status: int, headers: dict[str, str], safe_code: str, inner_status: int | None
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(outer_status, headers=headers, json={"organic": []})
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+
+    failure = caught.value
+    assert failure.status_code == outer_status
+    assert failure.retryable is False
+    assert failure.diagnostics["brightdata_error_code"] == safe_code
+    if inner_status is None:
+        assert "brightdata_status" not in failure.diagnostics
+    else:
+        assert failure.diagnostics["brightdata_status"] == inner_status
+    assert len(requests) == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    ("headers", "safe_code"),
+    [
+        ([("x-brd-error-code", "captcha" + "x" * 64)], "invalid"),
+        ([("x-brd-error-code", "captcha\t")], "invalid"),
+        ([("x-brd-error-code", "captcha\x7f")], "invalid"),
+        ([("x-brd-error-code", "")], "invalid"),
+        ([("x-brd-error-code", "captcha, timeout")], "invalid"),
+        ([("x-brd-error-code", "captcha"), ("x-brd-error-code", "captcha")], "invalid"),
+        ([("x-brd-error-code", "CAPTCHA")], "unknown"),
+        ([("x-brd-error-code", "captcha suffix")], "unknown"),
+        ([("x-brd-status-code", "200"), ("x-brd-status-code", "502")], "missing"),
+        *[
+            ([("x-brd-error-code", "captcha"), ("x-brd-status-code", status)], "captcha")
+            for status in ("", "bad", "099", "600", "0502", "502.0", "200, 502", "502\n")
+        ],
+        (
+            [
+                ("x-brd-error-code", "captcha"),
+                ("x-brd-status-code", "200"),
+                ("x-brd-status-code", "502"),
+            ],
+            "captcha",
+        ),
+    ],
+)
+async def test_brightdata_malformed_or_ambiguous_headers_are_terminal(
+    headers: list[tuple[str, str]], safe_code: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers=headers, json={"organic": []})
+
+    async def no_retry(_delay: float) -> None:
+        pytest.fail("Invalid header classification must not schedule retries")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=no_retry,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+
+    assert caught.value.retryable is False
+    assert caught.value.diagnostics["brightdata_error_code"] == safe_code
+    assert "brightdata_status" not in caught.value.diagnostics
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("headers", [{}, {"x-brd-status-code": "200"}])
+async def test_brightdata_benign_headers_preserve_success(headers: dict[str, str]) -> None:
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, headers=headers, json={"organic": []})
+        )
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+        )
+        assert await _brightdata_adapter(executor).search("query") == []
+
+
+@pytest.mark.parametrize("body", ["", "not JSON"])
+@pytest.mark.parametrize("headers", [{}, {"x-brd-status-code": "200"}])
+async def test_brightdata_without_header_failure_preserves_decode_errors(
+    body: str, headers: dict[str, str]
+) -> None:
+    from agent_search_gateway.errors import ProtocolFailure
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers=headers, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+        )
+        with pytest.raises(ProtocolFailure, match="response was not valid JSON"):
+            await _brightdata_adapter(executor).search("query")
+    assert len(requests) == 1
+
+
+async def test_brightdata_fetch_does_not_inherit_search_header_inspection() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(200, json={"organic": []})
+        return httpx.Response(200, headers=_CAPTCHA_HEADERS, text="# fetched\nbody")
+
+    async def no_retry(_delay: float) -> None:
+        pytest.fail("Fetch must not inherit Search header retries")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=no_retry,
+        )
+        adapter = _brightdata_adapter(executor)
+        assert await adapter.search("query") == []
+        assert await adapter.fetch(normalize_url("https://example.com")) == URLFetchCandidate(
+            "# fetched\nbody", "# fetched\nbody"
+        )
+    assert len(requests) == 2

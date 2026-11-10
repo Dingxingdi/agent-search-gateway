@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 from agent_search_gateway.cli import build_parser
-from agent_search_gateway.config import load_toml, resolve_config
+from agent_search_gateway.config import load_toml, resolve_config, resolve_retry_policy
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.academic.defaults import (
     build_default_academic_registry,
@@ -203,6 +203,37 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
     assert set(action.choices) == documented
 
 
+def test_example_timeout_does_not_change_runtime_default() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    assert resolve_retry_policy(data).request_timeout_seconds == 180.0
+    assert resolve_retry_policy({}).request_timeout_seconds == 30.0
+
+
+def test_example_provider_selection_omits_only_requested_templates() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    expected = {
+        "tavily",
+        "firecrawl",
+        "exa",
+        "linkup",
+        "brave",
+        "anysearch",
+        "tinyfish",
+        "parallel",
+        "brightdata",
+        "scrape_do",
+        "scraperapi",
+        "scrapingant",
+        "serpapi",
+        "jina",
+    }
+    assert {name for name, table in web.items() if isinstance(table, dict)} == expected
+    resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
+    assert {provider.name for provider in resolved.web.providers} == expected
+
+
 def test_example_config_and_readme_document_all_new_provider_contracts() -> None:
     data = load_toml(_ROOT / "config.example.toml")
     registry = build_default_registry()
@@ -210,7 +241,7 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
     web = data.get("web_providers")
     assert isinstance(web, dict)
 
-    new_names = {
+    registered_names = {
         "brightdata",
         "scrape_do",
         "zenrows",
@@ -222,7 +253,8 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "serpapi",
         "jina",
     }
-    assert new_names <= set(web)
+    example_names = registered_names - {"zenrows", "decodo", "scrapingdog", "scrapegraphai"}
+    assert example_names <= set(web)
     assert "apify" not in web
     assert "scrape" not in web
 
@@ -247,17 +279,19 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "jina": (False, True),
     }
     for name, (search, fetch) in expected_capabilities.items():
-        configured = by_name[name]
-        assert (configured.enable_search, configured.enable_fetch) == (search, fetch)
+        if name in example_names:
+            configured = by_name[name]
+            assert (configured.enable_search, configured.enable_fetch) == (search, fetch)
         registration = registry.get(name)
         assert registration is not None
         assert (
             registration.capabilities.search,
             registration.capabilities.fetch,
         ) == (search, fetch)
+        assert registration.requires_api_key is (name != "jina")
 
     credentialless_names = {"jina"}
-    credentialed_names = new_names - credentialless_names
+    credentialed_names = example_names - credentialless_names
     for name in credentialed_names:
         raw = web[name]
         assert isinstance(raw, dict)

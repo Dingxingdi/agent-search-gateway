@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Protocol, TextIO
 
+from . import __version__
 from .daemon import ForegroundDaemon
 from .doctor import DoctorReport, render_doctor, run_doctor
 from .errors import DaemonUnavailable, ErrorCode, GatewayError, InputFailure
@@ -47,6 +48,7 @@ DoctorRunner = Callable[..., Awaitable[DoctorReport]]
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-search-gateway")
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
     start = subparsers.add_parser("start")
     start.add_argument("--debug", action="store_true")

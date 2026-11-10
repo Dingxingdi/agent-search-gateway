@@ -8,6 +8,7 @@ from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import KeywordSearchHit
+from agent_search_gateway.providers.http import ProviderResponseFailure
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_store import URLStore
 from tests.support.fakes import FakeKeywordSearchProvider, FakeLLMClient
@@ -43,7 +44,10 @@ def _orchestrator(
     )
 
 
-async def test_keyword_search_uses_pipeline_completion_rules(tmp_path: Path) -> None:
+@pytest.mark.parametrize("header_failure", [False, True], ids=["execution", "provider-header"])
+async def test_keyword_search_uses_pipeline_completion_rules(
+    tmp_path: Path, header_failure: bool
+) -> None:
     with pytest.raises(InputFailure) as empty:
         await _orchestrator(tmp_path, []).keyword_search("   ", request_id="00000001")
     assert empty.value.code is ErrorCode.EMPTY_QUERY
@@ -52,10 +56,19 @@ async def test_keyword_search_uses_pipeline_completion_rules(tmp_path: Path) -> 
         await _orchestrator(tmp_path, []).keyword_search("query", request_id="00000002")
     assert absent.value.code is ErrorCode.NO_KEYWORD_SEARCH_PROVIDERS
 
-    failed = FakeKeywordSearchProvider(
-        "failed",
-        failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "provider failed"),
+    failure = (
+        ProviderResponseFailure(
+            "brightdata",
+            "search",
+            status_code=200,
+            retryable=True,
+            safe_reason="provider_reported_failure",
+            diagnostics={"brightdata_error_code": "captcha", "brightdata_status": 502},
+        )
+        if header_failure
+        else ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "provider failed")
     )
+    failed = FakeKeywordSearchProvider("failed", failure=failure)
     success = FakeKeywordSearchProvider(
         "success",
         [KeywordSearchHit("https://example.com/a", snippet="A")],
@@ -84,7 +97,7 @@ async def test_keyword_search_uses_pipeline_completion_rules(tmp_path: Path) -> 
         [
             FakeKeywordSearchProvider(
                 "one",
-                failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "one"),
+                failure=failure,
             ),
             FakeKeywordSearchProvider(
                 "two",
@@ -98,4 +111,14 @@ async def test_keyword_search_uses_pipeline_completion_rules(tmp_path: Path) -> 
         await all_failed.keyword_search("query", request_id="00000005")
     after = set((tmp_path / "results").glob("keyword-*.jsonl"))
     assert all_failed_error.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert all_failed_error.value.message == "All keyword search provider pipelines failed"
     assert after == before
+
+    with pytest.raises(ExecutionFailure) as selected_error:
+        await orchestrator.keyword_search("query", request_id="00000006", provider="failed")
+    assert type(selected_error.value) is ExecutionFailure
+    assert selected_error.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert selected_error.value.message == "All keyword search provider pipelines failed"
+    assert set((tmp_path / "results").glob("keyword-*.jsonl")) == before
+    assert success.calls == ["query"]
+    assert failed.calls == ["query", "query"]

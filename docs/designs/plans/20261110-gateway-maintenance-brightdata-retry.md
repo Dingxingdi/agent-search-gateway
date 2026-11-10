@@ -132,7 +132,7 @@ Use minimal transport fakes instead of mocking the adapter, retry loop, or class
 - Docs: `CHANGELOG.md`, `Unreleased`.
 - Reference: `src/agent_search_gateway/config.py::resolve_retry_policy` and `providers/defaults.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `test_example_provider_selection_omits_only_requested_templates` using `load_toml` and real `resolve_config` with the existing `_stub_environment`.
 
@@ -155,7 +155,7 @@ Adjust the existing provider-contract test without weakening its capability or R
 
 In its own RED cycle, add `test_example_timeout_does_not_change_runtime_default`: `resolve_retry_policy(example).request_timeout_seconds == 180.0`, while `resolve_retry_policy({}).request_timeout_seconds == 30.0`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/docs/test_documented_config.py::test_example_provider_selection_omits_only_requested_templates
@@ -164,7 +164,7 @@ uv run --locked --offline pytest -q tests/docs/test_documented_config.py::test_e
 
 Expected: the first fails because the four tables still exist; the second fails because the example resolves to 30.0. Registry and runtime-default assertions should already pass.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Delete the four entire web-provider example tables.
@@ -193,7 +193,7 @@ enabled = false
 
 Tell readers to edit the existing table rather than append a duplicate TOML table. Keep the example configuration's existing dblp enablement and runtime behavior unchanged.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/docs/test_documented_config.py tests/providers/test_registry.py tests/unit/test_config_web_providers.py
@@ -204,7 +204,7 @@ Expected: selected example tables resolve, all supported provider capability ass
 
 Review the README note for all three points: low-frequency verification is an observed limitation, slowing requests is not a guaranteed remedy, and disabling dblp is optional. Confirm the provider capability table still contains all four omitted examples.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Only deduplicate local test sets if that improves the distinction between registry support and example selection. Avoid introducing a second source of production provider capabilities. If refactoring changes files after Step 4, rerun the targeted docs/config tests and `uv run --locked --offline pytest -q`; otherwise retain the Step 4 evidence.
 
@@ -219,7 +219,7 @@ Only deduplicate local test sets if that improves the distinction between regist
 - Docs: `CHANGELOG.md`, `Unreleased/Added`.
 - Reference: `src/agent_search_gateway/__init__.py`, `pyproject.toml`, `tests/unit/test_package_metadata.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add a parameterized `test_cli_version_flags_exit_before_runtime` for `"--version"` and `"-v"`.
 
@@ -239,7 +239,7 @@ assert captured.err == ""
 
 Keep existing subcommand parsing and command-output tests. Add or retain a parser guard that no arguments still exit 2 when neither version flag is present, and that the version aliases are not installed on child parsers.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/cli/test_cli.py::test_cli_version_flags_exit_before_runtime
@@ -247,7 +247,7 @@ uv run --locked --offline pytest -q tests/cli/test_cli.py::test_cli_version_flag
 
 Expected: both cases fail because the current parser exits 2 instead of printing the version and exiting 0. Failure must not arise from the fail-fast runtime sentinel.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 Import `__version__` from the package and add this action immediately after creating the top-level parser, before declaring required subparsers:
 
@@ -262,7 +262,7 @@ parser.add_argument(
 
 Keep `main()`, `run_command()`, runtime paths, and daemon dispatch unchanged. Document both invocations and that the output is the installed CLI package version and does not require a running daemon or configuration. Add the public-interface and changelog entries. Do not add a `version` subcommand, child-parser flag, manual pre-parser, or a second hardcoded version string.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/cli/test_cli.py tests/unit/test_package_metadata.py tests/docs/test_documented_config.py tests/docs/test_installation_contract.py
@@ -273,7 +273,7 @@ uv run --locked --offline pytest -q
 
 Expected: tests pass; both commands print `agent-search-gateway 0.2.0` once with exit 0 on this branch. Tests derive their expectation from `__version__`, so a later release does not require updating a duplicated literal.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Keep both aliases on one argparse action. No extraction is needed for this small change. If cleanup is performed, rerun the CLI tests and the full offline suite.
 
@@ -286,7 +286,7 @@ Keep both aliases on one argparse action. No extraction is needed for this small
 - Reference: `src/agent_search_gateway/models.py::RetryPolicy`.
 - Regression: `tests/providers/llm/test_openai_chat.py` through the provider suite.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `test_retry_delay_adjuster_updates_sleep_and_retry_hook`.
 
@@ -307,7 +307,7 @@ Then cover one behavior per test:
 
 Retain the existing exact `[0.25, 0.5]` assertion with no callback and existing observer-hook exception-isolation tests.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/unit/test_retry.py::test_retry_delay_adjuster_updates_sleep_and_retry_hook
@@ -315,7 +315,7 @@ uv run --locked --offline pytest -q tests/unit/test_retry.py::test_retry_delay_a
 
 Expected: failure because the optional adjustment interface is not implemented. After adding the signature during GREEN, the behavioral assertions must still distinguish adjusted delays from the old exact delays. Do not count a collection/import error as RED.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 On a caught failure:
@@ -332,7 +332,7 @@ On a caught failure:
 
 Use `math.isfinite` for the new adjustment result. Do not catch `BaseException` around the callback, since cancellation must remain cancellation. Preserve the existing observer-hook isolation and operation return/exception identity. Do not add randomness to `retry.py`, alter `RetryPolicy`, or change direct LLM callers.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/unit/test_retry.py tests/providers/test_http_executor.py tests/providers/llm
@@ -341,7 +341,7 @@ uv run --locked --offline pytest -q
 
 Expected: adjusted waits and hooks agree, bounds/cancellation tests pass, and unchanged callers retain their old exact delays.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Keep one scheduling location and one attempt counter. Prefer a short local calculation over a new retry abstraction. If the calculation or tests are cleaned up, rerun the retry/provider tests and full offline suite.
 
@@ -354,7 +354,7 @@ Keep one scheduling location and one attempt counter. Prefer a short local calcu
 - Modify: `tests/support/http.py::RecordingJsonExecutor.request_json` and `RecordingHttpExecutor.request_json`.
 - Test: `tests/providers/test_http_executor.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Start with `test_json_response_inspector_runs_before_decode`.
 
@@ -376,7 +376,7 @@ After that contract is green, add focused tests using the new typed failure:
 
 Use generic safe fixture metadata in executor tests; vendor header interpretation belongs in Task 5. Reuse existing cancellation, transport subtype, status, redirect, and decode tests.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/providers/test_http_executor.py::test_json_response_inspector_runs_before_decode
@@ -384,7 +384,7 @@ uv run --locked --offline pytest -q tests/providers/test_http_executor.py::test_
 
 Expected: the current JSON boundary rejects the inspector keyword or does not invoke it. After the first cycle, each subsequent new behavior must fail for its missing typed retry/classification path before implementing that path.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Define ProviderResponseFailure and ResponseInspector next to HttpStatusFailure.
@@ -412,7 +412,7 @@ Provide a small generic path for safe provider-failure details in `_log_failed`;
 
 Update both JSON-capable recording fakes with the same explicitly typed optional keyword. They return already-decoded test objects and need not simulate HTTP header inspection. Keep `RecordedRequest`, text-fake signatures, and recorded request shapes unchanged. Actual inspection is verified with the real executor and `MockTransport`.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/providers/test_http_executor.py tests/providers/web tests/providers/academic tests/providers/llm
@@ -422,7 +422,7 @@ uv run --locked --offline pytest -q
 
 Expected: the inspector works before decoding, mixed errors share one budget, no-inspector JSON/text paths retain existing behavior, and protocol/fake signatures type-check.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Share only the short safe-field preparation needed by retry and terminal logging. Do not split the executor or build a new HTTP hierarchy. If cleanup changes the implementation, rerun executor/provider tests, mypy, and the full offline suite.
 
@@ -435,7 +435,7 @@ Share only the short safe-field preparation needed by retry and terminal logging
 - Regression: `tests/providers/web/test_search_result_tolerance.py`.
 - Reference: the response classification table in the error-handling spec.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `test_brightdata_search_classifies_masked_captcha_before_json_decode`.
 
@@ -470,7 +470,7 @@ Preserve existing Search request-shape assertions exactly: POST to `/request`, B
 
 Retain existing Fetch Markdown, independent-zone, and empty-body tests. Add `test_brightdata_fetch_does_not_inherit_search_header_inspection` using the same real adapter/executor: complete a Search, then return nonempty Fetch text with SERP-like headers. Fetch returns the text without special SERP retries.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/providers/web/test_brightdata.py::test_brightdata_search_classifies_masked_captcha_before_json_decode
@@ -478,7 +478,7 @@ uv run --locked --offline pytest -q tests/providers/web/test_brightdata.py::test
 
 Expected: the current adapter does not supply an inspector, so the executor raises `ProtocolFailure: response was not valid JSON`. This reproduces the actual bug without a live API call.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Pass response_inspector=self._inspect_search_response only from search().
@@ -508,7 +508,7 @@ Concrete conservative parsing choices:
 
 Only the adapter contains those vendor-specific rules. Reuse the existing final-render `SecretRedactor` as defense in depth; do not build a new logging/redaction subsystem. The failure object's string/message/diagnostics contain only the safe projection, never raw headers or the response.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/providers/web/test_brightdata.py tests/providers/web/test_search_result_tolerance.py tests/providers/test_http_executor.py
@@ -517,7 +517,7 @@ uv run --locked --offline pytest -q
 
 Expected: all header classifications, recovery, request-payload guards, and Search/Fetch isolation pass. Old body-only malformed-response tests still behave as before.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Keep any bounded header parsing helpers private to `brightdata.py`. Do not move vendor knowledge into `http.py` or add an adapter retry loop. Extract only clearly repeated validation within this file. After any cleanup, rerun the targeted tests and full offline suite.
 
@@ -533,7 +533,7 @@ Keep any bounded header parsing helpers private to `brightdata.py`. Do not move 
 - Docs: `CHANGELOG.md`, `Unreleased/Fixed`.
 - Reuse unchanged: `tests/support/logging.py`, `src/agent_search_gateway/observability.py`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add `test_brightdata_header_retry_uses_adjusted_delay`.
 
@@ -564,7 +564,7 @@ Assert the rendered events and exception messages never include those sentinels 
 
 As regression evidence, extend the existing orchestration test minimally with `ProviderResponseFailure` as a provider-failure variant. Confirm a successful sibling still produces the same JSONL; all failed branches still raise `ALL_PROVIDERS_FAILED` with `All keyword search provider pipelines failed`, without leaking vendor details or writing a result file. Exercise single-provider selection as well. This unchanged aggregate behavior may already be green; it does not require production orchestrator edits.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 uv run --locked --offline pytest -q tests/providers/web/test_brightdata.py::test_brightdata_header_retry_uses_adjusted_delay
@@ -573,7 +573,7 @@ uv run --locked --offline pytest -q tests/providers/web/test_brightdata.py::test
 
 Expected: the current typed-header path still uses unadjusted exponential waits and lacks the complete safe provider diagnostic fields. Any baseline failure unrelated to those differences must be fixed before proceeding.
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ```text
 Provide HttpJsonExecutor._adjust_retry_delay:
@@ -605,7 +605,7 @@ Use the failure's safe `diagnostics` mapping for vendor keys. Prepare generic fi
 
 Document that a Bright Data outer HTTP 200 may be a provider failure, that detailed safe classifications and retry waits are available in DEBUG, and that normal business-command output remains unchanged. Record the fix under `Unreleased`. Keep the existing warning about handling local debug files carefully.
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ```bash
 uv run --locked --offline pytest -q tests/unit/test_retry.py tests/providers/test_http_executor.py tests/providers/web/test_brightdata.py tests/orchestrators/test_keyword_search_pipeline.py
@@ -615,7 +615,7 @@ uv run --locked --offline pytest -q
 
 Expected: recovery/exhaustion share one attempt budget; only validated provider-header retries are jittered; logged/slept waits agree; safe metadata survives failure; sibling results, selected-provider errors, default delays, Fetch, and other providers remain compatible.
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Reuse the existing event formatter, redactor, and elapsed-time calculation. If retry/terminal formatting duplicates a few safe fields, consolidate that narrow mapping only. Do not add public failure codes, protocol fields, jitter configuration, or a vendor-specific HTTP subclass. After any cleanup, rerun the targeted integration tests and full offline suite.
 
@@ -623,11 +623,11 @@ Reuse the existing event formatter, redactor, and elapsed-time calculation. If r
 
 These are implementation acceptance checks, not additional feature work.
 
-- [ ] Confirm the worktree diff contains only the planned implementation, tests, and documentation; original design documents remain intact.
-- [ ] Confirm neither `__version__` nor `pyproject.toml` was bumped, and no user config, registry, quota, daemon, or socket code was altered.
-- [ ] Confirm README contains both version invocations and the reviewed dblp low-frequency caveat/optional disablement; all provider capability rows remain.
-- [ ] Confirm `CHANGELOG.md` has the version feature, template changes, dblp documentation, and Bright Data fix under `Unreleased`.
-- [ ] Run the project's required static and documentation gates:
+- [x] Confirm the worktree diff contains only the planned implementation, tests, and documentation; original design documents remain intact.
+- [x] Confirm neither `__version__` nor `pyproject.toml` was bumped, and no user config, registry, quota, daemon, or socket code was altered.
+- [x] Confirm README contains both version invocations and the reviewed dblp low-frequency caveat/optional disablement; all provider capability rows remain.
+- [x] Confirm `CHANGELOG.md` has the version feature, template changes, dblp documentation, and Bright Data fix under `Unreleased`.
+- [x] Run the project's required static and documentation gates:
 
 ```bash
 uv run --locked --offline ruff format --check src tests scripts
@@ -678,3 +678,35 @@ Type review checklist for the plan author and implementer:
 - `on_retry` continues receiving the final `float` delay; `delay_ms` uses the same existing integer conversion.
 - `retryable` describes eligibility; `retry_scheduled` distinguishes exhaustion from an actual next attempt.
 - The HTTP/retry layer never imports the adapter or recognizes `x-brd-*`; its only provider extension is the optional inspector and typed safe signal.
+
+## Implementation record — 2026-11-10
+
+All six tasks are complete and self-reviewed in the existing `brightdata-header-retry-maintenance` worktree. There are no remaining implementation blockers.
+
+| Task | Status | Verification |
+|---|---|---|
+| 1. Selected examples and dblp guidance | DONE | Template membership and timeout tests failed for the original configuration, then passed. Registry capabilities and README provider rows remain covered. Full suite: 1211 passed, 4 skipped. |
+| 2. CLI version flags | DONE | Both flags failed with exit 2 before implementation, then exited 0 with the canonical version before runtime access. Both installed entry-point invocations printed `agent-search-gateway 0.2.0`. Full suite: 1222 passed, 4 skipped. |
+| 3. Optional bounded delay adjustment | DONE | RED/GREEN coverage for adjustment, bounds/nonfinite fallback and callback failure; cancellation and unchanged exact delays passed. Full suite: 1234 passed, 4 skipped. |
+| 4. Per-call HTTP response inspection | DONE | RED/GREEN coverage for inspection, failure before decoding and retry eligibility. Mixed failures share the same send budget; per-attempt timeouts and JSON/text isolation passed. Full suite: 1240 passed, 4 skipped; mypy passed. |
+| 5. Bright Data header classification | DONE | Reproduced the original HTTP-200/empty-body JSON error, then passed recoverable, terminal, malformed and ambiguous header cases. Existing request payloads, result mapping and Fetch isolation passed. Full suite: 1300 passed, 4 skipped. |
+| 6. Jitter, safe events and integration guards | DONE | RED/GREEN coverage for bounded header-only jitter and safe diagnostics. Logged waits equal slept waits; reserved event fields cannot be overwritten; cancellation, partial success, all-failed and selected-provider aggregation passed. |
+
+### Final verification
+
+All commands below ran from this worktree with its own locked development environment. The final implementation passed:
+
+| Command | Observed result |
+|---|---|
+| `uv run --locked --offline ruff format --check src tests scripts` | Exit 0; 195 files already formatted. |
+| `uv run --locked --offline ruff check .` | Exit 0; all checks passed. |
+| `uv run --locked --offline mypy src tests scripts` | Exit 0; no issues in 195 source files. |
+| `uv run --locked --offline pytest -q` | Exit 0; 1317 passed, 4 skipped in 8.70s. |
+| `uv run --locked --offline python scripts/build_docs.py` | Exit 0; documentation built successfully. |
+
+The final lint/type pass corrected import spacing and made `exc_info=False` explicit on provider-header retry events; all required code checks were rerun afterward.
+
+Scope review confirmed changes are confined to the planned implementation, tests, documentation and this execution record. The original architecture/error-handling/testing specs, package version, lockfile, runtime defaults, provider registry, quotas, orchestration implementation, daemon and socket protocol were not changed. Bright Data Search retains its original request shape; Fetch retains its original implementation.
+
+The optional live Bright Data smoke was not run. No running daemon was restarted and no installed user configuration was modified. The implementation is kept on the dedicated task branch. Pushing, releasing and opening a PR are outside this implementation plan.
+
