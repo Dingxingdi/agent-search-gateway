@@ -718,3 +718,7 @@ The new `test_cli_waits_for_example_http_retry_budget` uses virtual elapsed time
 
 CodeRabbit confirmed that its docstring coverage assessment is warning-only and identified no undocumented contract requiring bulk docstring changes. The deadline rationale and its finite scope are documented with the fix.
 
+Qodo subsequently identified status-only transient HTTP responses that incorrectly became terminal provider-header failures. Four new regression scenarios (408/408, 429/429, 503/503, and 503/502 outer/inner statuses) reproduced the failure before the fix. The inspector now defers these cases to the generic HTTP path using the same `is_retryable_http_status` predicate as the executor. Tests require exactly three sends and unjittered delays of 0.25 and 0.5 seconds, and additional terminal cases preserve authentication, malformed, unknown-code, explanation, and non-retryable-inner-status precedence. The focused Bright Data/HTTP executor suites passed 141 tests. Full verification then passed: 195 files formatted, Ruff lint clean, mypy clean for 195 source files, 1329 tests passed with 4 optional integration tests skipped, and documentation built successfully.
+
+Qodo marked the separate sequential multi-provider Fetch deadline observation as deferred and resolved its thread after reviewing the existing unbounded quota/fallback path and the documented scope. A complete end-to-end deadline/cancellation policy remains a separate design task.
+

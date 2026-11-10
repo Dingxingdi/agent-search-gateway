@@ -563,8 +563,66 @@ async def test_brightdata_recoverable_headers_retry_and_preserve_mapping(
 
 
 @pytest.mark.parametrize(
+    ("outer_status", "inner_status"), [(408, 408), (429, 429), (503, 503), (503, 502)]
+)
+async def test_brightdata_status_only_http_failure_preserves_generic_retries(
+    outer_status: int, inner_status: int
+) -> None:
+    """Status-only metadata must preserve the shared HTTP retry budget and delays."""
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) < 3:
+            return httpx.Response(outer_status, headers={"x-brd-status-code": str(inner_status)})
+        return httpx.Response(
+            200, json={"organic": [{"link": "https://example.com/a", "title": "A"}]}
+        )
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            sleep=sleep,
+        )
+        assert await _brightdata_adapter(executor).search("query") == [
+            KeywordSearchHit("https://example.com/a", "A", "")
+        ]
+
+    assert len(requests) == 3
+    assert sleeps == [0.25, 0.5]
+
+
+@pytest.mark.parametrize(
     ("outer_status", "headers", "safe_code", "inner_status"),
     [
+        (503, {"x-brd-status-code": "401"}, "missing", 401),
+        (503, {"x-brd-status-code": "403"}, "missing", 403),
+        (503, {"x-brd-status-code": "404"}, "missing", 404),
+        (503, {"x-brd-status-code": "bad"}, "missing", None),
+        (
+            503,
+            {"x-brd-error-code": "", "x-brd-status-code": "503"},
+            "invalid",
+            503,
+        ),
+        (
+            503,
+            {"x-brd-error-code": "other_code", "x-brd-status-code": "503"},
+            "unknown",
+            503,
+        ),
+        (
+            503,
+            {"x-brd-error": "provider failure", "x-brd-status-code": "503"},
+            "missing",
+            503,
+        ),
         (200, {"x-brd-error-code": "other_code"}, "unknown", None),
         (200, {"x-brd-error-code": "invalid_zone"}, "unknown", None),
         (200, {"x-brd-error-code": "auth_failed"}, "unknown", None),

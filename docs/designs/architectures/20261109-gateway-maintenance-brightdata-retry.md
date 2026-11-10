@@ -282,3 +282,9 @@ Existing unrelated HTTP event field meanings stay unchanged. Raw provider diagno
 CodeRabbit identified that the existing 300-second non-Agent client wait can expire during the example's three 180-second HTTP attempts (540.75 seconds including ordinary backoff). The review therefore makes one narrow exception to the original unchanged-protocol scope: increase the existing non-Agent response wait to 600 seconds. Wire schemas, error messages, the 1200-second Agent wait, and explicit per-call timeout overrides remain unchanged.
 
 This client deadline accommodates the reported single-request retry sequence; it is not an end-to-end guarantee for arbitrary custom policies, HTTP activity, provider queues, or multi-stage workflows. A virtual-time acceptance regression exercises the real CLI, Unix socket, daemon dispatch, and HTTP retry loop, recovering after two full-duration timeouts. The original 300-second wait reproduces the premature CLI error.
+
+### PR #93 review amendment — preserve ordinary HTTP status retries
+
+Qodo identified that status-only metadata on a transient outer HTTP failure could incorrectly suppress the existing generic retry path. When both outer and inner statuses are retryable and there is no error code, explanation, or malformed metadata, the Bright Data inspector now defers to the HTTP executor. Both callers reuse `is_retryable_http_status`; ordinary attempt limits, delays, and logging remain the executor's responsibility. Masked HTTP-200 status-only failures, explicit unknown errors, malformed headers, and terminal inner statuses remain terminal.
+
+Qodo accepted deferring the pre-existing lack of an end-to-end budget for sequential multi-provider Fetch and downstream processing. The finite client wait is documented above and does not attempt to redesign Fetch scheduling or cancellation in this PR.

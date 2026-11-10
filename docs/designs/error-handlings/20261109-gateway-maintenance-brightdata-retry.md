@@ -17,7 +17,8 @@
 | HTTP 200; `x-brd-error-code: captcha`; `x-brd-status-code: 502`; empty body | Recoverable vendor failure | Retry; do **not** decode body |
 | Code `timeout`, `expect_element`, or `expect_body` | Recoverable vendor failure | Retry in same budget |
 | Nonempty unknown error code or `x-brd-error` without documented recoverable code | Terminal vendor failure | No vendor-specific retry; safe diagnostic |
-| No code/explanation, but valid inner `x-brd-status-code >= 400` | Terminal vendor failure | No vendor-specific retry without known code |
+| Outer HTTP 200; no code/explanation; valid inner `x-brd-status-code >= 400` | Terminal vendor failure | No vendor-specific retry without known code |
+| Outer and inner HTTP statuses are both retryable; no code/explanation or malformed metadata | Existing HTTP retry status | Defer to the shared HTTP-status predicate, budget, and unjittered backoff |
 | Header with only inner 200, no error, valid JSON | Success | Parse existing `organic` |
 | No provider error; body empty/invalid JSON | Existing decode failure | Preserve `ProtocolFailure`; do not guess captcha |
 | No provider error; HTTP 408, 429, or >=500 | Existing HTTP retry status | Preserve current retries and logging |
@@ -30,7 +31,7 @@ Priority:
 2. If no explicit vendor failure exists, retain existing generic HTTP status / transport classification.
 3. Decode JSON and validate `organic` only for normal successful responses.
 
-Only these exact error codes are vendor-retryable: `captcha`, `timeout`, `expect_element`, `expect_body`. A valid non-2xx provider-reported status without a documented code is diagnosed, not automatically retried. Unknown or invalid codes never silently become retryable.
+Only these exact error codes are vendor-retryable: `captcha`, `timeout`, `expect_element`, `expect_body`. A valid non-2xx provider-reported status without a documented code does not gain vendor-specific retry eligibility. If both outer and inner statuses meet the shared ordinary HTTP retry policy and no explicit error or malformed metadata is present, inspection defers to that existing HTTP retry path. Masked successful outer responses and terminal inner statuses remain terminal. Unknown or invalid codes never silently become retryable.
 
 A small typed `ExecutionFailure`-compatible internal signal can contain safe provider code, optional inner status, outer status, sanitized explanation, and a retryability flag; use existing `ErrorCode.ALL_PROVIDERS_FAILED` rather than introducing a new public error code or socket payload.
 

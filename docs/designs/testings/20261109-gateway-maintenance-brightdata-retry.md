@@ -50,6 +50,8 @@ Use `httpx.MockTransport` to return deterministic responses with varying outer s
 | Provider status only | 200 + `x-brd-status-code=502`, no error code, empty body | Vendor failure recognized; no guessed retry category |
 | Benign status | 200 + `x-brd-status-code=200`, valid `organic` JSON | Normal success |
 | Generic status | 500 then 200, no vendor headers | Existing exponential HTTP retry and success |
+| Status-only transient HTTP failure | Outer/inner 408, 429, or 503 (also outer 503 / inner 502), no code or explanation, then success | Three total attempts; exact 0.25/0.5 backoff; normal result mapping |
+| Terminal metadata on transient outer status | Outer 503 with inner 401/403/404, malformed status/code, unknown code, or explicit explanation | One send; terminal safe classification takes precedence |
 | Decode failure | 200, no vendor error header, empty or invalid JSON | Existing `ProtocolFailure`, no new vendor retry |
 | Malformed header | Invalid `x-brd-status-code` or oversized/unsafe error text | Safe terminal/fallback classification; no leakage |
 | Duplicate/ambiguous header | Mixed harmless and explicit error metadata | Explicit error wins; do not parse body as success |

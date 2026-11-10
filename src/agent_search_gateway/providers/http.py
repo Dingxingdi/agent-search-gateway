@@ -15,6 +15,11 @@ from ..observability import elapsed_ms, http_endpoint_for_log, log_event
 from ..retry import retry_async
 
 
+def is_retryable_http_status(status_code: int) -> bool:
+    """Return whether the shared HTTP policy retries this response status."""
+    return status_code in {408, 429} or status_code >= 500
+
+
 class _RetryableStatus(Exception):
     def __init__(self, status_code: int) -> None:
         super().__init__(str(status_code))
@@ -235,7 +240,7 @@ class HttpJsonExecutor:
                 failure = response_inspector(response)
                 if failure is not None:
                     raise failure
-            if response.status_code in {408, 429} or response.status_code >= 500:
+            if is_retryable_http_status(response.status_code):
                 raise _RetryableStatus(response.status_code)
             return response
 

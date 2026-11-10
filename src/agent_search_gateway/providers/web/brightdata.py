@@ -8,7 +8,7 @@ from ...errors import ExecutionFailure
 from ...observability import SecretValue
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
-from ..http import ProviderResponseFailure
+from ..http import ProviderResponseFailure, is_retryable_http_status
 from .common import (
     HttpRequester,
     configured_string,
@@ -112,6 +112,17 @@ class BrightDataAdapter:
             or invalid_status
             or any(explanations)
             or (inner_status is not None and not 200 <= inner_status < 300)
+        ):
+            return None
+
+        if (
+            code is None
+            and not invalid_code
+            and not invalid_status
+            and not any(explanations)
+            and inner_status is not None
+            and is_retryable_http_status(inner_status)
+            and is_retryable_http_status(response.status_code)
         ):
             return None
 
