@@ -2,15 +2,56 @@
 
 from __future__ import annotations
 
+import logging
 import xml.etree.ElementTree as ET
+from collections.abc import Mapping
+
+import httpx
 
 from ...academic.normalization import normalize_arxiv_id, normalize_doi
+from ...errors import ProtocolFailure
+from ...observability import log_event
 from ..contracts import PaperSearchHit
+from ..diagnostics import CandidateCounts
 from .common import AcademicHttpExecutor, parse_iso_date, protocol_failure, reject_item
 
 _ATOM = "http://www.w3.org/2005/Atom"
 _ARXIV = "http://arxiv.org/schemas/atom"
 _DEFAULT_API_URL = "https://export.arxiv.org/api/query"
+
+
+def _parse_response(body: str) -> ET.Element:
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise protocol_failure(
+            "arxiv",
+            "response was not valid Atom XML",
+            diagnostics={
+                "category": "decode",
+                "semantic_result": "unknown",
+                "response_kind": "unknown",
+            },
+        ) from exc
+    if root.tag != f"{{{_ATOM}}}feed":
+        raise protocol_failure(
+            "arxiv",
+            "response Atom envelope was invalid",
+            diagnostics={
+                "category": "invalid_envelope",
+                "semantic_result": "unknown",
+                "response_kind": "xml",
+            },
+        )
+    return root
+
+
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        _parse_response(response.text)
+    except ProtocolFailure as exc:
+        return exc.diagnostics
+    return {"semantic_result": "success", "response_kind": "xml"}
 
 
 class ArxivProvider:
@@ -36,21 +77,30 @@ class ArxivProvider:
                 "sortBy": "relevance",
                 "sortOrder": "descending",
             },
+            response_diagnostics=_response_diagnostics,
         )
-        try:
-            root = ET.fromstring(body)
-        except ET.ParseError as exc:
-            raise protocol_failure(self.name, "response was not valid Atom XML") from exc
-        if root.tag != f"{{{_ATOM}}}feed":
-            raise protocol_failure(self.name, "response Atom envelope was invalid")
-
+        root = _parse_response(body)
+        entries = root.findall(f"{{{_ATOM}}}entry")
+        counts = CandidateCounts(len(entries))
         hits: list[PaperSearchHit] = []
-        for entry in root.findall(f"{{{_ATOM}}}entry"):
+        for entry in entries:
             mapped = self._map_entry(entry)
             if mapped is None:
-                reject_item(self.name)
-                continue
-            hits.append(mapped)
+                reject_item(self.name, "missing_required_field")
+                counts.reject("missing_required_field")
+            else:
+                hits.append(mapped)
+                counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="paper_search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
     def _map_entry(self, entry: ET.Element) -> PaperSearchHit | None:
