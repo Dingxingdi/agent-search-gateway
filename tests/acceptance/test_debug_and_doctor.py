@@ -189,8 +189,10 @@ async def test_debug_cli_workflow_preserves_public_contract_and_correlates_trace
     assert any(
         "event=results_written" in line and str(result_path) in line for line in request_lines
     )
-    assert "https://example.com/accepted?id=42&mode=test" in debug_log
-    assert "https://example.com/rejected?id=43&mode=test" in debug_log
+    assert "url=https://example.com/accepted " in debug_log
+    assert "?id=42&mode=test" not in debug_log
+    assert "url=https://example.com/rejected " in debug_log
+    assert "?id=43&mode=test" not in debug_log
 
     for sentinel in (
         DEBUG_QUERY_SENTINEL,

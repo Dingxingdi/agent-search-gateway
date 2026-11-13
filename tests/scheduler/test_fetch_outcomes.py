@@ -207,7 +207,8 @@ async def test_fetch_scheduler_debug_events_cover_fallback_semantics_and_accepta
     logged = stream.getvalue()
     lines = logged.splitlines()
     assert all("request=0badc0de" in line for line in lines)
-    assert "url=https://example.com/fetch?id=42&mode=test" in logged
+    assert "url=https://example.com/fetch " in logged
+    assert "?id=42&mode=test" not in logged
     assert sum("event=provider_selected" in line for line in lines) == 3
     assert any(
         "event=provider_failed" in line

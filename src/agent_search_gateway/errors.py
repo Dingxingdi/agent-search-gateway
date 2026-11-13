@@ -1,5 +1,6 @@
 """Stable gateway error taxonomy and user-facing constants."""
 
+from collections.abc import Mapping
 from enum import StrEnum
 
 
@@ -47,6 +48,19 @@ class InputFailure(GatewayError):
 
 class ExecutionFailure(GatewayError):
     """Dependency or execution-path failure."""
+
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        reason: str | None = None,
+        diagnostics: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(code, message, reason=reason)
+        self.diagnostics: Mapping[str, object] = (
+            dict(diagnostics) if diagnostics is not None else {}
+        )
 
 
 class ProtocolFailure(ExecutionFailure):

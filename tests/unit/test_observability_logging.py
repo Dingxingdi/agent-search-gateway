@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 from logging.handlers import RotatingFileHandler
@@ -78,10 +79,11 @@ def test_log_event_skips_validation_when_level_is_disabled() -> None:
         log_event(logger, logging.DEBUG, "invalid event name")
 
 
-def test_log_url_helpers_preserve_target_diagnostics_without_auth_or_request_query() -> None:
+def test_log_url_helpers_strip_credentials_query_and_fragment() -> None:
     value = "https://user:password@example.com:8443/path?q=QUERY_SENTINEL#fragment"
 
-    assert target_url_for_log(value) == "https://example.com:8443/path?q=QUERY_SENTINEL#fragment"
+    assert target_url_for_log(value) == "https://example.com:8443/path"
+    assert value.endswith("/path?q=QUERY_SENTINEL#fragment")
     assert http_endpoint_for_log(value) == "https://example.com:8443/path"
     assert target_url_for_log("not-a-url USERINFO_SENTINEL") == "<invalid-url>"
 
@@ -161,7 +163,10 @@ def test_debug_logging_session_installs_rotating_handlers_and_restores_state(
         if getattr(handler, "_agent_search_gateway_debug_owned", False)
     ]
     assert len(owned) == 2
-    assert sum(type(handler) is logging.StreamHandler for handler in owned) == 1
+    assert sum(
+        isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler)
+        for handler in owned
+    ) == 1
     assert sum(isinstance(handler, RotatingFileHandler) for handler in owned) == 1
     assert project_logger.level == logging.DEBUG
     assert project_logger.propagate is False
@@ -304,3 +309,65 @@ def test_emit_failure_is_swallowed_and_reports_directly_to_stderr(tmp_path: Path
     session.close()
 
     assert "debug logging sink failure" in stderr.getvalue()
+
+
+def test_custom_handler_failure_does_not_change_business_return() -> None:
+    class BrokenHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise RuntimeError("PRIVATE_SINK_DATA")
+
+    logger = logging.getLogger("tests.observability.custom_failure")
+    logger.handlers[:] = [BrokenHandler()]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    def business() -> str:
+        log_event(logger, logging.DEBUG, "provider_response_diagnostic", response_bytes=42)
+        return "business result"
+
+    assert business() == "business result"
+
+
+def test_formatter_failure_uses_safe_emergency_output_and_keeps_business_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def broken(self: KeyValueFormatter, record: logging.LogRecord) -> str:
+        raise ValueError("PRIVATE_FORMATTER_DATA")
+
+    stderr = io.StringIO()
+    session = configure_debug_logging(tmp_path / "debug.log", stderr=stderr)
+    monkeypatch.setattr(KeyValueFormatter, "format", broken)
+    try:
+        def business() -> str:
+            log_event(logging.getLogger("agent_search_gateway"), logging.DEBUG, "diagnostic")
+            return "business result"
+
+        assert business() == "business result"
+    finally:
+        session.close()
+    output = stderr.getvalue() + capsys.readouterr().err
+    assert "PRIVATE_FORMATTER_DATA" not in output
+    assert "debug logging sink failure" in output
+
+
+@pytest.mark.parametrize("origin", ["handler", "formatter"])
+def test_logging_cancellation_is_never_swallowed(origin: str) -> None:
+    class CancelFormatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            raise asyncio.CancelledError
+
+    class CancelHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise asyncio.CancelledError
+
+    logger = logging.getLogger("tests.observability.cancellation")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    if origin == "handler":
+        logger.handlers[:] = [CancelHandler()]
+    else:
+        handler = logging.StreamHandler(io.StringIO())
+        handler.setFormatter(CancelFormatter())
+        logger.handlers[:] = [handler]
+    with pytest.raises(asyncio.CancelledError):
+        log_event(logger, logging.DEBUG, "provider_response_diagnostic")

@@ -384,11 +384,11 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
     )
     assert any(
         "event=candidate_rejected" in line
-        and "url=https://example.com/empty?id=1" in line
+        and "url=https://example.com/empty " in line
         and "reason=empty_abstract" in line
         for line in lines
     )
-    assert "url=https://example.com/no-body?id=42&mode=test#frag" in logged
+    assert "url=https://example.com/no-body " in logged
     assert "LOG_PASSWORD_SENTINEL" not in logged
     assert any("event=body_skipped" in line and "reason=no_body" in line for line in lines)
     assert any("event=body_rejected" in line and "reason=cheap_check" in line for line in lines)
@@ -396,12 +396,12 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
     assert "decision_reason=" not in logged
     assert "not usable" not in logged
     assert any(
-        "event=body_accepted" in line and "url=https://example.com/accepted?id=4" in line
+        "event=body_accepted" in line and "url=https://example.com/accepted " in line
         for line in lines
     )
     assert any(
         "event=candidate_rejected" in line
-        and "url=https://example.com/no-body?id=42&mode=test#frag" in line
+        and "url=https://example.com/no-body " in line
         and "reason=duplicate" in line
         for line in lines
     )
