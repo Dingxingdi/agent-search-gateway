@@ -1,13 +1,18 @@
 """Parallel Search and Extract adapter."""
 
+import logging
 from collections.abc import Mapping
 
+import httpx
+
 from ...errors import ExecutionFailure
-from ...observability import SecretValue
+from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
+from ..diagnostics import CandidateCounts
 from .common import (
     JsonRequester,
+    candidate_rejection_reason,
     endpoint,
     failure,
     non_empty_string,
@@ -17,6 +22,17 @@ from .common import (
     require_object,
     require_string,
 )
+
+
+def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
+
 
 _VALID_MODES = frozenset({"turbo", "fast", "basic", "advanced"})
 _FETCH_POLICY_KEYS = frozenset({"max_age_seconds", "timeout_seconds", "disable_cache_fallback"})
@@ -104,11 +120,13 @@ class ParallelAdapter:
             "POST",
             endpoint(self._api_url, "/v1/search"),
             stage="search",
+            response_diagnostics=_search_response_diagnostics,
             headers=self._headers,
             json_body=request_body,
         )
         root = require_object(payload, self.name, "search", "response")
         results = require_list(root.get("results"), self.name, "search", "results")
+        counts = CandidateCounts(len(results))
         hits: list[KeywordSearchHit] = []
         for item in results:
             try:
@@ -124,7 +142,19 @@ class ParallelAdapter:
                 )
                 hits.append(KeywordSearchHit(url=url, title=title, snippet=snippet))
             except ExecutionFailure:
+                counts.reject(candidate_rejection_reason(item, "url"))
                 continue
+            counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:

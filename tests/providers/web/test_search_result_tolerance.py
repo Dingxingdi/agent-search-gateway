@@ -20,6 +20,7 @@ from agent_search_gateway.providers.web.decodo import DecodoAdapter
 from agent_search_gateway.providers.web.exa import ExaAdapter
 from agent_search_gateway.providers.web.firecrawl import FirecrawlAdapter
 from agent_search_gateway.providers.web.linkup import LinkupAdapter
+from agent_search_gateway.providers.web.parallel import ParallelAdapter
 from agent_search_gateway.providers.web.scrape_do import ScrapeDoAdapter
 from agent_search_gateway.providers.web.scrapegraphai import ScrapeGraphAIAdapter
 from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
@@ -84,11 +85,20 @@ def _anysearch(executor: JsonRequester) -> _SearchAdapter:
     )
 
 
-def _tinyfish(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _tinyfish(executor: JsonRequester) -> _SearchAdapter:
     return TinyFishAdapter(
         name="tinyfish",
         search_api_url="https://search.tiny.example.test",
         fetch_api_url="https://fetch.tiny.example.test",
+        secret=SecretValue("x"),
+        http_executor=executor,
+    )
+
+
+def _parallel(executor: JsonRequester) -> _SearchAdapter:
+    return ParallelAdapter(
+        name="parallel",
+        api_url="https://parallel.example.test",
         secret=SecretValue("x"),
         http_executor=executor,
     )
@@ -169,8 +179,18 @@ def _tinyfish(executor: RecordingJsonExecutor) -> _SearchAdapter:
             },
             "",
         ),
+        (
+            _parallel,
+            {
+                "results": [
+                    {"url": "https://example.com/bad", "excerpts": [1]},
+                    {"url": "https://example.com/good", "excerpts": ["Excerpt"]},
+                ]
+            },
+            "Excerpt",
+        ),
     ],
-    ids=("firecrawl", "tavily", "exa", "brave", "anysearch", "tinyfish"),
+    ids=("firecrawl", "tavily", "exa", "brave", "anysearch", "tinyfish", "parallel"),
 )
 async def test_search_adapters_keep_valid_hits_when_presentation_fields_are_malformed(
     factory: AdapterFactory,
@@ -243,7 +263,7 @@ def _linkup(executor: JsonRequester) -> _SearchAdapter:
     )
 
 
-def _brightdata(executor: RecordingHttpExecutor) -> _SearchAdapter:
+def _brightdata(executor: HttpRequester) -> _SearchAdapter:
     return BrightDataAdapter(
         name="brightdata",
         api_url="https://bright.example.test",
@@ -263,7 +283,7 @@ def _scrape_do(executor: HttpRequester) -> _SearchAdapter:
     )
 
 
-def _decodo(executor: RecordingHttpExecutor) -> _SearchAdapter:
+def _decodo(executor: HttpRequester) -> _SearchAdapter:
     return DecodoAdapter(
         name="decodo",
         api_url="https://decodo.example.test",
@@ -290,7 +310,7 @@ def _scrapegraphai(executor: JsonRequester) -> _SearchAdapter:
     )
 
 
-def _scraperapi(executor: RecordingHttpExecutor) -> _SearchAdapter:
+def _scraperapi(executor: HttpRequester) -> _SearchAdapter:
     return ScraperAPIAdapter(
         name="scraperapi",
         api_url="https://scraperapi.example.test",
@@ -998,3 +1018,250 @@ async def test_content_search_adapters_classify_invalid_responses_without_loggin
     assert "PRIVATE_" not in rendered
     assert "upstream_message" not in rendered
     assert "event=provider_candidates_summary" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("factory", "provider"),
+    [(_parallel, "parallel"), (_tinyfish, "tinyfish"), (_decodo, "decodo")],
+    ids=["parallel", "tinyfish", "decodo"],
+)
+@pytest.mark.parametrize("mode", ["mixed", "empty", "all-invalid"])
+async def test_nested_search_adapters_report_candidate_diagnostics(
+    factory: Callable[[HttpRequester], _SearchAdapter],
+    provider: str,
+    mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    candidates: list[object] = [
+        {
+            "url": "https://www.google.com/goto?url=https%3A%2F%2Fexample.com",
+            "title": "Title",
+            "excerpts": ["PRIVATE_EXCERPT"],
+            "snippet": "PRIVATE_SNIPPET",
+            "desc": "PRIVATE_DESCRIPTION",
+            "error": {"message": "PRIVATE_CANDIDATE_ERROR"},
+        },
+        None,
+        {},
+        {"url": "https://example.com/bad", "excerpts": [1], "snippet": [], "desc": []},
+    ]
+    if mode == "empty":
+        candidates.clear()
+    elif mode == "all-invalid":
+        candidates.pop(0)
+    payload = {"results": candidates}
+    if provider == "decodo":
+        payload = {
+            "results": [
+                {
+                    "status_code": 200,
+                    "content": {
+                        "errors": [],
+                        "results": {"results": {"organic": candidates}},
+                    },
+                },
+                {
+                    "status_code": 200,
+                    "content": {
+                        "errors": [],
+                        "results": {"results": {"organic": [{"url": "PRIVATE_SECOND_PAGE"}]}},
+                    },
+                },
+            ]
+        }
+    response = httpx.Response(200, json=payload)
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name=provider)
+        hits = await factory(executor).search("PRIVATE_QUERY")
+    if provider == "tinyfish":
+        assert requests[0].url.params["query"] == "PRIVATE_QUERY"
+    accepted = int(mode == "mixed")
+    assert len(hits) == accepted
+    if hits:
+        assert hits[0].url == "https://www.google.com/goto?url=https%3A%2F%2Fexample.com"
+        assert (
+            hits[0].snippet
+            == {
+                "parallel": "PRIVATE_EXCERPT",
+                "tinyfish": "PRIVATE_SNIPPET",
+                "decodo": "PRIVATE_DESCRIPTION",
+            }[provider]
+        )
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": provider,
+            "stage": "search",
+            "phase": "adapter",
+            "received": len(candidates),
+            "accepted": accepted,
+            "rejected": len(candidates) - accepted,
+            "rejection_counts": {} if mode == "empty" else {"invalid_record": 2, "missing_url": 1},
+            "rewritten": 0,
+            "processed": len(candidates),
+            "unprocessed": 0,
+        }
+    ]
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "success"
+    assert diagnostics[0]["response_bytes"] == len(response.content)
+    if provider == "tinyfish":
+        assert diagnostics[0]["endpoint"] == "https://search.tiny.example.test"
+    if provider == "decodo":
+        assert diagnostics[0]["upstream_status"].text == "200"
+    formatter = KeyValueFormatter(SecretRedactor())
+    assert "PRIVATE_" not in "\n".join(
+        formatter.format(record) for record in caplog.records if hasattr(record, "gateway_event")
+    )
+
+
+@pytest.mark.parametrize(
+    ("factory", "envelope"),
+    [
+        (_firecrawl, lambda results: {"success": True, "data": {"web": results}}),
+        (_tavily, lambda results: {"results": results}),
+        (_exa, lambda results: {"results": results}),
+        (_brave, lambda results: {"web": {"results": results}}),
+        (_anysearch, lambda results: {"code": 0, "data": {"results": results}}),
+        (_tinyfish, lambda results: {"results": results}),
+        (_parallel, lambda results: {"results": results}),
+        (_linkup, lambda results: {"results": results}),
+        (_brightdata, lambda results: {"organic": results}),
+        (_scrape_do, lambda results: {"organic_results": results}),
+        (_decodo, _decodo_payload),
+        (_scrapingdog, lambda results: {"organic_results": results}),
+        (_scrapegraphai, lambda results: {"results": results}),
+        (_scraperapi, lambda results: {"organic_results": results}),
+        (_serpapi, lambda results: {"organic_results": results}),
+    ],
+    ids=[
+        "firecrawl",
+        "tavily",
+        "exa",
+        "brave",
+        "anysearch",
+        "tinyfish",
+        "parallel",
+        "linkup",
+        "brightdata",
+        "scrape_do",
+        "decodo",
+        "scrapingdog",
+        "scrapegraphai",
+        "scraperapi",
+        "serpapi",
+    ],
+)
+async def test_all_keyword_search_adapters_execute_candidate_count_contract(
+    factory: Callable[[HttpRequester], _SearchAdapter],
+    envelope: Callable[[list[object]], object],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    candidates: list[object] = [
+        {
+            "url": "https://example.com/good",
+            "link": "https://example.com/good",
+            "title": "Title",
+            "name": "Title",
+            "content": "Snippet",
+            "excerpts": ["Snippet"],
+        },
+        None,
+        {},
+        {
+            "url": "https://example.com/bad",
+            "link": "https://example.com/bad",
+            "title": [],
+            "name": [],
+            "excerpts": [1],
+        },
+    ]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=envelope(candidates)),
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="all")
+        hits = await factory(executor).search("query")
+    assert [hit.url for hit in hits] == ["https://example.com/good"]
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": factory.__name__.removeprefix("_"),
+            "stage": "search",
+            "phase": "adapter",
+            "received": 4,
+            "accepted": 1,
+            "rejected": 3,
+            "rejection_counts": {"invalid_record": 2, "missing_url": 1},
+            "rewritten": 0,
+            "processed": 4,
+            "unprocessed": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "factory", [_parallel, _tinyfish, _decodo], ids=["parallel", "tinyfish", "decodo"]
+)
+@pytest.mark.parametrize("mode", ["root", "missing-results", "invalid-results", "decode"])
+async def test_nested_search_adapters_classify_malformed_responses_without_logging_body(
+    factory: Callable[[HttpRequester], _SearchAdapter],
+    mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    payload: object = (
+        []
+        if mode == "root"
+        else {}
+        if mode == "missing-results"
+        else {
+            "results": {"message": "PRIVATE_RESPONSE_BODY"},
+        }
+    )
+    response = (
+        httpx.Response(200, text="PRIVATE_INVALID_JSON")
+        if mode == "decode"
+        else httpx.Response(200, json=payload)
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="nested")
+        with pytest.raises(ExecutionFailure):
+            await factory(executor).search("PRIVATE_QUERY")
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["category"] == ("decode" if mode == "decode" else "invalid_envelope")
+    assert diagnostics[0]["semantic_result"] == "unknown"
+    formatter = KeyValueFormatter(SecretRedactor())
+    rendered = "\n".join(
+        formatter.format(record) for record in caplog.records if hasattr(record, "gateway_event")
+    )
+    assert "PRIVATE_" not in rendered
+    assert "upstream_message" not in rendered
+    assert "provider_candidates_summary" not in rendered
