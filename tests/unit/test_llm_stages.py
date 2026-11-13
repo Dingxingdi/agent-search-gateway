@@ -222,3 +222,52 @@ async def test_llm_stage_cancellation_is_logged_and_reraised_without_payload() -
     assert "event=llm_stage_cancelled" in logged
     assert "stage=content_clean" in logged
     assert "CANCELLED_PAGE_SENTINEL" not in logged
+
+
+async def test_llm_stage_failure_carries_safe_dependency_diagnostics() -> None:
+    logger, stream = structured_test_logger("tests.llm.failure-diagnostics")
+    invocation = LLMInvocation("openai", "stage-model", {})
+    failure = ExecutionFailure(
+        ErrorCode.LLM_STAGE_FAILED,
+        "ARBITRARY_EXCEPTION_SENTINEL",
+        diagnostics={
+            "http_status": 429,
+            "upstream_code": "rate_limit",
+            "upstream_type": "rate_limit_error",
+            "upstream_message": "Capacity exhausted",
+            "category": "nonzero_exit",
+            "provider": "WRONG_OWNER",
+            "stage": "WRONG_STAGE",
+            "model": "WRONG_MODEL",
+            "answer": "ANSWER_SENTINEL",
+        },
+    )
+    stages = LLMStages(
+        {"openai": FakeLLMClient("openai", failure=failure)},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+        logger=logger,
+    )
+
+    with pytest.raises(ExecutionFailure) as caught:
+        await stages.content_clean("PROMPT_SENTINEL")
+
+    assert caught.value is failure
+    logged = stream.getvalue()
+    failed = [line for line in logged.splitlines() if "event=llm_stage_failed" in line]
+    assert len(failed) == 1
+    assert "http_status=429" in failed[0] and "upstream_code=rate_limit" in failed[0]
+    assert "upstream_type=rate_limit_error" in failed[0]
+    assert "upstream_message=" in failed[0] and "Capacity exhausted" in failed[0]
+    assert "provider=openai" in failed[0] and "stage=content_clean" in failed[0]
+    assert "model=stage-model" in failed[0] and "category=execution_failure" in failed[0]
+    for sentinel in (
+        "ARBITRARY_EXCEPTION_SENTINEL",
+        "ANSWER_SENTINEL",
+        "PROMPT_SENTINEL",
+        "WRONG_",
+    ):
+        assert sentinel not in logged
+    assert "event=provider_failed" not in logged

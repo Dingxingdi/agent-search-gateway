@@ -6,6 +6,7 @@ import pytest
 
 from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import ExecutionFailure, ProtocolFailure
+from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
@@ -127,7 +128,7 @@ async def test_openai_protocol_debug_events_exclude_messages_responses_and_crede
     assert result == "MODEL_RESPONSE_SENTINEL"
     logged = stream.getvalue()
     lines = logged.splitlines()
-    started = [line for line in lines if "event=provider_started" in line]
+    started = [line for line in lines if "event=llm_protocol_attempt_started" in line]
     assert len(started) == 2
     assert "attempt=1" in started[0]
     assert "attempt=2" in started[1]
@@ -138,10 +139,15 @@ async def test_openai_protocol_debug_events_exclude_messages_responses_and_crede
     assert all("input_chars=" in line for line in started)
     assert all("extra_body_keys=response_format,temperature" in line for line in started)
     assert any(
-        "event=provider_failed" in line and "reason=protocol_retry" in line and "attempt=1" in line
+        "event=provider_retrying" in line
+        and "reason=protocol_retry" in line
+        and "attempt=1" in line
         for line in lines
     )
-    assert any("event=provider_completed" in line and "output_chars=23" in line for line in lines)
+    assert any(
+        "event=llm_protocol_completed" in line and "output_chars=23" in line for line in lines
+    )
+    assert "event=provider_failed" not in logged and "event=provider_completed" not in logged
     assert "USER_MESSAGE_SENTINEL" not in logged
     assert "MODEL_RESPONSE_SENTINEL" not in logged
     assert "CREDENTIAL_SENTINEL" not in logged
@@ -227,3 +233,172 @@ async def test_openai_chat_exhausts_invalid_response_as_protocol_execution_failu
                 LLMInvocation("openai-main", "model-a", {}),
                 ({"role": "user", "content": "q"},),
             )
+
+
+async def test_openai_root_api_error_diagnostics_survive_protocol_failure() -> None:
+    secret = SecretValue("API_SECRET")
+    logger, stream = structured_test_logger("tests.openai.api-error", secrets=[secret])
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            200,
+            json={
+                "error": {
+                    "code": "quota_exceeded",
+                    "type": "insufficient_quota",
+                    "message": "Quota exhausted API_SECRET https://api.example.test/error?token=hidden",
+                }
+            },
+            request=request,
+        )
+
+    policy = RetryPolicy(2, 0.01, 0.02, 1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenAIChatCompletionsClient(
+            name="openai",
+            api_url="https://llm.example.test",
+            secret=secret,
+            executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
+            quota=CapacityGate(1),
+            retry_policy=policy,
+            sleep=_no_sleep,
+            logger=logger,
+        )
+        with pytest.raises(ProtocolFailure) as caught:
+            await client.complete_text(
+                LLMInvocation("openai", "model", {}),
+                ({"role": "user", "content": "PROMPT_SENTINEL"},),
+            )
+
+    assert attempts == 2
+    assert str(caught.value) == "openai/llm: response choices are missing"
+    assert caught.value.diagnostics.get("upstream_code") is not None
+    logged = stream.getvalue()
+    diagnostics = [
+        line for line in logged.splitlines() if "event=provider_response_diagnostic" in line
+    ]
+    assert len(diagnostics) == 2
+    assert all("http_status=200" in line for line in diagnostics)
+    assert all("upstream_code=quota_exceeded" in line for line in diagnostics)
+    assert all("upstream_type=insufficient_quota" in line for line in diagnostics)
+    assert all("upstream_status=" not in line for line in diagnostics)
+    assert all("category=provider_response" in line for line in diagnostics)
+    assert "Quota exhausted" in logged
+    assert "API_SECRET" not in logged and "token=hidden" not in logged
+    assert "PROMPT_SENTINEL" not in logged
+    assert "event=provider_failed" not in logged and "event=provider_completed" not in logged
+
+
+@pytest.mark.parametrize(
+    ("stage", "content", "attempts", "category"),
+    [
+        ("judge", "ANSWER_SENTINEL invalid JSON", 2, "protocol"),
+        ("judge", '["ANSWER_SENTINEL"]', 2, "protocol"),
+        ("judge", '{"ok": "yes", "reason": "ANSWER_SENTINEL"}', 1, "execution_failure"),
+        ("safety", '{"ok": true, "reason": ["ANSWER_SENTINEL"]}', 1, "execution_failure"),
+        ("content_clean", "   ", 2, "protocol"),
+        ("focus_summary", "", 2, "protocol"),
+    ],
+)
+async def test_openai_stage_failures_keep_safe_stage_and_category(
+    stage: str, content: str, attempts: int, category: str
+) -> None:
+    logger, stream = structured_test_logger("tests.openai.stage-failures")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]}, request=request
+        )
+
+    invocation = LLMInvocation("openai", "model", {})
+    policy = RetryPolicy(2, 0.01, 0.02, 1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenAIChatCompletionsClient(
+            name="openai",
+            api_url="https://llm.example.test",
+            secret=SecretValue("secret"),
+            executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
+            quota=CapacityGate(1),
+            retry_policy=policy,
+            sleep=_no_sleep,
+            logger=logger,
+        )
+        stages = LLMStages(
+            {"openai": client},
+            judge=invocation,
+            safety=invocation,
+            content_clean=invocation,
+            focus_summary=invocation,
+            logger=logger,
+        )
+        with pytest.raises(ExecutionFailure):
+            if stage == "focus_summary":
+                await stages.focus_summary("PROMPT_SENTINEL", "FOCUS_SENTINEL")
+            else:
+                await getattr(stages, stage)("PROMPT_SENTINEL")
+
+    assert calls == attempts
+    logged = stream.getvalue()
+    failed = [line for line in logged.splitlines() if "event=llm_stage_failed" in line]
+    assert len(failed) == 1
+    assert f"stage={stage}" in failed[0] and f"category={category}" in failed[0]
+    assert "provider=openai" in failed[0] and "model=model" in failed[0]
+    assert logged.count("event=provider_retrying") == attempts - 1
+    assert "event=provider_completed" not in logged and "event=provider_failed" not in logged
+    for sentinel in ("ANSWER_SENTINEL", "PROMPT_SENTINEL", "FOCUS_SENTINEL"):
+        assert sentinel not in logged
+
+
+async def test_openai_model_content_error_keys_are_never_api_diagnostics() -> None:
+    logger, stream = structured_test_logger("tests.openai.model-content")
+    content = {
+        "ok": True,
+        "error": {"code": "MODEL_CODE_SENTINEL", "message": "MODEL_ERROR_SENTINEL"},
+        "message": "MODEL_MESSAGE_SENTINEL",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps(content)}}]}, request=request
+        )
+
+    policy = RetryPolicy(2, 0.01, 0.02, 1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenAIChatCompletionsClient(
+            name="openai",
+            api_url="https://llm.example.test",
+            secret=SecretValue("secret"),
+            executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
+            quota=CapacityGate(1),
+            retry_policy=policy,
+            sleep=_no_sleep,
+            logger=logger,
+        )
+        assert (
+            await client.complete_json(
+                LLMInvocation("openai", "model", {}),
+                ({"role": "user", "content": "PROMPT_SENTINEL"},),
+            )
+            == content
+        )
+
+    logged = stream.getvalue()
+    diagnostic = [
+        line for line in logged.splitlines() if "event=provider_response_diagnostic" in line
+    ]
+    assert len(diagnostic) == 1 and "semantic_result=success" in diagnostic[0]
+    assert "upstream_code=" not in logged and "upstream_message=" not in logged
+    assert "event=provider_retrying" not in logged
+    for sentinel in (
+        "MODEL_CODE_SENTINEL",
+        "MODEL_ERROR_SENTINEL",
+        "MODEL_MESSAGE_SENTINEL",
+        "PROMPT_SENTINEL",
+    ):
+        assert sentinel not in logged

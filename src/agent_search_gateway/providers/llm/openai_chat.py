@@ -5,15 +5,49 @@ import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+import httpx
+
 from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ...models import LLMInvocation, RetryPolicy
 from ...observability import SecretValue, log_event
 from ...retry import retry_async
 from ..contracts import ChatMessage
+from ..diagnostics import best_effort_diagnostics
 from ..http import HttpJsonExecutor
 
 _RESERVED_EXTRA_BODY_KEYS = frozenset({"model", "messages"})
+
+
+def _payload_diagnostics(payload: object) -> Mapping[str, object]:
+    if not isinstance(payload, dict):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    error = payload.get("error")
+    if isinstance(error, dict):
+        return {
+            "category": "provider_response",
+            "semantic_result": "error",
+            "response_kind": "object",
+            "upstream_code": error.get("code"),
+            "upstream_type": error.get("type"),
+            "upstream_message": error.get("message"),
+        }
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                return {"semantic_result": "success", "response_kind": "object"}
+    return {"category": "invalid_envelope", "semantic_result": "unknown", "response_kind": "object"}
+
+
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    return _payload_diagnostics(payload)
 
 
 class OpenAIChatCompletionsClient:
@@ -122,7 +156,7 @@ class OpenAIChatCompletionsClient:
         log_event(
             self._logger,
             logging.DEBUG,
-            "provider_started",
+            "llm_protocol_attempt_started",
             provider=self.name,
             stage="llm",
             model=invocation.model,
@@ -144,7 +178,7 @@ class OpenAIChatCompletionsClient:
         log_event(
             self._logger,
             logging.DEBUG,
-            "provider_failed",
+            "provider_retrying",
             provider=self.name,
             stage="llm",
             model=invocation.model,
@@ -155,6 +189,8 @@ class OpenAIChatCompletionsClient:
             error_type=type(exc).__name__,
             delay_ms=max(0, int(delay * 1000)),
             reason="protocol_retry",
+            next_attempt=attempt + 1,
+            retry_scope="protocol",
         )
 
     def _log_protocol_completed(
@@ -168,7 +204,7 @@ class OpenAIChatCompletionsClient:
         log_event(
             self._logger,
             logging.DEBUG,
-            "provider_completed",
+            "llm_protocol_completed",
             provider=self.name,
             stage="llm",
             model=invocation.model,
@@ -224,24 +260,30 @@ class OpenAIChatCompletionsClient:
                 "Content-Type": "application/json",
             },
             json_body=body,
+            response_diagnostics=_response_diagnostics,
         )
 
     def _extract_content(self, payload: object) -> str:
+        diagnostics = best_effort_diagnostics(lambda: _payload_diagnostics(payload))
         if not isinstance(payload, dict):
-            raise self._protocol_failure("response must be an object")
+            raise self._protocol_failure("response must be an object", diagnostics=diagnostics)
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
-            raise self._protocol_failure("response choices are missing")
+            raise self._protocol_failure("response choices are missing", diagnostics=diagnostics)
         first = choices[0]
         if not isinstance(first, dict):
-            raise self._protocol_failure("response choice is invalid")
+            raise self._protocol_failure("response choice is invalid", diagnostics=diagnostics)
         message = first.get("message")
         if not isinstance(message, dict):
-            raise self._protocol_failure("response message is missing")
+            raise self._protocol_failure("response message is missing", diagnostics=diagnostics)
         content = message.get("content")
         if not isinstance(content, str) or not content.strip():
-            raise self._protocol_failure("response content is empty")
+            raise self._protocol_failure("response content is empty", diagnostics=diagnostics)
         return content
 
-    def _protocol_failure(self, reason: str) -> ProtocolFailure:
-        return ProtocolFailure(ErrorCode.PROTOCOL_ERROR, f"{self.name}/llm: {reason}")
+    def _protocol_failure(
+        self, reason: str, *, diagnostics: Mapping[str, object] | None = None
+    ) -> ProtocolFailure:
+        return ProtocolFailure(
+            ErrorCode.PROTOCOL_ERROR, f"{self.name}/llm: {reason}", diagnostics=diagnostics
+        )

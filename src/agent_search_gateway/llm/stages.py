@@ -6,10 +6,11 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TypeVar
 
-from ..errors import ErrorCode, ExecutionFailure
+from ..errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ..models import AgentInvocation, LLMInvocation, StageDecision
 from ..observability import elapsed_ms, log_event
 from ..providers.contracts import AgentTextRunner, ChatMessage, LLMClient
+from ..providers.diagnostics import diagnostic_fields_from_failure
 from .prompts import (
     content_clean_messages,
     focus_summary_messages,
@@ -251,7 +252,10 @@ class LLMStages:
             stage=stage,
             model=invocation.model,
             error_type=type(exc).__name__,
+            category="protocol" if isinstance(exc, ProtocolFailure) else "execution_failure",
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )
 
     def _stage_cancelled(self, invocation: LLMInvocation, stage: str, started: float) -> None:

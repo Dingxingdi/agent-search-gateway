@@ -58,6 +58,7 @@ _FAILURE_FIELDS = frozenset(
         "response_bytes",
         "content_type",
         "upstream_status",
+        "upstream_type",
         "upstream_code",
         "upstream_message",
         "semantic_result",

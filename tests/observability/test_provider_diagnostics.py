@@ -84,15 +84,35 @@ def test_log_event_snapshots_rejection_counts_before_later_mutation() -> None:
     assert vars(records[0])["gateway_fields"]["rejection_counts"] == {"missing_url": 1}
 
 
-def test_selected_upstream_status_is_rendered_with_its_safe_text_limit() -> None:
+@pytest.mark.parametrize("field", ["upstream_status", "upstream_type"])
+def test_selected_upstream_status_is_rendered_with_its_safe_text_limit(field: str) -> None:
     logger, stream = structured_test_logger("test.provider_diagnostics.status")
+    fields = safe_diagnostic_fields({field: "ERROR", "upstream_code": -32000})
+    failure = ExecutionFailure(ErrorCode.PROTOCOL_ERROR, "public", diagnostics=fields)
     log_event(
-        logger, logging.DEBUG, "provider_response_diagnostic",
+        logger,
+        logging.DEBUG,
+        "provider_response_diagnostic",
         exc_info=False,
-        **safe_diagnostic_fields({"upstream_status": "ERROR", "upstream_code": -32000}),
+        **diagnostic_fields_from_failure(failure),
     )
-    assert "upstream_status=ERROR" in stream.getvalue()
+    assert f"{field}=ERROR" in stream.getvalue()
     assert "upstream_code=-32000" in stream.getvalue()
+
+
+def test_upstream_type_is_sanitized_bounded_and_ignores_nested_values() -> None:
+    logger, stream = structured_test_logger("test.provider_diagnostics.type")
+    fields = safe_diagnostic_fields(
+        {"upstream_type": "https://private@example.test/type?token=PRIVATE " + "t" * 140}
+    )
+    assert isinstance(fields["upstream_type"], DiagnosticText)
+    assert repr(fields["upstream_type"]) == "<DiagnosticText>"
+    log_event(logger, logging.DEBUG, "provider_response_diagnostic", exc_info=False, **fields)
+    rendered = stream.getvalue()
+    assert "private" not in rendered and "PRIVATE" not in rendered
+    assert "https://example.test/type" in rendered
+    assert "t" * 128 not in rendered and "…" in rendered
+    assert safe_diagnostic_fields({"upstream_type": {"message": "PRIVATE"}}) == {}
 
 
 class DangerousValue:
@@ -107,15 +127,30 @@ def test_field_selection_omits_unknown_nested_values_and_owner_fields() -> None:
     dangerous = DangerousValue()
     fields = safe_diagnostic_fields(
         {
-            "provider": dangerous, "stage": dangerous, "model": dangerous,
-            "attempt": dangerous, "event": dangerous, "reason": dangerous,
-            "error_type": dangerous, "elapsed_ms": dangerous, "exc_info": dangerous,
-            "logger": dangerous, "level": dangerous, "body": dangerous,
-            "prompt": ["PRIVATE_CONTENT"], "response": {"message": "PRIVATE_CONTENT"},
-            "stdout": dangerous, "stderr": dangerous, "unknown": dangerous,
-            "upstream_code": dangerous, "upstream_status": {"code": dangerous},
-            "upstream_message": [dangerous], "received": True, "response_bytes": -1,
-            "category": "UNRECOGNIZED", "http_status": "200",
+            "provider": dangerous,
+            "stage": dangerous,
+            "model": dangerous,
+            "attempt": dangerous,
+            "event": dangerous,
+            "reason": dangerous,
+            "error_type": dangerous,
+            "elapsed_ms": dangerous,
+            "exc_info": dangerous,
+            "logger": dangerous,
+            "level": dangerous,
+            "body": dangerous,
+            "prompt": ["PRIVATE_CONTENT"],
+            "response": {"message": "PRIVATE_CONTENT"},
+            "stdout": dangerous,
+            "stderr": dangerous,
+            "unknown": dangerous,
+            "upstream_code": dangerous,
+            "upstream_status": {"code": dangerous},
+            "upstream_message": [dangerous],
+            "received": True,
+            "response_bytes": -1,
+            "category": "UNRECOGNIZED",
+            "http_status": "200",
             "content_type": "application/json; credential=PRIVATE_CONTENT",
         }
     )
@@ -129,8 +164,11 @@ def test_field_selection_omits_unknown_nested_values_and_owner_fields() -> None:
 @pytest.mark.parametrize(
     "counts",
     [
-        {"unknown_reason": 1}, {"missing_url": -1}, {"missing_url": True},
-        {"missing_url": 1.5}, {"missing_url": DangerousValue()},
+        {"unknown_reason": 1},
+        {"missing_url": -1},
+        {"missing_url": True},
+        {"missing_url": 1.5},
+        {"missing_url": DangerousValue()},
         {f"unknown_{index}": 1 for index in range(100)},
     ],
 )
@@ -153,9 +191,13 @@ def test_selected_fields_snapshot_counts_and_ignore_supplied_length_metadata() -
     counts = {"invalid_record": 2}
     fields = safe_diagnostic_fields(
         {
-            "upstream_message": "界", "upstream_message_chars": 999,
-            "upstream_message_bytes": 999, "upstream_message_truncated": True,
-            "rejection_counts": counts, "response_bytes": 42, "http_status": 200,
+            "upstream_message": "界",
+            "upstream_message_chars": 999,
+            "upstream_message_bytes": 999,
+            "upstream_message_truncated": True,
+            "rejection_counts": counts,
+            "response_bytes": 42,
+            "http_status": 200,
         }
     )
     counts["invalid_record"] = 99
@@ -180,7 +222,8 @@ def test_failure_extraction_ignores_arbitrary_exceptions_and_revalidates_known_d
 
     assert diagnostic_fields_from_failure(ForeignFailure()) == {}
     failure = ExecutionFailure(
-        ErrorCode.PROTOCOL_ERROR, "public",
+        ErrorCode.PROTOCOL_ERROR,
+        "public",
         diagnostics={"http_status": 502, "provider": "override", "received": 10},
     )
     failure.__cause__ = ForeignFailure()
@@ -194,8 +237,13 @@ def test_failure_extraction_ignores_arbitrary_exceptions_and_revalidates_known_d
 def test_candidate_counts_are_local_and_track_zero_all_invalid_and_unprocessed() -> None:
     empty = CandidateCounts(0)
     assert empty.as_fields() == {
-        "received": 0, "accepted": 0, "rejected": 0, "rejection_counts": {},
-        "rewritten": 0, "processed": 0, "unprocessed": 0,
+        "received": 0,
+        "accepted": 0,
+        "rejected": 0,
+        "rejection_counts": {},
+        "rewritten": 0,
+        "processed": 0,
+        "unprocessed": 0,
     }
     rejected = CandidateCounts(2)
     rejected.reject("missing_url")
@@ -208,8 +256,13 @@ def test_candidate_counts_are_local_and_track_zero_all_invalid_and_unprocessed()
     counts.accept(rewritten=True)
     counts.reject("missing_url")
     assert counts.as_fields() == {
-        "received": 4, "accepted": 1, "rejected": 1, "rejection_counts": {"missing_url": 1},
-        "rewritten": 1, "processed": 2, "unprocessed": 2,
+        "received": 4,
+        "accepted": 1,
+        "rejected": 1,
+        "rejection_counts": {"missing_url": 1},
+        "rewritten": 1,
+        "processed": 2,
+        "unprocessed": 2,
     }
     snapshot = counts.as_fields()
     counts.accept()
@@ -241,8 +294,13 @@ def test_best_effort_extractor_failure_does_not_change_business_return() -> None
 
     def business() -> str:
         logger, stream = structured_test_logger("test.provider_diagnostics.extractor")
-        log_event(logger, logging.DEBUG, "provider_response_diagnostic",
-                  exc_info=False, **best_effort_diagnostics(broken))
+        log_event(
+            logger,
+            logging.DEBUG,
+            "provider_response_diagnostic",
+            exc_info=False,
+            **best_effort_diagnostics(broken),
+        )
         assert "PRIVATE_EXTRACTOR_DATA" not in stream.getvalue()
         return "business result"
 
@@ -295,8 +353,11 @@ def test_failure_extraction_leaves_category_to_the_terminal_owner() -> None:
 def test_numeric_upstream_code_obeys_the_same_text_limit() -> None:
     logger, stream = structured_test_logger("test.provider_diagnostics.numeric_code")
     log_event(
-        logger, logging.DEBUG, "provider_response_diagnostic", exc_info=False,
-        **safe_diagnostic_fields({"upstream_code": 10 ** 200}),
+        logger,
+        logging.DEBUG,
+        "provider_response_diagnostic",
+        exc_info=False,
+        **safe_diagnostic_fields({"upstream_code": 10**200}),
     )
     rendered = stream.getvalue()
     assert "upstream_code=1" + "0" * 126 + "…" in rendered
@@ -306,8 +367,13 @@ def test_numeric_upstream_code_obeys_the_same_text_limit() -> None:
 @pytest.mark.parametrize(
     "reason",
     [
-        "duplicate", "missing_title", "missing_source_id", "invalid_identifier",
-        "identifier_conflict", "invalid_date", "invalid_landing_url",
+        "duplicate",
+        "missing_title",
+        "missing_source_id",
+        "invalid_identifier",
+        "identifier_conflict",
+        "invalid_date",
+        "invalid_landing_url",
     ],
 )
 def test_candidate_counts_preserve_existing_keyword_and_paper_rejection_reasons(

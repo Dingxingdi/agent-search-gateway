@@ -24,6 +24,7 @@ _PREFERRED_FIELD_ORDER = ("provider", "stage", "url", "event")
 DIAGNOSTIC_TEXT_LIMITS = (
     ("upstream_code", 128),
     ("upstream_status", 128),
+    ("upstream_type", 128),
     ("upstream_message", 512),
 )
 _EMERGENCY_MESSAGE = "agent-search-gateway debug logging sink failure\n"
