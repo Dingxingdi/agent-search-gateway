@@ -373,6 +373,7 @@ class Runtime:
                 command = os.path.abspath(command)
             runners[provider.name] = partial(
                 run_antigravity,
+                provider_name=provider.name,
                 command=command,
                 timeout_seconds=provider.timeout_seconds,
                 pass_env=provider.pass_env,

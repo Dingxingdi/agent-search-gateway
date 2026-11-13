@@ -112,6 +112,7 @@ async def test_runner_spawns_one_fresh_process_and_returns_markdown(tmp_path: Pa
         result = await adapter.run_antigravity(
             model,
             messages,
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.5,
             pass_env=(),
@@ -154,6 +155,7 @@ async def test_runner_omits_model_flag_when_model_is_none(tmp_path: Path) -> Non
         await adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=1,
             pass_env=(),
@@ -200,6 +202,7 @@ async def test_runner_passes_only_explicit_extra_environment(
         response = await run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=1,
             pass_env=extras,

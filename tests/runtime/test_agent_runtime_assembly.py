@@ -1,4 +1,5 @@
 import json
+import logging
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,7 +35,9 @@ def agent_config(command: str, *, model: str | None = None) -> dict[str, object]
 async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
     tmp_path: Path,
     model: str | None,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
     evidence = tmp_path / "argv.json"
     command = write_fake_cli(
         tmp_path,
@@ -72,6 +75,15 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
         ]
         assert argv[6:] == ([] if model is None else ["--model", model])
         assert not http_calls
+        events = [
+            record
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "agent_process_diagnostic"
+        ]
+        assert len(events) == 1
+        fields = getattr(events[0], "gateway_fields", {})
+        assert fields["provider"] == "primary" and fields["model"] == model
+        assert fields["stage"] == "agent_process"
         assert runtime.quotas.get_agent("primary").max_observed_in_use == 1
         assert runtime.quotas.get_llm("primary").max_observed_in_use == 0
     finally:
