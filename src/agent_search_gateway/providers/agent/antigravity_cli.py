@@ -295,7 +295,9 @@ async def run_antigravity(
                     and spawn.exception() is None
                 ):
                     known_process = spawn.result()
-                reason = failure.reason if failure is not None else "success"
+                reason: str | None = "success" if succeeded else "execution_failure"
+                if failure is not None:
+                    reason = failure.reason
                 category = diagnostics.get(
                     "category", failure.reason if failure is not None else "unknown"
                 )
@@ -303,7 +305,7 @@ async def run_antigravity(
                     reason, category = "execution_failure", "unknown"
                 if cancelled:
                     reason, category = "cancelled", "cancelled"
-                failed = failure is not None or cancelled or cleanup_failed
+                failed = not succeeded or failure is not None or cancelled or cleanup_failed
                 fields = safe_diagnostic_fields(
                     {
                         **diagnostics,
@@ -400,5 +402,4 @@ async def run_antigravity(
                     cleanup_failed = True
                     raise
                 finally:
-                    if failure is not None or succeeded or cancelled or cleanup_failed:
-                        best_effort_diagnostics(record_diagnostic)
+                    best_effort_diagnostics(record_diagnostic)

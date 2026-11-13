@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from functools import partial
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -639,3 +640,76 @@ async def test_agent_selected_error_text_is_redacted_before_bounding(tmp_path: P
         ("upstream_message", 512),
     ):
         assert len(fields[field]) <= limit
+
+
+async def test_agent_unexpected_spawn_error_is_diagnosed_after_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = write_fake_cli(tmp_path, 'raise AssertionError("must not run")')
+    stream = StringIO()
+    original_spawn = asyncio.create_subprocess_exec
+    original_cleanup = adapter._cleanup_process
+    spawn_errors: list[ValueError] = []
+    directories: list[Path] = []
+    cleaned = False
+
+    async def capture_spawn(*args: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        directories.append(Path(kwargs["cwd"]))
+        try:
+            return await original_spawn(*args, **kwargs)
+        except ValueError as exc:
+            spawn_errors.append(exc)
+            raise
+
+    async def capture_cleanup(
+        spawn: asyncio.Task[asyncio.subprocess.Process] | None,
+        tasks: Sequence[asyncio.Task[bytes] | asyncio.Task[int]],
+    ) -> str | None:
+        nonlocal cleaned
+        result = await original_cleanup(spawn, tasks)
+        assert "event=agent_process_diagnostic" not in stream.getvalue()
+        cleaned = True
+        return result
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    monkeypatch.setattr(adapter, "_cleanup_process", capture_cleanup)
+    gate = CapacityGate(1)
+    session = configure_debug_logging(tmp_path / "unexpected.log", stderr=stream)
+    try:
+        with pytest.raises(ValueError) as caught:
+            await adapter.run_antigravity(
+                "pin",
+                [{"role": "user", "content": "PROMPT_SENTINEL\x00TAIL_SENTINEL"}],
+                provider_name="alias",
+                command=str(command),
+                timeout_seconds=5,
+                pass_env=(),
+                quota=gate,
+            )
+    finally:
+        session.close()
+    assert len(spawn_errors) == 1 and caught.value is spawn_errors[0]
+    assert not hasattr(caught.value, "diagnostics")
+    assert cleaned and gate.in_use == 0
+    assert len(directories) == 1 and not directories[0].exists()
+    lines = [
+        line for line in stream.getvalue().splitlines() if "event=agent_process_diagnostic" in line
+    ]
+    assert len(lines) == 1
+    for field in (
+        "provider=alias",
+        "model=pin",
+        "stage=agent_process",
+        "reason=execution_failure",
+        "category=unknown",
+        "semantic_result=error",
+        "stdout_bytes=0",
+        "stderr_bytes=0",
+        "elapsed_ms=",
+    ):
+        assert field in lines[0]
+    assert "exit_code=" not in lines[0] and "upstream_status=" not in lines[0]
+    combined = stream.getvalue() + (tmp_path / "unexpected.log").read_text()
+    assert "SENTINEL" not in combined and "embedded null byte" not in combined
+    assert "event=provider_" not in combined and "traceback=" not in combined
