@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
+
+import httpx
+
 from ...academic.normalization import normalize_core_id
-from ...observability import SecretValue
+from ...observability import SecretValue, log_event
 from ..contracts import PaperSearchHit
+from ..diagnostics import CandidateCounts
 from .common import (
     AcademicHttpExecutor,
     as_list,
@@ -18,6 +24,18 @@ from .common import (
 )
 
 _DEFAULT_API_URL = "https://api.core.ac.uk/v3"
+
+
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    envelope = as_mapping(payload)
+    results = as_list(envelope.get("results")) if envelope is not None else None
+    if results is None:
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
 
 
 class CoreProvider:
@@ -41,33 +59,47 @@ class CoreProvider:
             stage="paper_search",
             headers=self._request_headers(),
             params={"q": query, "limit": 10, "offset": 0},
+            response_diagnostics=_response_diagnostics,
         )
         envelope = as_mapping(payload)
         results = as_list(envelope.get("results")) if envelope is not None else None
         if results is None:
             raise protocol_failure(self.name, "response results envelope was invalid")
+        counts = CandidateCounts(len(results))
         hits: list[PaperSearchHit] = []
         for item in results:
-            mapped = self._map_item(item)
+            mapped, reason = self._map_item(item)
             if mapped is None:
-                reject_item(self.name)
+                reject_item(self.name, reason)
+                counts.reject(reason)
             else:
                 hits.append(mapped)
+                counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="paper_search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
     def _request_headers(self) -> dict[str, str]:
         reveal = self._credential.reveal
         return {"Authorization": f"Bearer {reveal()}"}
 
-    def _map_item(self, value: object) -> PaperSearchHit | None:
+    def _map_item(self, value: object) -> tuple[PaperSearchHit | None, str]:
         item = as_mapping(value)
         if item is None:
-            return None
+            return None, "invalid_record_shape"
         raw_id = item.get("id")
         source_id = normalize_core_id(str(raw_id)) if isinstance(raw_id, str | int) else None
         title = text(item.get("title"))
         if source_id is None or not title:
-            return None
+            return None, "missing_required_field"
         repository = as_mapping(item.get("repository")) or {}
         return PaperSearchHit(
             source=self.name,
@@ -82,7 +114,7 @@ class CoreProvider:
             venue=text(repository.get("name")),
             topics=self._topics(item),
             citation_count=nonnegative_int(item.get("citationCount")),
-        )
+        ), ""
 
     @staticmethod
     def _authors(value: object) -> tuple[str, ...]:

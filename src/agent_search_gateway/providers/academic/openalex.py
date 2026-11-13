@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
+
+import httpx
+
 from ...academic.normalization import normalize_openalex_id
-from ...observability import SecretValue
+from ...observability import SecretValue, log_event
 from ..contracts import PaperSearchHit
+from ..diagnostics import CandidateCounts
 from .common import (
     AcademicHttpExecutor,
     as_list,
@@ -41,6 +47,18 @@ def reconstruct_abstract(value: object) -> str:
     return " ".join(word for _, word in positioned)
 
 
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    envelope = as_mapping(payload)
+    results = as_list(envelope.get("results")) if envelope is not None else None
+    if results is None:
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
+
+
 class OpenAlexProvider:
     name = "openalex"
 
@@ -65,28 +83,42 @@ class OpenAlexProvider:
             join_url(self._api_url, "works"),
             stage="paper_search",
             params=params,
+            response_diagnostics=_response_diagnostics,
         )
         envelope = as_mapping(payload)
         results = as_list(envelope.get("results")) if envelope is not None else None
         if results is None:
             raise protocol_failure(self.name, "response results envelope was invalid")
+        counts = CandidateCounts(len(results))
         hits: list[PaperSearchHit] = []
         for item in results:
-            mapped = self._map_item(item)
+            mapped, reason = self._map_item(item)
             if mapped is None:
-                reject_item(self.name)
+                reject_item(self.name, reason)
+                counts.reject(reason)
             else:
                 hits.append(mapped)
+                counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="paper_search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
-    def _map_item(self, value: object) -> PaperSearchHit | None:
+    def _map_item(self, value: object) -> tuple[PaperSearchHit | None, str]:
         item = as_mapping(value)
         if item is None:
-            return None
+            return None, "invalid_record_shape"
         source_id = normalize_openalex_id(text(item.get("id")))
         title = text(item.get("title"))
         if source_id is None or not title:
-            return None
+            return None, "missing_required_field"
         primary = as_mapping(item.get("primary_location")) or {}
         oa = as_mapping(item.get("open_access")) or {}
         landing = text(primary.get("landing_page_url")) or f"https://openalex.org/{source_id}"
@@ -110,7 +142,7 @@ class OpenAlexProvider:
             is_open_access=is_oa,
             oa_status=text(oa.get("oa_status")),
             license=text(primary.get("license")),
-        )
+        ), ""
 
     @staticmethod
     def _authors(value: object) -> tuple[str, ...]:

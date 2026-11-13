@@ -46,11 +46,13 @@ def protocol_failure(
     *,
     stage: str = "paper_search",
     reason: str | None = None,
+    diagnostics: Mapping[str, object] | None = None,
 ) -> ProtocolFailure:
     return ProtocolFailure(
         ErrorCode.PROTOCOL_ERROR,
         f"{provider}/{stage}: {detail}",
         reason=reason,
+        diagnostics=diagnostics,
     )
 
 

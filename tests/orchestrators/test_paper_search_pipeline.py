@@ -211,3 +211,82 @@ async def test_title_fallback_is_used_for_landing_admission_and_logs_are_payload
     assert query not in logs
     assert title not in logs
     assert doi not in logs
+
+
+async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
+    from agent_search_gateway.providers.academic.core import CoreProvider
+    from agent_search_gateway.providers.academic.crossref import CrossrefProvider
+    from agent_search_gateway.providers.academic.openalex import OpenAlexProvider
+    from agent_search_gateway.providers.academic.semantic_scholar import SemanticScholarProvider
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "crossref.test":
+            items = [
+                {"DOI": "10.1000/shared", "title": ["PRIVATE_CROSSREF_TITLE"]},
+                {},
+            ]
+            payload: object = {"message": {"items": items}}
+        elif request.url.host == "openalex.test":
+            results = [
+                {
+                    "id": "W123",
+                    "title": "PRIVATE_OPENALEX_TITLE",
+                    "doi": "10.1000/shared",
+                    "abstract_inverted_index": {"PRIVATE_ABSTRACT": [0]},
+                }
+            ]
+            payload = {"results": results}
+        elif request.url.host == "core.test":
+            payload = {"results": [None, {}]}
+        else:
+            payload = {"error": "quota blocked"}
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        def executor(name: str) -> HttpJsonExecutor:
+            return HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name=name)
+
+        providers: list[object] = [
+            CrossrefProvider(executor("crossref"), api_url="https://crossref.test"),
+            OpenAlexProvider(executor("openalex"), api_url="https://openalex.test"),
+            CoreProvider(
+                executor("core"),
+                api_url="https://core.test",
+                api_key=SecretValue("[REDACTED_SECRET]"),
+            ),
+            SemanticScholarProvider(executor("semantic_scholar"), api_url="https://semantic.test"),
+        ]
+        orchestrator = _orchestrator(tmp_path, providers)
+        target = await orchestrator.paper_search("mixed", request_id="77777777")
+        rows = [json.loads(line) for line in Path(target).read_text().splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["title"] == "PRIVATE_OPENALEX_TITLE"
+        assert rows[0]["identifiers"]["doi"] == "10.1000/shared"
+        assert "diagnostics" not in rows[0]
+
+    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 3
+    partitions = [
+        (fields["provider"], fields["received"], fields["accepted"], fields["rejected"])
+        for fields in summaries
+    ]
+    assert sorted(partitions) == [("core", 2, 0, 2), ("crossref", 2, 1, 1), ("openalex", 1, 1, 0)]
+    formatter = KeyValueFormatter(SecretRedactor([]))
+    assert "PRIVATE_" not in "\n".join(formatter.format(record) for record in records)
