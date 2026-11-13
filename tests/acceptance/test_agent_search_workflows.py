@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
+from time import monotonic
 
 import httpx
 import pytest
@@ -11,12 +13,15 @@ import pytest
 from agent_search_gateway.cli import build_parser, run_command
 from agent_search_gateway.config import load_toml, resolve_config
 from agent_search_gateway.daemon import ForegroundDaemon
+from agent_search_gateway.models import AgentInvocation
 from agent_search_gateway.paths import RuntimePaths
+from agent_search_gateway.providers.contracts import ChatMessage
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
 from tests.acceptance.test_gateway_workflows import _running_daemon
+from tests.support.acceptance import build_acceptance_runtime
 from tests.support.agent_cli import write_fake_cli
-from tests.support.agent_search import paper_markdown, web_markdown
+from tests.support.agent_search import agent_orchestrator, paper_markdown, web_markdown
 
 
 def build_agent_acceptance(
@@ -122,6 +127,67 @@ async def invoke(paths: RuntimePaths, argv: list[str]) -> tuple[int, str, str]:
     stdout, stderr = StringIO(), StringIO()
     code = await run_command(build_parser().parse_args(argv), paths, stdout=stdout, stderr=stderr)
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+async def test_agent_cli_receives_response_after_old_socket_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise real socket timers without spending twenty minutes waiting."""
+    paths = RuntimePaths(tmp_path / "config.toml", tmp_path / "gateway.sock", tmp_path / "results")
+    runtime = build_acceptance_runtime(paths)
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    clock_offset = 0.0
+    runner_done = asyncio.Event()
+
+    async def runner(model: str | None, messages: Sequence[ChatMessage]) -> str:
+        nonlocal clock_offset
+        assert model is None and messages
+        clock_offset = 1201.0
+        # Let the old socket timeout callback run before producing a response.
+        await asyncio.sleep(0.001)
+        runner_done.set()
+        return web_markdown()
+
+    runtime.search_orchestrator = agent_orchestrator(
+        paths.results_dir, [AgentInvocation("a")], {"a": runner}
+    )
+
+    async def exercise() -> tuple[int, str, str]:
+        outcome = await invoke(paths, ["agent-search", "q", "--scope", "web"])
+        await runner_done.wait()
+        return outcome
+
+    async def watchdog() -> None:
+        deadline = monotonic() + 2
+        while monotonic() < deadline:
+            await asyncio.sleep(0.01)
+        pytest.fail("Agent CLI did not finish within the real-time watchdog")
+
+    async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
+        with monkeypatch.context() as clock_patch:
+            clock_patch.setattr(loop, "time", lambda: real_time() + clock_offset)
+            cli_task = asyncio.create_task(exercise())
+            guard = asyncio.create_task(watchdog())
+            try:
+                done, _ = await asyncio.wait((cli_task, guard), return_when=asyncio.FIRST_COMPLETED)
+                if guard in done:
+                    await guard
+                code, out, err = await cli_task
+            finally:
+                cli_task.cancel()
+                guard.cancel()
+                await asyncio.gather(cli_task, guard, return_exceptions=True)
+
+    assert clock_offset == 1201.0
+    assert code == 0, err
+    assert err == ""
+    path = Path(out.strip())
+    assert path.is_absolute() and out == f"{path}\n"
+    assert path.parent == paths.results_dir and path.name.startswith("agent-")
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"url": "https://example.test/web", "abstract": "Agent result"}
+    ]
 
 
 @pytest.mark.parametrize("scope", ["web", "paper", "all"])
