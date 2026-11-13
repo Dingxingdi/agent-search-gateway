@@ -1,10 +1,11 @@
 """Shared pure helpers for built-in web provider adapters."""
 
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Literal, Protocol
 
 from ...errors import ErrorCode, ExecutionFailure
 from ...url_normalization import NormalizedURL, normalize_url
+from ..diagnostics import safe_diagnostic_fields
 from ..http import ResponseDiagnosticExtractor, ResponseInspector
 
 
@@ -55,11 +56,13 @@ def failure(
     reason: str,
     *,
     reason_code: str | None = None,
+    diagnostics: Mapping[str, object] | None = None,
 ) -> ExecutionFailure:
     return ExecutionFailure(
         ErrorCode.ALL_PROVIDERS_FAILED,
         f"{provider}/{stage}: {reason}",
         reason=reason_code,
+        diagnostics=diagnostics,
     )
 
 
@@ -92,6 +95,25 @@ def optional_string(value: object, provider: str, stage: str, label: str) -> str
     if value is None:
         return ""
     return require_string(value, provider, stage, label)
+
+
+def selected_error_fields(error: object) -> dict[str, object]:
+    """Select a known root error scalar or its explicit code/message children."""
+    if isinstance(error, dict):
+        return safe_diagnostic_fields(
+            {"upstream_code": error.get("code"), "upstream_message": error.get("message")}
+        )
+    return safe_diagnostic_fields({"upstream_message": error})
+
+
+def candidate_rejection_reason(item: object, url_key: Literal["url", "link"]) -> str:
+    """Classify an already rejected candidate using only its explicit URL field."""
+    if not isinstance(item, dict):
+        return "invalid_record"
+    value = item.get(url_key)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return "missing_url"
+    return "invalid_record"
 
 
 def normalized_match(candidate: object, target: NormalizedURL, provider: str, stage: str) -> bool:
