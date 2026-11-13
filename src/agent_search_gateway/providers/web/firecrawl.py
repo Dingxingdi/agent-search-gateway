@@ -39,7 +39,12 @@ def _page_body(
     raw_html = optional_string(result.get("rawHtml"), provider, stage, "rawHtml")
     raw = raw_html or markdown
     if not raw.strip():
-        raise failure(provider, stage, "page body is empty")
+        raise failure(
+            provider,
+            stage,
+            "page body is empty",
+            diagnostics={"semantic_result": "empty", "response_kind": "object"},
+        )
     return URLFetchCandidate(raw_content=raw, content=markdown)
 
 
@@ -146,9 +151,24 @@ class FirecrawlAdapter:
             "POST",
             _v2_endpoint(self._api_url, "scrape"),
             stage="fetch",
+            response_diagnostics=self._fetch_response_diagnostics,
             headers=self._headers,
             json_body={"url": str(url), "formats": ["markdown", "rawHtml"]},
         )
+        return self._parse_fetch(payload)
+
+    def _fetch_response_diagnostics(self, response: httpx.Response) -> Mapping[str, object]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {"category": "decode", "semantic_result": "unknown"}
+        try:
+            self._parse_fetch(payload)
+        except ExecutionFailure as exc:
+            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
+        return {"response_kind": "object", "semantic_result": "success"}
+
+    def _parse_fetch(self, payload: object) -> URLFetchCandidate:
         root = self._successful_root(payload, "fetch")
         data = require_object(root.get("data"), self.name, "fetch", "data")
         return _page_body(data, self.name, "fetch")
@@ -161,9 +181,11 @@ class FirecrawlAdapter:
                 stage,
                 "provider reported failure",
                 diagnostics=best_effort_diagnostics(
-                    lambda: selected_error_fields(root.get("error"))
-                )
-                if stage == "search"
-                else None,
+                    lambda: {
+                        "category": "provider_response",
+                        "semantic_result": "error",
+                        **selected_error_fields(root.get("error")),
+                    }
+                ),
             )
         return root

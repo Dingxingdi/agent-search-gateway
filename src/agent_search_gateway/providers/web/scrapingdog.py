@@ -116,5 +116,10 @@ class ScrapingDogAdapter:
         request_url = f"{endpoint(self._api_url, '/scrape')}?{params}"
         text = await self._http.request_text("GET", request_url, stage="fetch")
         if not text.strip():
-            raise failure(self.name, "fetch", "page body is empty")
+            raise failure(
+                self.name,
+                "fetch",
+                "page body is empty",
+                diagnostics={"semantic_result": "empty", "response_kind": "text"},
+            )
         return URLFetchCandidate(text, text)

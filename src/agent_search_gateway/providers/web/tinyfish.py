@@ -10,7 +10,7 @@ from ...errors import ExecutionFailure
 from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
-from ..diagnostics import CandidateCounts
+from ..diagnostics import CandidateCounts, safe_diagnostic_fields
 from .common import (
     JsonRequester,
     candidate_rejection_reason,
@@ -20,6 +20,7 @@ from .common import (
     optional_string,
     require_list,
     require_object,
+    selected_error_fields,
 )
 
 
@@ -102,6 +103,7 @@ class TinyFishAdapter:
             "POST",
             self._fetch_api_url,
             stage="fetch",
+            response_diagnostics=lambda response: self._fetch_response_diagnostics(response, url),
             headers=self._headers,
             json_body={
                 "urls": [str(url)],
@@ -110,6 +112,32 @@ class TinyFishAdapter:
                 "image_links": False,
             },
         )
+        try:
+            return self._parse_fetch(payload, url)
+        except ExecutionFailure as exc:
+            exc.diagnostics = safe_diagnostic_fields(
+                {
+                    "category": "invalid_envelope",
+                    "semantic_result": "error",
+                    **exc.diagnostics,
+                }
+            )
+            raise
+
+    def _fetch_response_diagnostics(
+        self, response: httpx.Response, url: NormalizedURL
+    ) -> Mapping[str, object]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {"category": "decode", "semantic_result": "unknown"}
+        try:
+            self._parse_fetch(payload, url)
+        except ExecutionFailure as exc:
+            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
+        return {"response_kind": "object", "semantic_result": "success"}
+
+    def _parse_fetch(self, payload: object, url: NormalizedURL) -> URLFetchCandidate:
         root = require_object(payload, self.name, "fetch", "response")
         results = require_list(root.get("results"), self.name, "fetch", "results")
         for item in results:
@@ -123,5 +151,17 @@ class TinyFishAdapter:
         for item in errors:
             error = require_object(item, self.name, "fetch", "error")
             if normalized_match(error.get("url"), url, self.name, "fetch"):
-                raise failure(self.name, "fetch", "provider reported per-URL failure")
+                raise failure(
+                    self.name,
+                    "fetch",
+                    "provider reported per-URL failure",
+                    diagnostics=safe_diagnostic_fields(
+                        {
+                            "category": "provider_response",
+                            "semantic_result": "error",
+                            **selected_error_fields(error),
+                            **selected_error_fields(error.get("error")),
+                        }
+                    ),
+                )
         raise failure(self.name, "fetch", "matching fetch result was not returned")

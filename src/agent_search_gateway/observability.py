@@ -177,7 +177,12 @@ def target_url_for_log(value: str) -> str:
 def http_endpoint_for_log(value: str) -> str:
     """Render an HTTP endpoint without userinfo or request-specific query data."""
 
-    return _url_for_log(value, keep_query=False, keep_fragment=False)
+    rendered = _url_for_log(value, keep_query=False, keep_fragment=False)
+    parsed = urlsplit(rendered)
+    # Reader-style endpoints can embed a complete target URL in the path.
+    if re.search(r"https?:(?:/|%2f){2}", parsed.path, re.IGNORECASE):
+        return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    return rendered
 
 
 def _url_for_log(value: str, *, keep_query: bool, keep_fragment: bool) -> str:

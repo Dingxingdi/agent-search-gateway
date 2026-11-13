@@ -9,7 +9,7 @@ from ...errors import ExecutionFailure
 from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
-from ..diagnostics import CandidateCounts
+from ..diagnostics import CandidateCounts, safe_diagnostic_fields
 from .common import (
     JsonRequester,
     candidate_rejection_reason,
@@ -21,6 +21,7 @@ from .common import (
     require_list,
     require_object,
     require_string,
+    selected_error_fields,
 )
 
 
@@ -166,12 +167,39 @@ class ParallelAdapter:
             "POST",
             endpoint(self._api_url, "/v1/extract"),
             stage="fetch",
+            response_diagnostics=lambda response: self._fetch_response_diagnostics(response, url),
             headers=self._headers,
             json_body={
                 "urls": [str(url)],
                 "advanced_settings": advanced_settings,
             },
         )
+        try:
+            return self._parse_fetch(payload, url)
+        except ExecutionFailure as exc:
+            exc.diagnostics = safe_diagnostic_fields(
+                {
+                    "category": "invalid_envelope",
+                    "semantic_result": "error",
+                    **exc.diagnostics,
+                }
+            )
+            raise
+
+    def _fetch_response_diagnostics(
+        self, response: httpx.Response, url: NormalizedURL
+    ) -> Mapping[str, object]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {"category": "decode", "semantic_result": "unknown"}
+        try:
+            self._parse_fetch(payload, url)
+        except ExecutionFailure as exc:
+            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
+        return {"response_kind": "object", "semantic_result": "success"}
+
+    def _parse_fetch(self, payload: object, url: NormalizedURL) -> URLFetchCandidate:
         root = require_object(payload, self.name, "fetch", "response")
         results = require_list(root.get("results"), self.name, "fetch", "results")
         errors = require_list(root.get("errors"), self.name, "fetch", "errors")
@@ -188,5 +216,17 @@ class ParallelAdapter:
         for item in errors:
             provider_error = require_object(item, self.name, "fetch", "error")
             if normalized_match(provider_error.get("url"), url, self.name, "fetch"):
-                raise failure(self.name, "fetch", "provider reported extraction failure")
+                raise failure(
+                    self.name,
+                    "fetch",
+                    "provider reported extraction failure",
+                    diagnostics=safe_diagnostic_fields(
+                        {
+                            "category": "provider_response",
+                            "semantic_result": "error",
+                            **selected_error_fields(provider_error),
+                            **selected_error_fields(provider_error.get("error")),
+                        }
+                    ),
+                )
         raise failure(self.name, "fetch", "matching extraction result was not returned")

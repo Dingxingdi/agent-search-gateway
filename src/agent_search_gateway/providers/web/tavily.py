@@ -9,7 +9,7 @@ from ...errors import ExecutionFailure
 from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
-from ..diagnostics import CandidateCounts
+from ..diagnostics import CandidateCounts, best_effort_diagnostics
 from .common import (
     JsonRequester,
     candidate_rejection_reason,
@@ -41,6 +41,35 @@ def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, objec
     if not isinstance(payload.get("results"), list):
         return {"category": "invalid_envelope", "semantic_result": "unknown"}
     return {"semantic_result": "success", "response_kind": "object"}
+
+
+def _fetch_response_diagnostics(
+    response: httpx.Response, target: NormalizedURL
+) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    return _fetch_payload_diagnostics(payload, target)
+
+
+def _fetch_payload_diagnostics(payload: object, target: NormalizedURL) -> Mapping[str, object]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    empty_match = False
+    for item in payload["results"]:
+        try:
+            if not isinstance(item, dict) or not normalized_match(
+                item.get("url"), target, "tavily", "fetch"
+            ):
+                continue
+        except ExecutionFailure:
+            continue
+        raw = item.get("raw_content")
+        if isinstance(raw, str) and raw.strip():
+            return {"response_kind": "object", "semantic_result": "success"}
+        empty_match = True
+    return {"response_kind": "object", "semantic_result": "empty" if empty_match else "no_match"}
 
 
 class TavilyAdapter:
@@ -116,29 +145,54 @@ class TavilyAdapter:
             "POST",
             endpoint(self._api_url, "/extract"),
             stage="fetch",
+            response_diagnostics=lambda response: _fetch_response_diagnostics(response, url),
             headers=self._headers,
             json_body={"urls": [str(url)]},
         )
+        diagnostics = best_effort_diagnostics(lambda: _fetch_payload_diagnostics(payload, url))
         try:
             root = require_object(payload, self.name, "fetch", "response")
             results = require_list(root.get("results"), self.name, "fetch", "results")
         except ExecutionFailure as exc:
             reason = "invalid_results_envelope"
-            raise failure(self.name, "fetch", reason, reason_code=reason) from exc
+            raise failure(
+                self.name, "fetch", reason, reason_code=reason, diagnostics=diagnostics
+            ) from exc
 
         empty_match_seen = False
-        for item in results:
-            try:
-                result = require_object(item, self.name, "fetch", "result")
-                if not normalized_match(result.get("url"), url, self.name, "fetch"):
+        processed = invalid_records = unmatched = empty_matches = 0
+        try:
+            for item in results:
+                processed += 1
+                try:
+                    result = require_object(item, self.name, "fetch", "result")
+                    if not normalized_match(result.get("url"), url, self.name, "fetch"):
+                        unmatched += 1
+                        continue
+                except ExecutionFailure:
+                    invalid_records += 1
                     continue
-            except ExecutionFailure:
-                continue
-            raw = result.get("raw_content")
-            if not isinstance(raw, str) or not raw.strip():
-                empty_match_seen = True
-                continue
-            return URLFetchCandidate(raw_content=raw)
-
-        reason = "empty_raw_content" if empty_match_seen else "no_matching_result"
-        raise failure(self.name, "fetch", reason, reason_code=reason)
+                raw = result.get("raw_content")
+                if not isinstance(raw, str) or not raw.strip():
+                    empty_match_seen = True
+                    empty_matches += 1
+                    continue
+                return URLFetchCandidate(raw_content=raw)
+            reason = "empty_raw_content" if empty_match_seen else "no_matching_result"
+            raise failure(self.name, "fetch", reason, reason_code=reason, diagnostics=diagnostics)
+        finally:
+            log_event(
+                logging.getLogger(__name__),
+                logging.DEBUG,
+                "provider_fetch_summary",
+                provider=self.name,
+                stage="fetch",
+                phase="adapter",
+                collection="results",
+                received=len(results),
+                processed=processed,
+                unprocessed=len(results) - processed,
+                invalid_records=invalid_records,
+                unmatched=unmatched,
+                empty_matches=empty_matches,
+            )

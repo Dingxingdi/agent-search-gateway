@@ -1714,3 +1714,81 @@ async def test_http_status_failures_do_not_claim_a_transport_subtype(
 
     assert "category=status" in stream.getvalue()
     assert "transport_type=" not in stream.getvalue()
+
+
+@pytest.mark.parametrize("status", [200, 404])
+async def test_request_text_preserves_explicit_business_diagnostics_and_actual_bytes(
+    caplog: pytest.LogCaptureFixture, status: int
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    body = b" \xff \n"
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                status, content=body, headers={"Content-Type": "application/xml"}
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="xml")
+
+        def diagnostics(response: httpx.Response) -> dict[str, object]:
+            return {
+                "response_kind": "xml",
+                "semantic_result": "no_match",
+                "response_bytes": 999,
+                "http_status": 201,
+            }
+
+        if status == 200:
+            text = await executor.request_text(
+                "GET", "https://xml.example.test", stage="fetch", response_diagnostics=diagnostics
+            )
+            assert text.encode("utf-8") != body
+        else:
+            with pytest.raises(HttpStatusFailure) as caught:
+                await executor.request_text(
+                    "GET",
+                    "https://xml.example.test",
+                    stage="fetch",
+                    response_diagnostics=diagnostics,
+                )
+            assert caught.value.diagnostics["semantic_result"] == "no_match"
+            assert caught.value.diagnostics["response_bytes"] == len(body)
+    fields = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(fields) == 1
+    assert fields[0]["response_kind"] == "xml"
+    assert fields[0]["semantic_result"] == "no_match"
+    assert fields[0]["response_bytes"] == len(body)
+    assert fields[0]["http_status"] == status
+
+
+async def test_request_text_diagnostic_error_preserves_default_classification(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+
+    def broken(response: httpx.Response) -> dict[str, object]:
+        raise RuntimeError("diagnostic only")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, text="PRIVATE_BODY"))
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="text")
+        assert (
+            await executor.request_text(
+                "GET", "https://text.example.test", stage="fetch", response_diagnostics=broken
+            )
+            == "PRIVATE_BODY"
+        )
+    fields = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(fields) == 1
+    assert fields[0]["semantic_result"] == "success"
+    assert fields[0]["response_kind"] == "text"

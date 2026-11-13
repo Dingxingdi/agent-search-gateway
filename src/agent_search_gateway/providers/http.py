@@ -148,6 +148,21 @@ class HttpJsonExecutor:
         json_body: object | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
+        def text_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+            fields: dict[str, object] = {
+                "response_kind": "text",
+                "semantic_result": (
+                    "error"
+                    if not response.is_success
+                    else "success"
+                    if response.text.strip()
+                    else "empty"
+                ),
+            }
+            if response_diagnostics is not None:
+                fields.update(best_effort_diagnostics(lambda: response_diagnostics(response)))
+            return fields
+
         response, _, _, _ = await self._request_response(
             method,
             url,
@@ -155,7 +170,7 @@ class HttpJsonExecutor:
             headers=headers,
             params=params,
             json_body=json_body,
-            response_diagnostics=response_diagnostics,
+            response_diagnostics=text_diagnostics,
         )
         return response.text
 

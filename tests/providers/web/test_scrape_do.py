@@ -86,3 +86,74 @@ def test_scrape_do_requires_non_empty_api_url(api_url: object) -> None:
             secret=SecretValue("secret"),
             http_executor=RecordingHttpExecutor(),
         )
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "semantic"),
+    [
+        ("# PRIVATE_BODY\n<html>PRIVATE_HTML</html>", 200, "success"),
+        (" \n\t", 200, "empty"),
+        ("<html>PRIVATE_HTTP_ERROR</html>", 403, "error"),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, body: str, status: int, semantic: str
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                status,
+                text=body,
+                headers={
+                    "content-type": "text/markdown",
+                    "x-brd-status-code": "502",
+                    "x-brd-error-code": "captcha",
+                },
+            )
+        )
+    ) as client:
+        adapter = ScrapeDoAdapter(
+            name="scrape_do",
+            api_url="https://scrape_do.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 5), provider_name="scrape_do"
+            ),
+        )
+        target = normalize_url("https://example.com/page?key=PRIVATE_QUERY")
+        if semantic == "success":
+            assert await adapter.fetch(target) == URLFetchCandidate(body, body)
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await adapter.fetch(target)
+            expected = "page body is empty" if semantic == "empty" else "HTTP status 403"
+            assert caught.value.message == f"scrape_do/fetch: {expected}"
+            assert caught.value.diagnostics["semantic_result"] == semantic
+    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == semantic
+    assert diagnostics[0]["response_kind"] == "text"
+    assert diagnostics[0]["http_status"] == status
+    assert diagnostics[0]["response_bytes"] == len(body.encode())
+    assert diagnostics[0]["content_type"] == "text/markdown"
+    assert "upstream_message" not in diagnostics[0]
+    assert "upstream_code" not in diagnostics[0]
+    rendered = "\n".join(
+        KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")])).format(record)
+        for record in records
+    )
+    assert "PRIVATE_" not in rendered

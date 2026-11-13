@@ -126,16 +126,56 @@ class ScrapeGraphAIAdapter:
             "POST",
             endpoint(self._api_url, "/api/scrape"),
             stage="fetch",
+            response_diagnostics=self._fetch_response_diagnostics,
             headers=self._headers,
             json_body={"url": str(url), "formats": [{"type": "markdown"}]},
         )
+        return self._parse_fetch(payload)
+
+    def _fetch_response_diagnostics(self, response: httpx.Response) -> Mapping[str, object]:
+        try:
+            payload = response.json()
+        except ValueError:
+            return {"category": "decode", "semantic_result": "unknown"}
+        try:
+            self._parse_fetch(payload)
+        except ExecutionFailure as exc:
+            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
+        return {"response_kind": "object", "semantic_result": "success"}
+
+    def _parse_fetch(self, payload: object) -> URLFetchCandidate:
         root = require_object(payload, self.name, "fetch", "response")
         if root.get("error") is not None or root.get("detail") is not None:
-            raise failure(self.name, "fetch", "provider reported failure")
+            raise failure(
+                self.name,
+                "fetch",
+                "provider reported failure",
+                diagnostics=best_effort_diagnostics(
+                    lambda: {
+                        "category": "provider_response",
+                        "semantic_result": "error",
+                        **_search_error_fields(root),
+                    }
+                ),
+            )
         results = require_object(root.get("results"), self.name, "fetch", "results")
         markdown = require_object(results.get("markdown"), self.name, "fetch", "results.markdown")
         data = require_list(markdown.get("data"), self.name, "fetch", "results.markdown.data")
         if not data:
-            raise failure(self.name, "fetch", "page body is empty")
-        text = non_empty_string(data[0], self.name, "fetch", "results.markdown.data[0]")
+            raise failure(
+                self.name,
+                "fetch",
+                "page body is empty",
+                diagnostics={"semantic_result": "empty", "response_kind": "object"},
+            )
+        try:
+            text = non_empty_string(data[0], self.name, "fetch", "results.markdown.data[0]")
+        except ExecutionFailure as exc:
+            if isinstance(data[0], str) and not data[0].strip():
+                exc.diagnostics = {
+                    **exc.diagnostics,
+                    "semantic_result": "empty",
+                    "response_kind": "object",
+                }
+            raise
         return URLFetchCandidate(text, text)

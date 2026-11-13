@@ -152,3 +152,85 @@ async def test_scrapegraphai_selects_only_known_error_fields(
         assert "upstream_message" not in rendered
         assert "upstream_code" not in rendered
     assert "PRIVATE_" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("payload", "message", "semantic"),
+    [
+        (
+            {
+                "error": {
+                    "code": "blocked",
+                    "message": "target blocked",
+                    "body": "PRIVATE_ERROR_BODY",
+                },
+                "results": {"markdown": {"data": ["PRIVATE_BODY"]}},
+            },
+            "provider reported failure",
+            "error",
+        ),
+        (
+            {"results": {"markdown": {"data": ["PRIVATE_BODY"], "error": "PRIVATE_CONTENT_ERROR"}}},
+            None,
+            "success",
+        ),
+        ({"results": {"markdown": {"data": []}}}, "page body is empty", "empty"),
+        (
+            {"results": {"markdown": {"data": ["", "PRIVATE_LATER_BODY"]}}},
+            "results.markdown.data[0] must be non-empty",
+            "empty",
+        ),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, payload: object, message: str | None, semantic: str
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import DiagnosticText, KeyValueFormatter, SecretRedactor
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    ) as client:
+        adapter = ScrapeGraphAIAdapter(
+            name="scrapegraphai",
+            api_url="https://scrapegraphai.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 5), provider_name="scrapegraphai"
+            ),
+        )
+        if message is None:
+            assert (
+                await adapter.fetch(normalize_url("https://example.com/page?key=PRIVATE_QUERY"))
+            ).content == "PRIVATE_BODY"
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await adapter.fetch(normalize_url("https://example.com/page?key=PRIVATE_QUERY"))
+            assert caught.value.message == f"scrapegraphai/fetch: {message}"
+            if semantic == "error":
+                selected = caught.value.diagnostics["upstream_message"]
+                assert isinstance(selected, DiagnosticText)
+                assert selected.text == "target blocked"
+    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == semantic
+    rendered = "\n".join(
+        KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")])).format(record)
+        for record in records
+    )
+    assert "PRIVATE_" not in rendered
+    if semantic == "error":
+        assert 'upstream_message="target blocked"' in rendered
+    else:
+        assert "target blocked" not in rendered
