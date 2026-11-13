@@ -1,3 +1,4 @@
+import logging
 import random
 import shlex
 from urllib.parse import parse_qs, urlparse
@@ -14,6 +15,179 @@ from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingHttpExecutor
 from tests.support.logging import structured_test_logger
+
+
+def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, object]]:
+    return [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == event
+    ]
+
+
+async def test_brightdata_reports_successful_candidate_summary(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"organic": [{"link": "https://example.com", "description": "PRIVATE_BODY"}]},
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata")
+        assert await _brightdata_adapter(executor).search("query") == [
+            KeywordSearchHit("https://example.com", "", "PRIVATE_BODY")
+        ]
+    summaries = _events(caplog, "provider_candidates_summary")
+    assert summaries == [
+        {
+            "provider": "brightdata",
+            "stage": "search",
+            "phase": "adapter",
+            "received": 1,
+            "accepted": 1,
+            "rejected": 0,
+            "rejection_counts": {},
+            "processed": 1,
+            "unprocessed": 0,
+            "rewritten": 0,
+        }
+    ]
+    diagnostics = _events(caplog, "provider_response_diagnostic")
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "success"
+    assert diagnostics[0]["response_kind"] == "object"
+    assert "PRIVATE_BODY" not in caplog.text
+
+
+async def test_brightdata_reports_mixed_candidate_rejections(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    results = [
+        {"link": "https://example.com"},
+        {},
+        {"link": None},
+        {"link": "  "},
+        None,
+        {"link": 1},
+        {"link": "https://example.com/bad", "description": []},
+    ]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"organic": results})
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata")
+        assert await _brightdata_adapter(executor).search("query") == [
+            KeywordSearchHit("https://example.com", "", "")
+        ]
+    summaries = _events(caplog, "provider_candidates_summary")
+    assert len(summaries) == 1
+    assert summaries[0]["received"] == 7
+    assert summaries[0]["accepted"] == 1
+    assert summaries[0]["rejected"] == 6
+    assert summaries[0]["rejection_counts"] == {"missing_url": 3, "invalid_record": 3}
+    assert summaries[0]["processed"] == 7
+    assert summaries[0]["unprocessed"] == 0
+
+
+async def test_brightdata_reports_all_invalid_candidates(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"organic": [None, {}, {"link": ""}]})
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata")
+        assert await _brightdata_adapter(executor).search("query") == []
+    summaries = _events(caplog, "provider_candidates_summary")
+    assert len(summaries) == 1
+    assert summaries[0]["received"] == summaries[0]["rejected"] == 3
+    assert summaries[0]["accepted"] == summaries[0]["unprocessed"] == 0
+    assert summaries[0]["rejection_counts"] == {"missing_url": 2, "invalid_record": 1}
+
+
+async def test_brightdata_reports_empty_candidate_summary(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={"organic": []}))
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata")
+        assert await _brightdata_adapter(executor).search("query") == []
+    summaries = _events(caplog, "provider_candidates_summary")
+    assert len(summaries) == 1
+    assert summaries[0]["received"] == summaries[0]["accepted"] == summaries[0]["rejected"] == 0
+    assert summaries[0]["rejection_counts"] == {}
+
+
+async def test_brightdata_json_error_diagnostics_use_only_known_fields() -> None:
+    logger, stream = structured_test_logger("tests.brightdata.json-error")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "error": {
+                    "code": "quota_limit",
+                    "message": "Vendor quota exhausted",
+                    "detail": "PRIVATE_ERROR_DETAIL",
+                },
+                "organic": [{"message": "PRIVATE_CANDIDATE_BODY"}],
+                "message": "PRIVATE_ROOT_MESSAGE",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0, 0, 5), provider_name="brightdata", logger=logger
+        )
+        with pytest.raises(ExecutionFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert type(caught.value) is ExecutionFailure
+    assert caught.value.message == "brightdata/search: provider reported failure"
+    assert set(caught.value.diagnostics) == {"upstream_code", "upstream_message"}
+    assert len(requests) == 1
+    diagnostic_lines = [
+        line
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(diagnostic_lines) == 1
+    fields = dict(token.split("=", 1) for token in shlex.split(diagnostic_lines[0])[1:])
+    assert fields["http_status"] == "200"
+    assert fields["category"] == "provider_response"
+    assert fields["semantic_result"] == "error"
+    assert fields["upstream_code"] == "quota_limit"
+    assert fields["upstream_message"] == "Vendor quota exhausted"
+    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+
+
+async def test_brightdata_invalid_organic_reports_invalid_envelope(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"organic": {"message": "PRIVATE_CANDIDATE"}, "message": "PRIVATE_ROOT"}
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata")
+        with pytest.raises(ExecutionFailure, match="organic must be an array"):
+            await _brightdata_adapter(executor).search("query")
+    diagnostics = _events(caplog, "provider_response_diagnostic")
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["category"] == "invalid_envelope"
+    assert diagnostics[0]["semantic_result"] == "unknown"
+    assert not any(key.startswith("upstream_") for key in diagnostics[0])
+    assert not _events(caplog, "provider_candidates_summary")
 
 
 async def test_brightdata_search_uses_serp_zone_and_maps_organic_results() -> None:
@@ -436,7 +610,6 @@ async def test_brightdata_header_events_expose_safe_metadata(
         "CODE_MARKER",
         credential.reveal(),
         "[REDACTED_SECRET]",
-        "other_code",
         "traceback=",
         "Traceback",
     ):
@@ -489,6 +662,270 @@ def _brightdata_adapter(
     )
 
 
+async def test_brightdata_unknown_header_code_remains_terminal_and_is_redacted() -> None:
+    secret = SecretValue("UNKNOWN_CODE_SECRET")
+    logger, stream = structured_test_logger("tests.brightdata.unknown-code", secrets=[secret])
+    message = (
+        "Vendor rejected "
+        + secret.reveal()
+        + " https://user:password@example.test/path?q=PRIVATE_QUERY#PRIVATE_FRAGMENT"
+        + " token=PRIVATE_TOKEN"
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={
+                "x-brd-error-code": secret.reveal(),
+                "x-brd-error": message,
+            },
+        )
+
+    async def no_retry(_delay: float) -> None:
+        pytest.fail("Unknown header code must retain its terminal policy")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0, 0, 5),
+            provider_name="brightdata",
+            logger=logger,
+            sleep=no_retry,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor, secret=secret).search("query")
+    assert len(requests) == 1
+    assert caught.value.retryable is False
+    assert caught.value.diagnostics["brightdata_error_code"] == "unknown"
+    logged = stream.getvalue() + str(caught.value) + repr(caught.value.diagnostics)
+    for marker in (
+        secret.reveal(),
+        "PRIVATE_QUERY",
+        "PRIVATE_FRAGMENT",
+        "PRIVATE_TOKEN",
+        "password",
+    ):
+        assert marker not in logged
+    diagnostic_lines = [
+        line
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(diagnostic_lines) == 1
+    fields = dict(token.split("=", 1) for token in shlex.split(diagnostic_lines[0])[1:])
+    assert "upstream_code" in fields
+    assert fields["upstream_message"].startswith("Vendor rejected")
+    assert fields["brightdata_error_code"] == "unknown"
+
+
+async def test_brightdata_duplicate_headers_keep_classification_without_raw_metadata() -> None:
+    logger, stream = structured_test_logger("tests.brightdata.duplicate-headers")
+    headers = [
+        ("x-brd-error-code", "PRIVATE_CODE_A"),
+        ("x-brd-error-code", "PRIVATE_CODE_B"),
+        ("x-brd-status-code", "200"),
+        ("x-brd-status-code", "502"),
+        ("x-brd-error", "PRIVATE_MESSAGE_A"),
+        ("x-brd-error", "PRIVATE_MESSAGE_B"),
+    ]
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, headers=headers))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0, 0, 5), provider_name="brightdata", logger=logger
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert caught.value.retryable is False
+    assert caught.value.diagnostics["brightdata_error_code"] == "invalid"
+    assert not any(key.startswith("upstream_") for key in caught.value.diagnostics)
+    assert "brightdata_status" not in caught.value.diagnostics
+    assert stream.getvalue().count("event=provider_response_diagnostic ") == 1
+    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+    assert "category=provider_response" in stream.getvalue()
+
+
+async def test_brightdata_status_only_responses_preserve_inner_status_with_http_retries() -> None:
+    logger, stream = structured_test_logger("tests.brightdata.status-only-diagnostics")
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503, headers={"x-brd-status-code": "502"})
+        return httpx.Response(200, headers={"x-brd-status-code": "200"}, json={"organic": []})
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2, 5),
+            provider_name="brightdata",
+            logger=logger,
+            sleep=sleep,
+        )
+        assert await _brightdata_adapter(executor).search("query") == []
+    diagnostics = [
+        dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(diagnostics) == len(requests) == 2
+    assert diagnostics[0]["http_status"] == "503"
+    assert diagnostics[0]["upstream_status"] == "502"
+    assert diagnostics[1]["http_status"] == diagnostics[1]["upstream_status"] == "200"
+    assert diagnostics[1]["semantic_result"] == "success"
+    assert sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "PRIVATE_MESSAGE\nPRIVATE_CONTINUATION",
+        "PRIVATE_MESSAGE\tPRIVATE_CONTINUATION",
+        "PRIVATE_MESSAGE, PRIVATE_CONTINUATION",
+    ],
+)
+async def test_brightdata_malformed_header_messages_keep_only_classification(message: str) -> None:
+    logger, stream = structured_test_logger("tests.brightdata.malformed-message")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={**_CAPTCHA_HEADERS, "x-brd-error": message}
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata", logger=logger
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert caught.value.retryable is True
+    assert caught.value.safe_reason == "provider_reported_failure"
+    assert "upstream_message" not in caught.value.diagnostics
+    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+    assert stream.getvalue().count("event=provider_response_diagnostic ") == 1
+    assert "category=provider_response" in stream.getvalue()
+
+
+async def test_brightdata_header_diagnostics_override_body_error_in_one_event() -> None:
+    logger, stream = structured_test_logger("tests.brightdata.header-body-priority")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                headers=_CAPTCHA_HEADERS,
+                json={"error": {"code": "PRIVATE_BODY_CODE", "message": "PRIVATE_BODY_MESSAGE"}},
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata", logger=logger
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+    assert caught.value.retryable is True
+    lines = [
+        line
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(lines) == 1
+    fields = dict(token.split("=", 1) for token in shlex.split(lines[0])[1:])
+    assert fields["upstream_code"] == "captcha"
+    assert fields["upstream_message"] == "redirect location was rejected"
+    assert fields["http_status"] == "200"
+    assert fields["upstream_status"] == "502"
+    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+
+
+async def test_brightdata_long_header_message_redacts_before_truncation() -> None:
+    secret = SecretValue("CROSS_BOUNDARY_SECRET_VALUE")
+    message = "m" * 500 + secret.reveal() + "z" * 700
+    logger, stream = structured_test_logger("tests.brightdata.long-header", secrets=[secret])
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, headers={**_CAPTCHA_HEADERS, "x-brd-error": message}
+            )
+        )
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="brightdata", logger=logger
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor, secret=secret).search("query")
+    lines = [
+        line
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(lines) == 1
+    fields = dict(token.split("=", 1) for token in shlex.split(lines[0])[1:])
+    assert fields["upstream_message"].startswith("m" * 500)
+    assert len(fields["upstream_message"]) <= 512
+    assert fields["upstream_message_truncated"] == "true"
+    assert fields["upstream_message_chars"] == str(len(message))
+    assert fields["upstream_message_bytes"] == str(len(message.encode()))
+    assert caught.value.retryable is True
+    assert caught.value.safe_reason == "provider_reported_failure"
+    logged = stream.getvalue() + str(caught.value) + repr(caught.value.diagnostics)
+    assert secret.reveal() not in logged
+    assert "CROSS_BOUND" not in logged
+    assert "z" * 20 not in logged
+
+
+async def test_brightdata_response_diagnostic_preserves_outer_and_upstream_status(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(random, "uniform", lambda _low, _high: 0.9)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, headers=_CAPTCHA_HEADERS)
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    logger, stream = structured_test_logger("tests.brightdata.canonical-header")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="brightdata",
+            logger=logger,
+            sleep=sleep,
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            await _brightdata_adapter(executor).search("query")
+
+    lines = [
+        dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(lines) == len(requests) == 3
+    for fields in lines:
+        assert fields["status"] == fields["http_status"] == "200"
+        assert fields["brightdata_status"] == fields["upstream_status"] == "502"
+        assert fields["brightdata_error_code"] == fields["upstream_code"] == "captcha"
+        assert fields["upstream_message"] == "redirect location was rejected"
+        assert fields["response_bytes"] == "0"
+        assert fields["category"] == "provider_response"
+        assert fields["semantic_result"] == "error"
+    assert caught.value.status_code == 200
+    assert caught.value.safe_reason == "redirect location was rejected"
+    assert sleeps == pytest.approx([0.225, 0.45])
+    assert "category=decode" not in stream.getvalue()
+
+
 async def test_brightdata_search_classifies_masked_captcha_before_json_decode() -> None:
     requests: list[httpx.Request] = []
     sleeps: list[float] = []
@@ -516,7 +953,7 @@ async def test_brightdata_search_classifies_masked_captcha_before_json_decode() 
     assert failure.code is ErrorCode.ALL_PROVIDERS_FAILED
     assert failure.status_code == 200
     assert failure.retryable is True
-    assert failure.diagnostics == {
+    for key, value in {
         "brightdata_error_code": "captcha",
         "brightdata_status": 502,
         "status": 200,
@@ -524,7 +961,8 @@ async def test_brightdata_search_classifies_masked_captcha_before_json_decode() 
         "response_bytes": 0,
         "category": "provider_response",
         "semantic_result": "error",
-    }
+    }.items():
+        assert failure.diagnostics[key] == value
     assert failure.safe_reason == "redirect location was rejected"
     assert len(requests) == 1
     assert sleeps == []
@@ -720,6 +1158,7 @@ async def test_brightdata_terminal_header_failures_do_not_retry(
 async def test_brightdata_malformed_or_ambiguous_headers_are_terminal(
     headers: list[tuple[str, str]], safe_code: str
 ) -> None:
+    logger, stream = structured_test_logger("tests.brightdata.malformed-headers")
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -734,6 +1173,7 @@ async def test_brightdata_malformed_or_ambiguous_headers_are_terminal(
             client,
             RetryPolicy(3, 0.25, 2.0, 30.0),
             provider_name="brightdata",
+            logger=logger,
             sleep=no_retry,
         )
         with pytest.raises(ProviderResponseFailure) as caught:
@@ -742,6 +1182,13 @@ async def test_brightdata_malformed_or_ambiguous_headers_are_terminal(
     assert caught.value.retryable is False
     assert caught.value.diagnostics["brightdata_error_code"] == safe_code
     assert "brightdata_status" not in caught.value.diagnostics
+    assert "upstream_status" not in caught.value.diagnostics
+    if safe_code == "invalid":
+        assert "upstream_code" not in caught.value.diagnostics
+        for name, value in headers:
+            if name == "x-brd-error-code" and value:
+                assert value not in stream.getvalue()
+    assert stream.getvalue().count("event=provider_response_diagnostic ") == 1
     assert len(requests) == 1
 
 
@@ -763,10 +1210,11 @@ async def test_brightdata_benign_headers_preserve_success(headers: dict[str, str
 @pytest.mark.parametrize("body", ["", "not JSON"])
 @pytest.mark.parametrize("headers", [{}, {"x-brd-status-code": "200"}])
 async def test_brightdata_without_header_failure_preserves_decode_errors(
-    body: str, headers: dict[str, str]
+    body: str, headers: dict[str, str], caplog: pytest.LogCaptureFixture
 ) -> None:
     from agent_search_gateway.errors import ProtocolFailure
 
+    caplog.set_level(logging.DEBUG)
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -782,6 +1230,10 @@ async def test_brightdata_without_header_failure_preserves_decode_errors(
         with pytest.raises(ProtocolFailure, match="response was not valid JSON"):
             await _brightdata_adapter(executor).search("query")
     assert len(requests) == 1
+    diagnostics = _events(caplog, "provider_response_diagnostic")
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["category"] == "decode"
+    assert diagnostics[0]["semantic_result"] == "unknown"
 
 
 async def test_brightdata_fetch_does_not_inherit_search_header_inspection() -> None:
