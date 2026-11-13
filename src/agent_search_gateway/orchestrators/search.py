@@ -35,7 +35,6 @@ from ..url_normalization import NormalizedURL, normalize_url
 from ..url_store import URLStore
 from .paper import finalize_paper_hits
 
-_AGENT_WORKFLOW_TIMEOUT_SECONDS = 1140.0
 _AGENT_FAILURE_REASONS = frozenset(
     {
         "spawn_failure",
@@ -266,26 +265,15 @@ class SearchOrchestrator:
         if scope not in {"web", "paper", "all"}:
             raise InputFailure(ErrorCode.BAD_REQUEST, "Agent search scope is invalid")
         selected = self._select_agent_invocations(provider=provider, model=model)
-        deadline = asyncio.timeout(_AGENT_WORKFLOW_TIMEOUT_SECONDS)
-        try:
-            async with deadline:
-                return await self._text_search(
-                    normalized_prompt,
-                    request_id=request_id,
-                    kind="agent",
-                    scope=scope,
-                    invocations=selected,
-                    generate_web=self._stages.agent_search_markdown,
-                    generate_paper=self._stages.agent_paper_search_markdown,
-                )
-        except TimeoutError as exc:
-            if not deadline.expired():
-                raise
-            raise ExecutionFailure(
-                ErrorCode.ALL_PROVIDERS_FAILED,
-                "Agent search workflow timed out",
-                reason="timeout",
-            ) from exc
+        return await self._text_search(
+            normalized_prompt,
+            request_id=request_id,
+            kind="agent",
+            scope=scope,
+            invocations=selected,
+            generate_web=self._stages.agent_search_markdown,
+            generate_paper=self._stages.agent_paper_search_markdown,
+        )
 
     async def _text_search(
         self,
