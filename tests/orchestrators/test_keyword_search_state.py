@@ -32,7 +32,12 @@ class _JudgeClient:
         candidate = messages[-1]["content"]
         self.candidates.append(candidate)
         if "explode-body" in candidate:
-            raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "judge exploded")
+            raise ExecutionFailure(
+                ErrorCode.ALL_PROVIDERS_FAILED,
+                "judge exploded",
+                reason="REASON_SENTINEL",
+                diagnostics={"upstream_code": "judge_busy", "http_status": 503},
+            )
         if "reject-body" in candidate:
             return {"ok": False, "reason": "not usable"}
         return {"ok": True}
@@ -262,6 +267,8 @@ async def test_keyword_search_attributes_hit_staging_failures_without_duplicate_
         and "stage=judge" in line
         and "error_type=ExecutionFailure" in line
         and "failed_hits=1" in line
+        and "upstream_code=judge_busy" in line
+        and "reason=execution_failure" in line
         for line in partial_lines
     )
     assert sum("event=provider_completed" in line for line in partial_lines) == 1
@@ -279,6 +286,8 @@ async def test_keyword_search_attributes_hit_staging_failures_without_duplicate_
         "event=provider_failed" in line and "stage=search" in line for line in failed_lines
     )
     assert not any("event=provider_completed" in line for line in failed_lines)
+    assert any("upstream_code=judge_busy" in line for line in failed_lines)
+    assert "REASON_SENTINEL" not in stream.getvalue()
 
     invalid_lines = [line for line in lines if "provider=invalid-hit" in line]
     assert sum("event=provider_failed" in line for line in invalid_lines) == 1

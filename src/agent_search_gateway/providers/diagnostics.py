@@ -1,5 +1,6 @@
 """Small, allowlisted provider diagnostics; never inspect arbitrary payloads."""
 
+import asyncio
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -68,6 +69,43 @@ _FAILURE_FIELDS = frozenset(
         "stderr_bytes",
     }
 )
+
+
+_FAILURE_REASONS = frozenset(
+    {
+        "spawn_failure",
+        "argument_limit",
+        "nonzero_exit",
+        "terminal_status_failure",
+        "invalid_json",
+        "empty_response",
+        "invalid_markdown",
+        "timeout",
+        "output_limit",
+        "cancelled",
+        "execution_failure",
+        "judge_execution_failed",
+        "invalid_results_envelope",
+        "empty_raw_content",
+        "no_matching_result",
+        "invalid_data_envelope",
+        "missing_data_envelope",
+        "invalid_envelope",
+        "invalid_best_location",
+        "invalid_locations",
+    }
+)
+
+
+def safe_failure_reason(exc: BaseException) -> str:
+    """Keep only stable local reasons; arbitrary upstream text is not a reason code."""
+    if isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(exc, ExecutionFailure):
+        reason = exc.reason
+        if type(reason) is str and reason in _FAILURE_REASONS:
+            return reason
+    return "execution_failure"
 
 
 def safe_diagnostic_fields(fields: Mapping[str, object]) -> dict[str, object]:

@@ -9,7 +9,7 @@ from typing import TypeVar
 
 from ..academic.aggregator import PaperAggregator
 from ..concurrency import ProviderQuotaManager
-from ..errors import ErrorCode, ExecutionFailure, GatewayError, InputFailure, ParserFailure
+from ..errors import ErrorCode, ExecutionFailure, InputFailure, ParserFailure
 from ..llm.stages import LLMStages, cheap_check
 from ..llm_search_parser import parse_search_markdown
 from ..models import (
@@ -29,27 +29,12 @@ from ..providers.contracts import (
     OAResolver,
     PaperSearchHit,
 )
+from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
 from ..request_ids import validate_request_id
 from ..result_writer import ResultWriter
 from ..url_normalization import NormalizedURL, normalize_url
 from ..url_store import URLStore
 from .paper import finalize_paper_hits
-
-_AGENT_FAILURE_REASONS = frozenset(
-    {
-        "spawn_failure",
-        "argument_limit",
-        "nonzero_exit",
-        "terminal_status_failure",
-        "invalid_json",
-        "empty_response",
-        "invalid_markdown",
-        "timeout",
-        "output_limit",
-        "cancelled",
-        "execution_failure",
-    }
-)
 
 TInvocation = TypeVar("TInvocation", LLMInvocation, AgentInvocation)
 
@@ -472,14 +457,13 @@ class SearchOrchestrator:
             markdown = await generate(invocation, prompt)
             records = parse_search_markdown(markdown)
         except asyncio.CancelledError as exc:
-            if kind == "agent":
-                self._log_text_provider_failure(invocation, kind, "agent_search", started, exc)
+            self._log_text_provider_failure(invocation, f"{kind}_search", started, exc)
             raise
         except ExecutionFailure as exc:
-            self._log_text_provider_failure(invocation, kind, f"{kind}_search", started, exc)
+            self._log_text_provider_failure(invocation, f"{kind}_search", started, exc)
             raise
         except Exception as exc:
-            self._log_text_provider_failure(invocation, kind, f"{kind}_search", started, exc)
+            self._log_text_provider_failure(invocation, f"{kind}_search", started, exc)
             raise ExecutionFailure(
                 ErrorCode.ALL_PROVIDERS_FAILED,
                 f"{'LLM' if kind == 'llm' else 'Agent'} search provider "
@@ -519,16 +503,13 @@ class SearchOrchestrator:
             markdown = await generate(invocation, prompt)
             hits = parse_paper_markdown(markdown, provider=invocation.provider, source_kind=kind)
         except asyncio.CancelledError as exc:
-            if kind == "agent":
-                self._log_text_provider_failure(
-                    invocation, kind, "agent_paper_search", started, exc
-                )
+            self._log_text_provider_failure(invocation, f"{kind}_paper_search", started, exc)
             raise
         except ExecutionFailure as exc:
-            self._log_text_provider_failure(invocation, kind, f"{kind}_paper_search", started, exc)
+            self._log_text_provider_failure(invocation, f"{kind}_paper_search", started, exc)
             raise
         except Exception as exc:
-            self._log_text_provider_failure(invocation, kind, f"{kind}_paper_search", started, exc)
+            self._log_text_provider_failure(invocation, f"{kind}_paper_search", started, exc)
             raise ExecutionFailure(
                 ErrorCode.ALL_PROVIDERS_FAILED,
                 f"{'LLM' if kind == 'llm' else 'Agent'} paper search provider "
@@ -550,23 +531,11 @@ class SearchOrchestrator:
     def _log_text_provider_failure(
         self,
         invocation: LLMInvocation | AgentInvocation,
-        kind: TextSearchKind,
         stage: str,
         started: float,
         exc: BaseException,
     ) -> None:
-        if kind == "llm":
-            assert isinstance(exc, Exception)
-            self._log_provider_failure(invocation.provider, stage, started, exc)
-            return
-        if isinstance(exc, asyncio.CancelledError):
-            reason = "cancelled"
-        elif isinstance(exc, ParserFailure):
-            reason = "invalid_markdown"
-        elif isinstance(exc, GatewayError) and exc.reason in _AGENT_FAILURE_REASONS:
-            reason = exc.reason
-        else:
-            reason = "execution_failure"
+        reason = "invalid_markdown" if isinstance(exc, ParserFailure) else safe_failure_reason(exc)
         log_event(
             self._logger,
             logging.DEBUG,
@@ -577,6 +546,8 @@ class SearchOrchestrator:
             error_type=type(exc).__name__,
             reason=reason,
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )
 
     async def _run_keyword_pipeline(
@@ -597,7 +568,8 @@ class SearchOrchestrator:
                 hits = await provider.search(query)
             if not isinstance(hits, list):
                 raise TypeError("provider search result must be a list")
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self._log_provider_failure(provider.name, "search", started, exc)
             raise
         except ExecutionFailure as exc:
             self._log_provider_failure(provider.name, "search", started, exc)
@@ -624,7 +596,8 @@ class SearchOrchestrator:
                     continue
                 if staged_hit is not None:
                     staged.append(staged_hit)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self._log_provider_failure(provider.name, "hit_staging", started, exc)
             raise
         except Exception as exc:
             self._log_provider_failure(provider.name, "hit_staging", started, exc)
@@ -752,7 +725,7 @@ class SearchOrchestrator:
         provider: str,
         stage: str,
         started: float,
-        exc: Exception,
+        exc: BaseException,
     ) -> None:
         log_event(
             self._logger,
@@ -762,6 +735,9 @@ class SearchOrchestrator:
             stage=stage,
             error_type=type(exc).__name__,
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            reason=safe_failure_reason(exc),
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )
 
     def _log_provider_partial_failure(
@@ -782,6 +758,9 @@ class SearchOrchestrator:
             error_type=type(exc).__name__,
             failed_hits=failed_hits,
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            reason=safe_failure_reason(exc),
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )
 
     def _record_from_store(self, url: NormalizedURL) -> SearchRecord:

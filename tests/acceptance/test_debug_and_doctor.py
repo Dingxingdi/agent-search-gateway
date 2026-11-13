@@ -4,10 +4,26 @@ import logging
 from io import StringIO
 from pathlib import Path
 
+import httpx
+import pytest
+
 from agent_search_gateway.cli import build_parser, run_command
+from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.daemon import ForegroundDaemon
-from agent_search_gateway.observability import DebugLoggingSession, SecretValue, log_event
+from agent_search_gateway.llm.stages import LLMStages
+from agent_search_gateway.models import LLMInvocation, RetryPolicy
+from agent_search_gateway.observability import (
+    DebugLoggingSession,
+    SecretValue,
+    configure_debug_logging,
+    log_event,
+)
+from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.paths import RuntimePaths
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.web.tavily import TavilyAdapter
+from agent_search_gateway.result_writer import ResultWriter
+from agent_search_gateway.url_store import URLStore
 from tests.doctor._support import environment_name, write_valid_config
 from tests.support.acceptance import (
     DEBUG_CREDENTIAL_SENTINEL,
@@ -18,6 +34,7 @@ from tests.support.acceptance import (
     DebugAcceptanceRuntime,
     build_debug_acceptance_runtime,
 )
+from tests.support.fakes import FakeLLMClient
 
 
 async def _start_acceptance_daemon(
@@ -301,3 +318,191 @@ async def test_doctor_cli_acceptance_is_local_aggregating_and_side_effect_free(
     assert not paths.logs_dir.exists()
     assert not paths.debug_log_file.exists()
     assert not paths.socket_file.exists()
+
+
+@pytest.mark.parametrize("debug", [True, False])
+async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_logs(
+    tmp_path: Path,
+    debug: bool,
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    queries = {"alpha": "QUERY_ALPHA_SENTINEL", "beta": "QUERY_BETA_SENTINEL"}
+    attempts: dict[tuple[str, str], int] = {}
+    entered: set[str] = set()
+    both_started = asyncio.Event()
+    credential = SecretValue("[REDACTED_SECRET]")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        query = json.loads(request.content)["query"]
+        label = next(label for label, value in queries.items() if value == query)
+        provider = request.url.host.split(".")[0]
+        key = (provider, label)
+        attempt = attempts[key] = attempts.get(key, 0) + 1
+        if provider == "good" and attempt == 1:
+            entered.add(label)
+            if len(entered) == 2:
+                both_started.set()
+            await both_started.wait()
+        statuses = [429, 200] if label == "alpha" else [429, 502, 200]
+        status = statuses[attempt - 1] if provider == "good" else 429
+        if status != 200:
+            return httpx.Response(
+                status,
+                json={
+                    "error": {
+                        "code": f"limited_{label}",
+                        "type": "quota",
+                        "message": "Retry "
+                        + credential.reveal()
+                        + " https://private.test/error?query=URL_SENTINEL"
+                        + " safe " * 130,
+                    }
+                },
+            )
+        count = 2 if label == "alpha" else 3
+        invalid: list[object] = (
+            [{"title": "PAYLOAD_SENTINEL"}] * 3 if label == "alpha" else ["PAYLOAD_SENTINEL", 99]
+        )
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    *[
+                        {"url": f"https://example.test/{label}/{i}", "content": "BODY_SENTINEL"}
+                        for i in range(count)
+                    ],
+                    *invalid,
+                ]
+            },
+        )
+
+    async def sleep(delay: float) -> None:
+        await asyncio.sleep(0)
+
+    stderr = StringIO()
+    session = (
+        configure_debug_logging(
+            paths.debug_log_file,
+            stderr=stderr,
+            max_bytes=1600,
+            backup_count=100,
+        )
+        if debug
+        else None
+    )
+    if session is not None:
+        session.add_secrets(credential)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        providers = [
+            TavilyAdapter(
+                name=name,
+                api_url=f"https://{name}.example.test",
+                secret=credential,
+                http_executor=HttpJsonExecutor(
+                    client,
+                    RetryPolicy(3, 0.01, 2, 1),
+                    provider_name=name,
+                    sleep=sleep,
+                ),
+            )
+            for name in ("good", "bad")
+        ]
+        invocation = LLMInvocation("judge", "model")
+        stages = LLMStages(
+            {"judge": FakeLLMClient("judge")},
+            judge=invocation,
+            safety=invocation,
+            content_clean=invocation,
+            focus_summary=invocation,
+        )
+        runtime = build_debug_acceptance_runtime(paths)
+        runtime.search_orchestrator = SearchOrchestrator(
+            keyword_providers=providers,
+            llm_invocations=(),
+            quotas=ProviderQuotaManager(web_limits={"good": 2, "bad": 2}, llm_limits={}),
+            stages=stages,
+            store=URLStore(),
+            result_writer=ResultWriter(paths.results_dir),
+        )
+        ids = iter(("11111111", "22222222"))
+        daemon = ForegroundDaemon(
+            paths,
+            runtime_factory=lambda: runtime,
+            request_id_factory=lambda: next(ids),
+            debug=debug,
+            logging_session=session,
+        )
+        task = asyncio.create_task(daemon.start())
+        outputs = {label: (StringIO(), StringIO()) for label in queries}
+        try:
+            await asyncio.wait_for(daemon.ready.wait(), 1)
+            async with asyncio.timeout(2):
+                codes = await asyncio.gather(
+                    *(
+                        run_command(
+                            build_parser().parse_args(["keyword-search", query]),
+                            paths,
+                            stdout=outputs[label][0],
+                            stderr=outputs[label][1],
+                        )
+                        for label, query in queries.items()
+                    )
+                )
+        finally:
+            await daemon.stop_for_test()
+            await task
+            if session is not None:
+                session.close()
+
+    assert codes == [0, 0]
+    request_ids: dict[str, str] = {}
+    for label, (stdout, business_stderr) in outputs.items():
+        assert business_stderr.getvalue() == ""
+        result_path = Path(stdout.getvalue().strip())
+        assert stdout.getvalue() == f"{result_path}\n"
+        request_ids[label] = result_path.stem.removeprefix("keyword-")
+        records = [json.loads(line) for line in result_path.read_text().splitlines()]
+        assert len(records) == (2 if label == "alpha" else 3)
+        assert all(set(record) == {"url", "abstract"} for record in records)
+        assert all(f"/{label}/" in record["url"] for record in records)
+    assert len(set(request_ids.values())) == 2
+    if not debug:
+        assert not paths.debug_log_file.exists()
+        assert stderr.getvalue() == ""
+        return
+
+    files = list(paths.debug_log_file.parent.glob(paths.debug_log_file.name + "*"))
+    assert len(files) > 1
+    file_log = "\n".join(path.read_text() for path in files)
+    for logged in (file_log, stderr.getvalue()):
+        assert "SENTINEL" not in logged
+        assert credential.reveal() not in logged
+        assert "<redacted>" in logged
+        assert "upstream_message_truncated=true" in logged
+        assert "traceback=" not in logged
+        assert "event=workflow_failed " not in logged
+        for label, request_id in request_ids.items():
+            lines = [line for line in logged.splitlines() if f"request={request_id} " in line]
+            assert sum("event=workflow_completed " in line for line in lines) == 1
+            assert sum("event=provider_started" in line for line in lines) == 2
+            completed = [line for line in lines if "event=provider_completed " in line]
+            failed = [line for line in lines if "event=provider_failed " in line]
+            assert len(completed) == len(failed) == 1
+            assert "provider=good " in completed[0]
+            assert "provider=bad " in failed[0]
+            assert f"upstream_code=limited_{label}" in failed[0]
+            assert f"limited_{'beta' if label == 'alpha' else 'alpha'}" not in "\n".join(lines)
+            assert sum("event=http_failed " in line for line in lines) == 1
+            good_lines = [line for line in lines if "provider=good " in line]
+            assert sum("event=http_retrying " in line for line in good_lines) == (
+                1 if label == "alpha" else 2
+            )
+            summaries = [
+                line for line in good_lines if "event=provider_candidates_summary " in line
+            ]
+            assert len(summaries) == 1
+            assert "phase=adapter" in summaries[0]
+            assert "received=5" in summaries[0]
+            assert f"accepted={2 if label == 'alpha' else 3}" in summaries[0]
+            assert f"rejected={3 if label == 'alpha' else 2}" in summaries[0]
+            assert ("missing_url" if label == "alpha" else "invalid_record") in summaries[0]
