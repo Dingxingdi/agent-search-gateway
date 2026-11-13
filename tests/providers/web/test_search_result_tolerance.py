@@ -13,7 +13,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.anysearch import AnySearchAdapter
 from agent_search_gateway.providers.web.brave import BraveAdapter
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
-from agent_search_gateway.providers.web.common import HttpRequester
+from agent_search_gateway.providers.web.common import HttpRequester, JsonRequester
 from agent_search_gateway.providers.web.decodo import DecodoAdapter
 from agent_search_gateway.providers.web.exa import ExaAdapter
 from agent_search_gateway.providers.web.firecrawl import FirecrawlAdapter
@@ -64,7 +64,7 @@ def _exa(executor: RecordingJsonExecutor) -> _SearchAdapter:
     )
 
 
-def _brave(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _brave(executor: JsonRequester) -> _SearchAdapter:
     return BraveAdapter(
         name="brave",
         api_url="https://brave.example.test",
@@ -73,7 +73,7 @@ def _brave(executor: RecordingJsonExecutor) -> _SearchAdapter:
     )
 
 
-def _anysearch(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _anysearch(executor: JsonRequester) -> _SearchAdapter:
     return AnySearchAdapter(
         name="anysearch",
         api_url="https://any.example.test",
@@ -232,6 +232,15 @@ async def test_linkup_skips_only_isolated_malformed_search_results() -> None:
     ]
 
 
+def _linkup(executor: JsonRequester) -> _SearchAdapter:
+    return LinkupAdapter(
+        name="linkup",
+        api_url="https://linkup.example.test",
+        secret=SecretValue("x"),
+        http_executor=executor,
+    )
+
+
 def _brightdata(executor: RecordingHttpExecutor) -> _SearchAdapter:
     return BrightDataAdapter(
         name="brightdata",
@@ -270,7 +279,7 @@ def _scrapingdog(executor: HttpRequester) -> _SearchAdapter:
     )
 
 
-def _scrapegraphai(executor: RecordingHttpExecutor) -> _SearchAdapter:
+def _scrapegraphai(executor: JsonRequester) -> _SearchAdapter:
     return ScrapeGraphAIAdapter(
         name="scrapegraphai",
         api_url="https://scrapegraph.example.test",
@@ -699,3 +708,133 @@ async def test_serp_adapters_classify_decode_without_logging_body(
     assert rendered.count("event=provider_response_diagnostic") == 1
     assert "category=decode" in rendered
     assert "PRIVATE_" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("factory", "envelope"),
+    [
+        (_anysearch, lambda results: {"code": 0, "data": {"results": results}}),
+        (_brave, lambda results: {"web": {"results": results}}),
+        (_linkup, lambda results: {"results": results}),
+        (_scrapegraphai, lambda results: {"results": results}),
+    ],
+    ids=["anysearch", "brave", "linkup", "scrapegraphai"],
+)
+@pytest.mark.parametrize(
+    ("candidates", "rejections"),
+    [
+        (
+            [
+                {"url": "https://example.com/good", "name": "Good", "content": "PRIVATE_CONTENT"},
+                None,
+                {},
+                {"url": None},
+                {"url": " "},
+                {"url": 1},
+                {"url": "https://example.com/bad", "title": []},
+            ],
+            {"missing_url": 3, "invalid_record": 3},
+        ),
+        ([], {}),
+        ([None, {}, {"url": ""}, {"url": 1}], {"missing_url": 2, "invalid_record": 2}),
+    ],
+    ids=["mixed", "empty", "all-invalid"],
+)
+async def test_json_search_adapters_report_response_and_candidate_diagnostics(
+    factory: Callable[[HttpRequester], _SearchAdapter],
+    envelope: Callable[[list[object]], object],
+    candidates: list[object],
+    rejections: dict[str, int],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=envelope(candidates))
+        )
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="json")
+        hits = await factory(executor).search("query")
+    accepted = len(candidates) - sum(rejections.values())
+    assert len(hits) == accepted
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "success"
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": factory.__name__.removeprefix("_"),
+            "stage": "search",
+            "phase": "adapter",
+            "received": len(candidates),
+            "accepted": accepted,
+            "rejected": sum(rejections.values()),
+            "rejection_counts": rejections,
+            "rewritten": 0,
+            "processed": len(candidates),
+            "unprocessed": 0,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("factory", "envelope"),
+    [
+        (_anysearch, lambda results: {"code": 0, "data": {"results": results}}),
+        (_brave, lambda results: {"web": {"results": results}}),
+        (_linkup, lambda results: {"results": results}),
+        (_scrapegraphai, lambda results: {"results": results}),
+    ],
+    ids=["anysearch", "brave", "linkup", "scrapegraphai"],
+)
+@pytest.mark.parametrize("mode", ["success", "invalid-envelope", "decode"])
+async def test_json_search_diagnostics_never_log_candidate_or_response_body(
+    factory: Callable[[HttpRequester], _SearchAdapter],
+    envelope: Callable[[list[object]], object],
+    mode: str,
+) -> None:
+    logger, stream = structured_test_logger("test.json_search.privacy")
+    url = "https://www.google.com/goto?url=https%3A%2F%2Fexample.com"
+    candidate = {
+        "url": url,
+        "name": "Title",
+        "title": "Title",
+        "content": "PRIVATE_CONTENT",
+        "snippet": "PRIVATE_SNIPPET",
+        "description": "PRIVATE_DESCRIPTION",
+        "error": "PRIVATE_ERROR",
+        "message": "PRIVATE_MESSAGE",
+    }
+    payload = envelope([candidate]) if mode == "success" else []
+    response = (
+        httpx.Response(200, text="PRIVATE_INVALID_JSON")
+        if mode == "decode"
+        else httpx.Response(200, json=payload)
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="json", logger=logger
+        )
+        if mode == "success":
+            hits = await factory(executor).search("query")
+            assert [hit.url for hit in hits] == [url]
+        else:
+            with pytest.raises(ExecutionFailure):
+                await factory(executor).search("query")
+    rendered = stream.getvalue()
+    assert rendered.count("event=provider_response_diagnostic") == 1
+    assert "PRIVATE_" not in rendered
+    assert "upstream_message" not in rendered
+    assert "upstream_code" not in rendered
+    if mode == "success":
+        assert "semantic_result=success" in rendered
+    else:
+        assert f"category={'decode' if mode == 'decode' else 'invalid_envelope'}" in rendered
