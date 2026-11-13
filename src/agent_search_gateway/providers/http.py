@@ -13,6 +13,11 @@ from ..errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ..models import RetryPolicy
 from ..observability import elapsed_ms, http_endpoint_for_log, log_event
 from ..retry import retry_async
+from .diagnostics import (
+    best_effort_diagnostics,
+    diagnostic_fields_from_failure,
+    safe_diagnostic_fields,
+)
 
 
 def is_retryable_http_status(status_code: int) -> bool:
@@ -21,18 +26,27 @@ def is_retryable_http_status(status_code: int) -> bool:
 
 
 class _RetryableStatus(Exception):
-    def __init__(self, status_code: int) -> None:
+    def __init__(self, status_code: int, diagnostics: Mapping[str, object]) -> None:
         super().__init__(str(status_code))
         self.status_code = status_code
+        self.diagnostics = dict(diagnostics)
 
 
 class HttpStatusFailure(ExecutionFailure):
     """Internal HTTP failure with a machine-readable terminal status code."""
 
-    def __init__(self, provider_name: str, stage: str, status_code: int) -> None:
+    def __init__(
+        self,
+        provider_name: str,
+        stage: str,
+        status_code: int,
+        *,
+        diagnostics: Mapping[str, object] | None = None,
+    ) -> None:
         super().__init__(
             ErrorCode.ALL_PROVIDERS_FAILED,
             f"{provider_name}/{stage}: HTTP status {status_code}",
+            diagnostics=diagnostics,
         )
         self.status_code = status_code
 
@@ -53,14 +67,15 @@ class ProviderResponseFailure(ExecutionFailure):
         super().__init__(
             ErrorCode.ALL_PROVIDERS_FAILED,
             f"{provider_name}/{stage}: provider response failure: {safe_reason}",
+            diagnostics=diagnostics,
         )
         self.status_code = status_code
         self.retryable = retryable
         self.safe_reason = safe_reason
-        self.diagnostics: Mapping[str, object] = dict(diagnostics)
 
 
 ResponseInspector = Callable[[httpx.Response], ProviderResponseFailure | None]
+ResponseDiagnosticExtractor = Callable[[httpx.Response], Mapping[str, object]]
 
 
 class HttpJsonExecutor:
@@ -93,8 +108,9 @@ class HttpJsonExecutor:
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
-        response, attempt, attempt_started = await self._request_response(
+        response, attempt, attempt_started, diagnostics = await self._request_response(
             method,
             url,
             stage=stage,
@@ -102,6 +118,7 @@ class HttpJsonExecutor:
             params=params,
             json_body=json_body,
             response_inspector=response_inspector,
+            response_diagnostics=response_diagnostics,
         )
         try:
             return response.json()
@@ -112,10 +129,12 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "decode",
+                diagnostics=diagnostics,
             )
             raise ProtocolFailure(
                 ErrorCode.PROTOCOL_ERROR,
                 f"{self._provider_name}/{stage}: response was not valid JSON",
+                diagnostics=diagnostics,
             ) from exc
 
     async def request_text(
@@ -127,14 +146,16 @@ class HttpJsonExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
-        response, _, _ = await self._request_response(
+        response, _, _, _ = await self._request_response(
             method,
             url,
             stage=stage,
             headers=headers,
             params=params,
             json_body=json_body,
+            response_diagnostics=response_diagnostics,
         )
         return response.text
 
@@ -148,10 +169,12 @@ class HttpJsonExecutor:
         params: Mapping[str, Any] | None,
         json_body: object | None,
         response_inspector: ResponseInspector | None = None,
-    ) -> tuple[httpx.Response, int, float]:
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
+    ) -> tuple[httpx.Response, int, float, dict[str, object]]:
         attempt = 0
         attempt_started = self._monotonic()
         log_endpoint = http_endpoint_for_log(url)
+        response_fields: dict[str, object] = {}
 
         def before_attempt(current_attempt: int) -> None:
             nonlocal attempt, attempt_started
@@ -171,6 +194,9 @@ class HttpJsonExecutor:
             delay_ms = max(0, int(delay * 1000))
             attempt_elapsed_ms = elapsed_ms(self._monotonic, attempt_started)
             if isinstance(exc, ProviderResponseFailure):
+                details = dict(response_fields)
+                details.pop("category", None)
+                details.update(reason=exc.safe_reason, retryable=exc.retryable)
                 log_event(
                     self._logger,
                     logging.DEBUG,
@@ -184,10 +210,12 @@ class HttpJsonExecutor:
                     category="provider_header",
                     retry_scheduled=True,
                     exc_info=False,
-                    **self._provider_failure_details(exc),
+                    **details,
                 )
                 return
             if isinstance(exc, _RetryableStatus):
+                details = safe_diagnostic_fields(exc.diagnostics)
+                details.pop("category", None)
                 log_event(
                     self._logger,
                     logging.WARNING,
@@ -199,7 +227,8 @@ class HttpJsonExecutor:
                     delay_ms=delay_ms,
                     elapsed_ms=attempt_elapsed_ms,
                     category="status",
-                    status=exc.status_code,
+                    exc_info=False,
+                    **details,
                 )
                 return
             log_event(
@@ -217,6 +246,7 @@ class HttpJsonExecutor:
             )
 
         async def operation() -> httpx.Response:
+            nonlocal response_fields
             response = await self._client.request(
                 method,
                 url,
@@ -225,23 +255,58 @@ class HttpJsonExecutor:
                 json=json_body,
                 timeout=self._retry_policy.request_timeout_seconds,
             )
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "http_attempt_completed",
-                provider=self._provider_name,
-                stage=stage,
-                endpoint=log_endpoint,
-                attempt=attempt,
-                status=response.status_code,
-                elapsed_ms=elapsed_ms(self._monotonic, attempt_started),
+            response_fields = safe_diagnostic_fields(
+                {
+                    "status": response.status_code,
+                    "http_status": response.status_code,
+                    "response_bytes": len(response.content),
+                    "content_type": response.headers.get("content-type"),
+                }
             )
-            if response_inspector is not None:
-                failure = response_inspector(response)
-                if failure is not None:
-                    raise failure
+            context: dict[str, object] = {
+                **response_fields,
+                "provider": self._provider_name,
+                "stage": stage,
+                "endpoint": log_endpoint,
+                "attempt": attempt,
+                "elapsed_ms": elapsed_ms(self._monotonic, attempt_started),
+            }
+            log_event(
+                self._logger, logging.DEBUG, "http_attempt_completed", exc_info=False, **context
+            )
+            failure: ProviderResponseFailure | None = None
+            try:
+                if response_inspector is not None:
+                    failure = response_inspector(response)
+            finally:
+                extracted: dict[str, object] = {}
+                try:
+                    if response_diagnostics is not None:
+                        extracted = best_effort_diagnostics(lambda: response_diagnostics(response))
+                finally:
+                    inspector_fields = (
+                        self._provider_response_fields(failure) if failure is not None else {}
+                    )
+                    selected = {**extracted, **inspector_fields}
+                    for name in ("status", "http_status", "response_bytes", "content_type"):
+                        selected.pop(name, None)
+                    response_fields = {**selected, **response_fields}
+                    if failure is not None:
+                        response_fields.update(
+                            category="provider_response", semantic_result="error"
+                        )
+                    diagnostic_context = {**response_fields, **context}
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "provider_response_diagnostic",
+                        exc_info=False,
+                        **diagnostic_context,
+                    )
+            if failure is not None:
+                raise failure
             if is_retryable_http_status(response.status_code):
-                raise _RetryableStatus(response.status_code)
+                raise _RetryableStatus(response.status_code, response_fields)
             return response
 
         try:
@@ -255,15 +320,25 @@ class HttpJsonExecutor:
                 adjust_delay=self._adjust_retry_delay if response_inspector is not None else None,
             )
         except ProviderResponseFailure as exc:
+            terminal = ProviderResponseFailure(
+                self._provider_name,
+                stage,
+                status_code=exc.status_code,
+                retryable=exc.retryable,
+                safe_reason=exc.safe_reason,
+                diagnostics=response_fields,
+            )
+            terminal.code, terminal.message, terminal.reason = exc.code, exc.message, exc.reason
+            terminal.args = exc.args
             self._log_failed(
                 stage,
                 log_endpoint,
                 attempt,
                 attempt_started,
                 "provider_header",
-                provider_failure=exc,
+                provider_failure=terminal,
             )
-            raise
+            raise terminal from exc
         except _RetryableStatus as exc:
             self._log_failed(
                 stage,
@@ -271,9 +346,9 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "status",
-                status=exc.status_code,
+                diagnostics=exc.diagnostics,
             )
-            raise self._status_failure(stage, exc.status_code) from exc
+            raise self._status_failure(stage, exc.status_code, exc.diagnostics) from exc
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             self._log_failed(
                 stage,
@@ -292,10 +367,10 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "status",
-                status=response.status_code,
+                diagnostics=response_fields,
             )
-            raise self._status_failure(stage, response.status_code)
-        return response, attempt, attempt_started
+            raise self._status_failure(stage, response.status_code, response_fields)
+        return response, attempt, attempt_started, response_fields
 
     def _log_failed(
         self,
@@ -305,20 +380,19 @@ class HttpJsonExecutor:
         started: float,
         category: str,
         *,
-        status: int | None = None,
         transport_type: str | None = None,
         provider_failure: ProviderResponseFailure | None = None,
+        diagnostics: Mapping[str, object] | None = None,
     ) -> None:
         attempt_elapsed_ms = elapsed_ms(self._monotonic, started)
-        details: dict[str, object] = {}
+        details = safe_diagnostic_fields(diagnostics or {})
+        details.pop("category", None)
         if provider_failure is not None:
             details.update(self._provider_failure_details(provider_failure))
             details["retry_scheduled"] = False
             details["terminal_reason"] = (
                 "exhausted" if provider_failure.retryable else "non_retryable"
             )
-        if status is not None:
-            details["status"] = status
         if transport_type is not None:
             details["transport_type"] = transport_type
         log_event(
@@ -336,30 +410,34 @@ class HttpJsonExecutor:
         )
 
     @staticmethod
-    def _provider_failure_details(failure: ProviderResponseFailure) -> dict[str, object]:
-        reserved = {
-            "logger",
-            "level",
-            "event",
-            "exc_info",
-            "request",
-            "provider",
-            "stage",
-            "endpoint",
-            "attempt",
-            "status",
-            "category",
-            "elapsed_ms",
-            "delay_ms",
-            "transport_type",
-            "reason",
-            "retryable",
-            "retry_scheduled",
-            "terminal_reason",
-        }
-        details = {key: value for key, value in failure.diagnostics.items() if key not in reserved}
+    def _provider_response_fields(failure: ProviderResponseFailure) -> dict[str, object]:
+        details = safe_diagnostic_fields(failure.diagnostics)
+        # The existing Bright Data inspector has already selected these legacy scalars.
+        status = failure.diagnostics.get("brightdata_status")
+        if type(status) is int and 100 <= status <= 599:
+            details["brightdata_status"] = status
+        code = failure.diagnostics.get("brightdata_error_code")
+        if type(code) is str and code in {
+            "captcha",
+            "timeout",
+            "expect_element",
+            "expect_body",
+            "missing",
+            "invalid",
+            "unknown",
+        }:
+            details["brightdata_error_code"] = code
+        return details
+
+    @classmethod
+    def _provider_failure_details(cls, failure: ProviderResponseFailure) -> dict[str, object]:
+        details = diagnostic_fields_from_failure(failure)
+        legacy = cls._provider_response_fields(failure)
+        for name in ("brightdata_status", "brightdata_error_code"):
+            if name in legacy:
+                details[name] = legacy[name]
         details.update(
-            status=failure.status_code,
+            status=details.get("status", failure.status_code),
             reason=failure.safe_reason,
             retryable=failure.retryable,
         )
@@ -383,8 +461,13 @@ class HttpJsonExecutor:
             _RetryableStatus | httpx.TimeoutException | httpx.TransportError,
         )
 
-    def _status_failure(self, stage: str, status_code: int) -> HttpStatusFailure:
-        return HttpStatusFailure(self._provider_name, stage, status_code)
+    def _status_failure(
+        self,
+        stage: str,
+        status_code: int,
+        diagnostics: Mapping[str, object],
+    ) -> HttpStatusFailure:
+        return HttpStatusFailure(self._provider_name, stage, status_code, diagnostics=diagnostics)
 
     def _execution_failure(self, stage: str, reason: str) -> ExecutionFailure:
         return ExecutionFailure(

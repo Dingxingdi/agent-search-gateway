@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 from ...errors import ErrorCode, ProtocolFailure
 from ...observability import log_event
+from ..http import ResponseDiagnosticExtractor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class AcademicHttpExecutor(Protocol):
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object: ...
 
     async def request_text(
@@ -34,6 +36,7 @@ class AcademicHttpExecutor(Protocol):
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str: ...
 
 

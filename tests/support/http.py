@@ -3,7 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agent_search_gateway.providers.http import ResponseInspector
+from agent_search_gateway.providers.http import ResponseDiagnosticExtractor, ResponseInspector
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +32,7 @@ class RecordingJsonExecutor:
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
         self.requests.append(
             RecordedRequest(method, url, stage, headers, params, json_body, "json")
@@ -47,6 +48,7 @@ class RecordingJsonExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
         self.requests.append(
             RecordedRequest(method, url, stage, headers, params, json_body, "text")
@@ -79,6 +81,7 @@ class RecordingTextExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
         self.requests.append(
             RecordedRequest(method, url, stage, headers, params, json_body, "text")
@@ -112,6 +115,7 @@ class RecordingHttpExecutor:
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
         self.requests.append(
             RecordedRequest(method, url, stage, headers, params, json_body, "json")
@@ -132,6 +136,7 @@ class RecordingHttpExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
+        response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
         self.requests.append(
             RecordedRequest(method, url, stage, headers, params, json_body, "text")

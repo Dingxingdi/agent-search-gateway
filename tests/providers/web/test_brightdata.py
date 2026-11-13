@@ -500,11 +500,13 @@ async def test_brightdata_search_classifies_masked_captcha_before_json_decode() 
     async def sleep(delay: float) -> None:
         sleeps.append(delay)
 
+    logger, stream = structured_test_logger("tests.brightdata.response-diagnostic")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         executor = HttpJsonExecutor(
             client,
             RetryPolicy(1, 0.25, 2.0, 30.0),
             provider_name="brightdata",
+            logger=logger,
             sleep=sleep,
         )
         with pytest.raises(ProviderResponseFailure) as caught:
@@ -514,10 +516,26 @@ async def test_brightdata_search_classifies_masked_captcha_before_json_decode() 
     assert failure.code is ErrorCode.ALL_PROVIDERS_FAILED
     assert failure.status_code == 200
     assert failure.retryable is True
-    assert failure.diagnostics == {"brightdata_error_code": "captcha", "brightdata_status": 502}
+    assert failure.diagnostics == {
+        "brightdata_error_code": "captcha",
+        "brightdata_status": 502,
+        "status": 200,
+        "http_status": 200,
+        "response_bytes": 0,
+        "category": "provider_response",
+        "semantic_result": "error",
+    }
     assert failure.safe_reason == "redirect location was rejected"
     assert len(requests) == 1
     assert sleeps == []
+    lines = stream.getvalue().splitlines()
+    assert sum("event=http_attempt_completed " in line for line in lines) == 1
+    diagnostics = [line for line in lines if "event=provider_response_diagnostic " in line]
+    assert len(diagnostics) == 1
+    assert "http_status=200" in diagnostics[0]
+    assert "brightdata_status=502" in diagnostics[0]
+    assert "brightdata_error_code=captcha" in diagnostics[0]
+    assert "category=decode" not in stream.getvalue()
 
 
 @pytest.mark.parametrize("code", ["captcha", "timeout", "expect_element", "expect_body"])
