@@ -124,12 +124,15 @@ def test_agent_config_rejects_unknown_harness() -> None:
         ("max_concurrency", True),
         ("max_concurrency", 1.5),
         ("timeout_seconds", False),
+        ("timeout_seconds", True),
+        ("timeout_seconds", None),
+        ("timeout_seconds", "3600"),
+        ("timeout_seconds", -0.5),
         ("timeout_seconds", float("nan")),
         ("timeout_seconds", float("inf")),
         ("timeout_seconds", float("-inf")),
         ("timeout_seconds", 0),
         ("timeout_seconds", -1),
-        ("timeout_seconds", 540.1),
         ("pass_env", "NAME"),
         ("pass_env", [1]),
         ("pass_env", [""]),
@@ -192,7 +195,12 @@ def test_agent_config_rejects_invalid_namespace(key: str, value: object) -> None
         resolve_config(data, ProviderRegistry(), _environment())
 
 
-@pytest.mark.parametrize("timeout", [0.5, 300, 540])
+def test_agent_timeout_has_no_gateway_upper_bound() -> None:
+    config = resolve_config(_agent_data(timeout_seconds=3600), ProviderRegistry(), _environment())
+    assert config.agent.providers[0].timeout_seconds == 3600
+
+
+@pytest.mark.parametrize("timeout", [0.5, 300, 540, 540.1, 3600, 7200])
 @pytest.mark.parametrize("concurrency", [1, 2])
 def test_agent_valid_numeric_boundaries(timeout: float, concurrency: int) -> None:
     data = _agent_data(timeout_seconds=timeout, max_concurrency=concurrency, pass_env=["_OK", "A2"])

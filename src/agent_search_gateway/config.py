@@ -650,8 +650,6 @@ def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
                 f"{label}.command must be one executable name or path without flags"
             )
         timeout_value = table.get("timeout_seconds", 300)
-        if isinstance(timeout_value, int | float) and timeout_value > 540:
-            raise _config_error(f"{label}.timeout_seconds must not exceed 540")
         timeout = _positive_float(timeout_value, f"{label}.timeout_seconds")
         pass_env = table.get("pass_env", [])
         if not isinstance(pass_env, list) or not all(
