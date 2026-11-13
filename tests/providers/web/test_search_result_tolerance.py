@@ -1,5 +1,7 @@
+import json
 import logging
 from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -7,7 +9,7 @@ import pytest
 
 from agent_search_gateway.errors import ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
-from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
 from agent_search_gateway.providers.contracts import KeywordSearchHit
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.anysearch import AnySearchAdapter
@@ -37,7 +39,7 @@ AdapterFactory = Callable[[RecordingJsonExecutor], _SearchAdapter]
 NewAdapterFactory = Callable[[RecordingHttpExecutor], _SearchAdapter]
 
 
-def _firecrawl(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _firecrawl(executor: JsonRequester) -> _SearchAdapter:
     return FirecrawlAdapter(
         name="firecrawl",
         api_url="https://fire.example.test",
@@ -46,7 +48,7 @@ def _firecrawl(executor: RecordingJsonExecutor) -> _SearchAdapter:
     )
 
 
-def _tavily(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _tavily(executor: JsonRequester) -> _SearchAdapter:
     return TavilyAdapter(
         name="tavily",
         api_url="https://tavily.example.test",
@@ -55,7 +57,7 @@ def _tavily(executor: RecordingJsonExecutor) -> _SearchAdapter:
     )
 
 
-def _exa(executor: RecordingJsonExecutor) -> _SearchAdapter:
+def _exa(executor: JsonRequester) -> _SearchAdapter:
     return ExaAdapter(
         name="exa",
         api_url="https://exa.example.test",
@@ -838,3 +840,161 @@ async def test_json_search_diagnostics_never_log_candidate_or_response_body(
         assert "semantic_result=success" in rendered
     else:
         assert f"category={'decode' if mode == 'decode' else 'invalid_envelope'}" in rendered
+
+
+@pytest.mark.parametrize(
+    ("factory", "provider", "body_fields", "expected_snippet", "expected_raw", "expected_content"),
+    [
+        (
+            _tavily,
+            "tavily",
+            {"content": "PRIVATE_TAVILY_CONTENT error=body", "raw_content": "PRIVATE_TAVILY_RAW"},
+            "PRIVATE_TAVILY_CONTENT error=body",
+            "PRIVATE_TAVILY_RAW",
+            "",
+        ),
+        (
+            _exa,
+            "exa",
+            {"text": "PRIVATE_EXA_TEXT error=body", "highlights": ["PRIVATE_EXA_HIGHLIGHT"]},
+            "PRIVATE_EXA_HIGHLIGHT",
+            "PRIVATE_EXA_TEXT error=body",
+            "PRIVATE_EXA_TEXT error=body",
+        ),
+        (
+            _firecrawl,
+            "firecrawl",
+            {"markdown": "PRIVATE_FIRE_MARKDOWN error=body", "rawHtml": "PRIVATE_FIRE_RAW"},
+            "Firecrawl snippet",
+            "PRIVATE_FIRE_RAW",
+            "PRIVATE_FIRE_MARKDOWN error=body",
+        ),
+    ],
+    ids=["tavily", "exa", "firecrawl"],
+)
+@pytest.mark.parametrize("candidate_mode", ["mixed", "empty", "all-invalid"])
+async def test_content_search_adapters_report_counts_without_logging_bodies(
+    factory: Callable[[JsonRequester], _SearchAdapter],
+    provider: str,
+    body_fields: dict[str, object],
+    expected_snippet: str,
+    expected_raw: str,
+    expected_content: str,
+    candidate_mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    fixture = Path(__file__).parents[2] / "fixtures/providers" / provider / "search.json"
+    payload = json.loads(fixture.read_text(encoding="utf-8"))
+    results = payload["data"]["web"] if provider == "firecrawl" else payload["results"]
+    results[0].update(body_fields)
+    results[0]["error"] = {"message": "PRIVATE_CANDIDATE_ERROR"}
+    results.extend([{}, {"url": "https://example.com/bad", "title": []}, None])
+    if candidate_mode == "empty":
+        results.clear()
+    elif candidate_mode == "all-invalid":
+        results.pop(0)
+    response = httpx.Response(200, json=payload)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name=provider)
+        hits = await factory(executor).search("query")
+    accepted = 1 if candidate_mode == "mixed" else 0
+    rejections = {} if candidate_mode == "empty" else {"missing_url": 1, "invalid_record": 2}
+    assert len(hits) == accepted
+    if hits:
+        assert hits[0].url == results[0]["url"]
+        assert hits[0].snippet == expected_snippet
+        assert hits[0].raw_content == expected_raw
+        assert hits[0].content == expected_content
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": provider,
+            "stage": "search",
+            "phase": "adapter",
+            "received": len(results),
+            "accepted": accepted,
+            "rejected": sum(rejections.values()),
+            "rejection_counts": rejections,
+            "rewritten": 0,
+            "processed": len(results),
+            "unprocessed": 0,
+        }
+    ]
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "success"
+    assert diagnostics[0]["response_bytes"] == len(response.content)
+    formatter = KeyValueFormatter(SecretRedactor())
+    rendered = "\n".join(formatter.format(record) for record in caplog.records)
+    assert "PRIVATE_" not in rendered
+    assert "upstream_message" not in rendered
+
+
+@pytest.mark.parametrize("factory", [_tavily, _exa], ids=["tavily", "exa"])
+async def test_content_search_adapters_observe_only_explicit_api_errors(
+    factory: Callable[[JsonRequester], _SearchAdapter],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    payload = {
+        "error": {"code": "quota", "message": "quota exhausted", "content": "PRIVATE_ERROR_BODY"},
+        "results": [],
+        "content": {"error": "PRIVATE_BODY_ERROR"},
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="content")
+        assert await factory(executor).search("query") == []
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "error"
+    formatter = KeyValueFormatter(SecretRedactor())
+    rendered = "\n".join(formatter.format(record) for record in caplog.records)
+    assert "upstream_code=quota" in rendered
+    assert 'upstream_message="quota exhausted"' in rendered
+    assert "PRIVATE_" not in rendered
+
+
+@pytest.mark.parametrize("factory", [_tavily, _exa, _firecrawl], ids=["tavily", "exa", "firecrawl"])
+@pytest.mark.parametrize("mode", ["invalid-envelope", "decode"])
+async def test_content_search_adapters_classify_invalid_responses_without_logging_body(
+    factory: Callable[[JsonRequester], _SearchAdapter],
+    mode: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    response = (
+        httpx.Response(200, text="PRIVATE_INVALID_JSON")
+        if mode == "decode"
+        else httpx.Response(200, json=["PRIVATE_INVALID_ENVELOPE"])
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="content")
+        with pytest.raises(ExecutionFailure):
+            await factory(executor).search("query")
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["category"] == ("decode" if mode == "decode" else "invalid_envelope")
+    formatter = KeyValueFormatter(SecretRedactor())
+    rendered = "\n".join(formatter.format(record) for record in caplog.records)
+    assert "PRIVATE_" not in rendered
+    assert "upstream_message" not in rendered
+    assert "event=provider_candidates_summary" not in rendered

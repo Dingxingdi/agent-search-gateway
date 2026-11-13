@@ -1,11 +1,18 @@
 """Exa search and contents adapter."""
 
+import logging
+from collections.abc import Mapping
+
+import httpx
+
 from ...errors import ExecutionFailure
-from ...observability import SecretValue
+from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
+from ..diagnostics import CandidateCounts
 from .common import (
     JsonRequester,
+    candidate_rejection_reason,
     endpoint,
     failure,
     non_empty_string,
@@ -13,7 +20,27 @@ from .common import (
     optional_string,
     require_list,
     require_object,
+    selected_error_fields,
 )
+
+
+def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    if not isinstance(payload, dict):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    if payload.get("error") is not None:
+        return {
+            "category": "provider_response",
+            "semantic_result": "error",
+            "response_kind": "object",
+            **selected_error_fields(payload["error"]),
+        }
+    if not isinstance(payload.get("results"), list):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
 
 
 class ExaAdapter:
@@ -39,11 +66,13 @@ class ExaAdapter:
             "POST",
             endpoint(self._api_url, "/search"),
             stage="search",
+            response_diagnostics=_search_response_diagnostics,
             headers=self._headers,
             json_body={"query": query, "contents": {"text": True, "highlights": True}},
         )
         root = require_object(payload, self.name, "search", "response")
         results = require_list(root.get("results"), self.name, "search", "results")
+        counts = CandidateCounts(len(results))
         hits: list[KeywordSearchHit] = []
         for item in results:
             try:
@@ -62,7 +91,19 @@ class ExaAdapter:
                     )
                 )
             except ExecutionFailure:
+                counts.reject(candidate_rejection_reason(item, "url"))
                 continue
+            counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:

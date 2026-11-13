@@ -1,17 +1,25 @@
 """Firecrawl v2 search and scrape adapter."""
 
+import logging
+from collections.abc import Mapping
+
+import httpx
+
 from ...errors import ExecutionFailure
-from ...observability import SecretValue
+from ...observability import SecretValue, log_event
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
+from ..diagnostics import CandidateCounts, best_effort_diagnostics
 from .common import (
     JsonRequester,
+    candidate_rejection_reason,
     endpoint,
     failure,
     non_empty_string,
     optional_string,
     require_list,
     require_object,
+    selected_error_fields,
 )
 
 
@@ -33,6 +41,26 @@ def _page_body(
     if not raw.strip():
         raise failure(provider, stage, "page body is empty")
     return URLFetchCandidate(raw_content=raw, content=markdown)
+
+
+def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    if not isinstance(payload, dict):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    if payload.get("success") is not True:
+        return {
+            "category": "provider_response",
+            "semantic_result": "error",
+            "response_kind": "object",
+            **selected_error_fields(payload.get("error")),
+        }
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("web"), list):
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
 
 
 class FirecrawlAdapter:
@@ -58,6 +86,7 @@ class FirecrawlAdapter:
             "POST",
             _v2_endpoint(self._api_url, "search"),
             stage="search",
+            response_diagnostics=_search_response_diagnostics,
             headers=self._headers,
             json_body={
                 "query": query,
@@ -68,6 +97,7 @@ class FirecrawlAdapter:
         root = self._successful_root(payload, "search")
         data = require_object(root.get("data"), self.name, "search", "data")
         web = require_list(data.get("web"), self.name, "search", "data.web")
+        counts = CandidateCounts(len(web))
         hits: list[KeywordSearchHit] = []
         for item in web:
             try:
@@ -96,7 +126,19 @@ class FirecrawlAdapter:
                     )
                 )
             except ExecutionFailure:
+                counts.reject(candidate_rejection_reason(item, "url"))
                 continue
+            counts.accept()
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "provider_candidates_summary",
+            provider=self.name,
+            stage="search",
+            phase="adapter",
+            exc_info=False,
+            **counts.as_fields(),
+        )
         return hits
 
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:
@@ -114,5 +156,14 @@ class FirecrawlAdapter:
     def _successful_root(self, payload: object, stage: str) -> dict[str, object]:
         root = require_object(payload, self.name, stage, "response")
         if root.get("success") is not True:
-            raise failure(self.name, stage, "provider reported failure")
+            raise failure(
+                self.name,
+                stage,
+                "provider reported failure",
+                diagnostics=best_effort_diagnostics(
+                    lambda: selected_error_fields(root.get("error"))
+                )
+                if stage == "search"
+                else None,
+            )
         return root
