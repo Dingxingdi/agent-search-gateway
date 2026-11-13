@@ -44,6 +44,50 @@ def _orchestrator(
     )
 
 
+async def test_keyword_hit_uses_google_goto_destination(tmp_path: Path) -> None:
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [
+            KeywordSearchHit(
+                "https://www.google.com/goto?url=https%3A%2F%2Fexample.org%2Fpaper%3Fx%3D1",
+                snippet="Paper",
+            )
+        ],
+    )
+    path = Path(
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000007")
+    )
+    assert path.read_text(encoding="utf-8") == (
+        '{"url":"https://example.org/paper?x=1","abstract":"Paper"}\n'
+    )
+
+
+@pytest.mark.parametrize("snippet", ["Paper", ""])
+async def test_invalid_google_goto_is_rejected_before_abstract(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, snippet: str
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [KeywordSearchHit("https://google.com/goto?url=opaque-test-value", snippet=snippet)],
+    )
+    path = Path(
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000008")
+    )
+    assert path.read_text(encoding="utf-8") == ""
+    rejections = [
+        record
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "candidate_rejected"
+    ]
+    assert len(rejections) == 1
+    assert getattr(rejections[0], "gateway_fields", None) == {
+        "provider": "web",
+        "reason": "recognized_invalid_redirect",
+    }
+    assert "opaque-test-value" not in repr([vars(record) for record in caplog.records])
+
+
 @pytest.mark.parametrize("header_failure", [False, True], ids=["execution", "provider-header"])
 async def test_keyword_search_uses_pipeline_completion_rules(
     tmp_path: Path, header_failure: bool

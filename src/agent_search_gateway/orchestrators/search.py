@@ -32,6 +32,7 @@ from ..providers.contracts import (
 from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
 from ..request_ids import validate_request_id
 from ..result_writer import ResultWriter
+from ..search_result_urls import InvalidSearchResultRedirect, unwrap_search_result_url
 from ..url_normalization import NormalizedURL, normalize_url
 from ..url_store import URLStore
 from .paper import finalize_paper_hits
@@ -641,12 +642,23 @@ class SearchOrchestrator:
             if not isinstance(value, str):
                 raise TypeError("keyword hit fields must be strings")
 
+        try:
+            result_url = unwrap_search_result_url(hit.url)
+        except InvalidSearchResultRedirect:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "candidate_rejected",
+                provider=provider,
+                reason="recognized_invalid_redirect",
+            )
+            return None
         abstract = hit.snippet.strip() or hit.title.strip()
         if not abstract:
             try:
-                logged_url = target_url_for_log(str(normalize_url(hit.url)))
+                logged_url = target_url_for_log(str(normalize_url(result_url)))
             except InputFailure:
-                logged_url = target_url_for_log(hit.url)
+                logged_url = target_url_for_log(result_url)
             log_event(
                 self._logger,
                 logging.DEBUG,
@@ -656,7 +668,7 @@ class SearchOrchestrator:
                 reason="empty_abstract",
             )
             return None
-        url = normalize_url(hit.url)
+        url = normalize_url(result_url)
         log_event(
             self._logger,
             logging.DEBUG,
