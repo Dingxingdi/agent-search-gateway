@@ -5,6 +5,12 @@ import pytest
 
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from agent_search_gateway.providers.academic.dblp import DblpProvider
+from tests.support.academic_diagnostics import (
+    academic_response,
+    assert_candidate_counts,
+    assert_private_payload_absent,
+    assert_response_classification,
+)
 from tests.support.http import RecordingJsonExecutor
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "providers" / "academic" / "dblp"
@@ -68,10 +74,6 @@ async def test_xml_provider_reports_response_and_candidate_diagnostics(
 
     import httpx
 
-    from agent_search_gateway.models import RetryPolicy
-    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor
-    from agent_search_gateway.providers.http import HttpJsonExecutor
-
     caplog.set_level(logging.DEBUG)
     body = (FIXTURES / "search.xml").read_text().replace("ExampleConf", "PRIVATE_XML_BODY café")
     root = ET.fromstring(body)
@@ -110,10 +112,8 @@ async def test_xml_provider_reports_response_and_candidate_diagnostics(
         content=body.encode("utf-16"),
         headers={"content-type": f"{media_type}; charset=utf-16"},
     )
-    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response)) as client:
-        provider = DblpProvider(
-            HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="dblp")
-        )
+    async with academic_response("dblp", response=response) as executor:
+        provider = DblpProvider(executor)
         if invalid_envelope:
             with pytest.raises(ProtocolFailure) as caught:
                 await provider.search("query")
@@ -126,46 +126,20 @@ async def test_xml_provider_reports_response_and_candidate_diagnostics(
         else:
             assert len(await provider.search("query")) == accepted
 
-    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
-    diagnostics = [
-        vars(record)["gateway_fields"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
-    ]
-    assert len(diagnostics) == 1
-    assert diagnostics[0]["response_kind"] == ("unknown" if case == "decode" else "xml")
-    assert diagnostics[0]["semantic_result"] == ("unknown" if invalid_envelope else "success")
-    if invalid_envelope:
-        assert diagnostics[0]["category"] == ("decode" if case == "decode" else "invalid_envelope")
-    assert diagnostics[0]["http_status"] == 200
-    assert not any(name.startswith("upstream_") for name in diagnostics[0])
-    assert (
-        sum(
-            getattr(record, "gateway_event", None) == "http_attempt_completed" for record in records
-        )
-        == 1
+    records = assert_response_classification(
+        caplog,
+        response,
+        case,
+        response_kind="unknown" if case == "decode" else "xml",
+        invalid_envelope=invalid_envelope,
+        content_type=media_type,
     )
-    assert diagnostics[0]["response_bytes"] == len(response.content)
-    assert diagnostics[0]["content_type"] == media_type
-    summaries = [
-        vars(record)["gateway_fields"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
-    ]
-    assert len(summaries) == (0 if invalid_envelope else 1)
-    if summaries:
-        assert summaries[0]["provider"] == "dblp"
-        assert summaries[0]["stage"] == "paper_search"
-        assert summaries[0]["phase"] == "adapter"
-        assert summaries[0]["received"] == received
-        assert summaries[0]["accepted"] == accepted
-        assert summaries[0]["rejected"] == rejected
-        assert summaries[0]["rejection_counts"] == ({expected_reason: rejected} if rejected else {})
-    rejects = [
-        vars(record)["gateway_fields"]["reason"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "paper_candidate_rejected"
-    ]
-    assert rejects == [expected_reason] * rejected
-    formatter = KeyValueFormatter(SecretRedactor([]))
-    assert "PRIVATE_" not in "\n".join(formatter.format(record) for record in records)
+    assert_candidate_counts(
+        records,
+        "dblp",
+        received,
+        accepted,
+        {expected_reason: rejected} if rejected else {},
+        summary_expected=not invalid_envelope,
+    )
+    assert_private_payload_absent(records)

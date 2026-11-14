@@ -8,18 +8,18 @@ from collections.abc import Mapping
 import httpx
 
 from ...academic.normalization import normalize_openalex_id
-from ...observability import SecretValue, log_event
+from ...observability import SecretValue
 from ..contracts import PaperSearchHit
-from ..diagnostics import CandidateCounts
 from .common import (
     AcademicHttpExecutor,
     as_list,
     as_mapping,
     join_url,
+    json_candidates_diagnostics,
+    map_paper_candidates,
     nonnegative_int,
     parse_iso_date,
     protocol_failure,
-    reject_item,
     text,
 )
 
@@ -48,15 +48,7 @@ def reconstruct_abstract(value: object) -> str:
 
 
 def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
-    try:
-        payload = response.json()
-    except ValueError:
-        return {"category": "decode", "semantic_result": "unknown"}
-    envelope = as_mapping(payload)
-    results = as_list(envelope.get("results")) if envelope is not None else None
-    if results is None:
-        return {"category": "invalid_envelope", "semantic_result": "unknown"}
-    return {"semantic_result": "success", "response_kind": "object"}
+    return json_candidates_diagnostics(response, "results")
 
 
 class OpenAlexProvider:
@@ -89,27 +81,9 @@ class OpenAlexProvider:
         results = as_list(envelope.get("results")) if envelope is not None else None
         if results is None:
             raise protocol_failure(self.name, "response results envelope was invalid")
-        counts = CandidateCounts(len(results))
-        hits: list[PaperSearchHit] = []
-        for item in results:
-            mapped, reason = self._map_item(item)
-            if mapped is None:
-                reject_item(self.name, reason)
-                counts.reject(reason)
-            else:
-                hits.append(mapped)
-                counts.accept()
-        log_event(
-            logging.getLogger(__name__),
-            logging.DEBUG,
-            "provider_candidates_summary",
-            provider=self.name,
-            stage="paper_search",
-            phase="adapter",
-            exc_info=False,
-            **counts.as_fields(),
+        return map_paper_candidates(
+            self.name, results, self._map_item, logger=logging.getLogger(__name__)
         )
-        return hits
 
     def _map_item(self, value: object) -> tuple[PaperSearchHit | None, str]:
         item = as_mapping(value)

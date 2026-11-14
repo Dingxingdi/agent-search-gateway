@@ -70,61 +70,18 @@ def test_zenrows_requires_non_empty_api_url(api_url: object) -> None:
 async def test_fetch_reports_safe_response_diagnostics(
     caplog: pytest.LogCaptureFixture, body: str, status: int, semantic: str
 ) -> None:
-    import logging
+    from tests.support.web_diagnostics import assert_text_fetch_diagnostics
 
-    import httpx
-
-    from agent_search_gateway.models import RetryPolicy
-    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
-    from agent_search_gateway.providers.http import HttpJsonExecutor
-
-    caplog.set_level(logging.DEBUG)
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                status,
-                text=body,
-                headers={
-                    "content-type": "text/markdown",
-                    "x-brd-status-code": "502",
-                    "x-brd-error-code": "captcha",
-                },
-            )
-        )
-    ) as client:
-        adapter = ZenRowsAdapter(
+    await assert_text_fetch_diagnostics(
+        caplog,
+        "zenrows",
+        lambda executor: ZenRowsAdapter(
             name="zenrows",
             api_url="https://zenrows.example.test",
             secret=SecretValue("PRIVATE_AUTH"),
-            http_executor=HttpJsonExecutor(
-                client, RetryPolicy(1, 0, 0, 5), provider_name="zenrows"
-            ),
-        )
-        target = normalize_url("https://example.com/page?key=PRIVATE_QUERY")
-        if semantic == "success":
-            assert await adapter.fetch(target) == URLFetchCandidate(body, body)
-        else:
-            with pytest.raises(ExecutionFailure) as caught:
-                await adapter.fetch(target)
-            expected = "page body is empty" if semantic == "empty" else "HTTP status 403"
-            assert caught.value.message == f"zenrows/fetch: {expected}"
-            assert caught.value.diagnostics["semantic_result"] == semantic
-    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
-    diagnostics = [
-        vars(record)["gateway_fields"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
-    ]
-    assert len(diagnostics) == 1
-    assert diagnostics[0]["semantic_result"] == semantic
-    assert diagnostics[0]["response_kind"] == "text"
-    assert diagnostics[0]["http_status"] == status
-    assert diagnostics[0]["response_bytes"] == len(body.encode())
-    assert diagnostics[0]["content_type"] == "text/markdown"
-    assert "upstream_message" not in diagnostics[0]
-    assert "upstream_code" not in diagnostics[0]
-    rendered = "\n".join(
-        KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")])).format(record)
-        for record in records
+            http_executor=executor,
+        ),
+        body,
+        status,
+        semantic,
     )
-    assert "PRIVATE_" not in rendered

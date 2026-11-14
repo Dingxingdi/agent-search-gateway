@@ -15,9 +15,11 @@ from .common import (
     candidate_rejection_reason,
     endpoint,
     failure,
+    fetch_response_diagnostics,
     non_empty_string,
     normalized_match,
     optional_string,
+    parse_fetch_with_diagnostics,
     require_list,
     require_object,
     require_string,
@@ -174,30 +176,12 @@ class ParallelAdapter:
                 "advanced_settings": advanced_settings,
             },
         )
-        try:
-            return self._parse_fetch(payload, url)
-        except ExecutionFailure as exc:
-            exc.diagnostics = safe_diagnostic_fields(
-                {
-                    "category": "invalid_envelope",
-                    "semantic_result": "error",
-                    **exc.diagnostics,
-                }
-            )
-            raise
+        return parse_fetch_with_diagnostics(payload, lambda value: self._parse_fetch(value, url))
 
     def _fetch_response_diagnostics(
         self, response: httpx.Response, url: NormalizedURL
     ) -> Mapping[str, object]:
-        try:
-            payload = response.json()
-        except ValueError:
-            return {"category": "decode", "semantic_result": "unknown"}
-        try:
-            self._parse_fetch(payload, url)
-        except ExecutionFailure as exc:
-            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
-        return {"response_kind": "object", "semantic_result": "success"}
+        return fetch_response_diagnostics(response, lambda value: self._parse_fetch(value, url))
 
     def _parse_fetch(self, payload: object, url: NormalizedURL) -> URLFetchCandidate:
         root = require_object(payload, self.name, "fetch", "response")

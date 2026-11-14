@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from typing import Any, Protocol
 
+import httpx
+
 from ...errors import ErrorCode, ProtocolFailure
 from ...observability import log_event
+from ..contracts import PaperSearchHit
+from ..diagnostics import CandidateCounts
 from ..http import ResponseDiagnosticExtractor
 
 _LOGGER = logging.getLogger(__name__)
@@ -64,6 +68,51 @@ def reject_item(provider: str, reason: str = "invalid_record_shape") -> None:
         provider=provider,
         reason=reason,
     )
+
+
+def json_candidates_diagnostics(response: httpx.Response, *path: str) -> Mapping[str, object]:
+    """Classify only a known candidate-list envelope, without inspecting records."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"category": "decode", "semantic_result": "unknown"}
+    for key in path:
+        envelope = as_mapping(payload)
+        payload = envelope.get(key) if envelope is not None else None
+    if as_list(payload) is None:
+        return {"category": "invalid_envelope", "semantic_result": "unknown"}
+    return {"semantic_result": "success", "response_kind": "object"}
+
+
+def map_paper_candidates(
+    provider: str,
+    items: list[object],
+    map_item: Callable[[object], tuple[PaperSearchHit | None, str]],
+    *,
+    logger: logging.Logger,
+) -> list[PaperSearchHit]:
+    """Preserve lenient adapter mapping and its shared rejection/count contract."""
+    counts = CandidateCounts(len(items))
+    hits: list[PaperSearchHit] = []
+    for item in items:
+        mapped, reason = map_item(item)
+        if mapped is None:
+            reject_item(provider, reason)
+            counts.reject(reason)
+        else:
+            hits.append(mapped)
+            counts.accept()
+    log_event(
+        logger,
+        logging.DEBUG,
+        "provider_candidates_summary",
+        provider=provider,
+        stage="paper_search",
+        phase="adapter",
+        exc_info=False,
+        **counts.as_fields(),
+    )
+    return hits
 
 
 def as_mapping(value: object) -> Mapping[str, object] | None:

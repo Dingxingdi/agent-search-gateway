@@ -6,18 +6,18 @@ from urllib.parse import urlencode
 
 import httpx
 
-from ...errors import ExecutionFailure
-from ...observability import SecretValue, log_event
+from ...observability import SecretValue
 from ...providers.contracts import KeywordSearchHit, URLFetchCandidate
 from ...url_normalization import NormalizedURL
-from ..diagnostics import CandidateCounts, safe_diagnostic_fields
+from ..diagnostics import safe_diagnostic_fields
 from .common import (
     JsonRequester,
-    candidate_rejection_reason,
     failure,
+    fetch_response_diagnostics,
+    keyword_hits_from_results,
     non_empty_string,
     normalized_match,
-    optional_string,
+    parse_fetch_with_diagnostics,
     require_list,
     require_object,
     selected_error_fields,
@@ -65,38 +65,7 @@ class TinyFishAdapter:
         )
         root = require_object(payload, self.name, "search", "response")
         results = require_list(root.get("results"), self.name, "search", "results")
-        counts = CandidateCounts(len(results))
-        hits: list[KeywordSearchHit] = []
-        for item in results:
-            try:
-                result = require_object(item, self.name, "search", "result")
-                url = non_empty_string(result.get("url"), self.name, "search", "result.url")
-                hits.append(
-                    KeywordSearchHit(
-                        url=url,
-                        title=optional_string(
-                            result.get("title"), self.name, "search", "result.title"
-                        ),
-                        snippet=optional_string(
-                            result.get("snippet"), self.name, "search", "result.snippet"
-                        ),
-                    )
-                )
-            except ExecutionFailure:
-                counts.reject(candidate_rejection_reason(item, "url"))
-                continue
-            counts.accept()
-        log_event(
-            logging.getLogger(__name__),
-            logging.DEBUG,
-            "provider_candidates_summary",
-            provider=self.name,
-            stage="search",
-            phase="adapter",
-            exc_info=False,
-            **counts.as_fields(),
-        )
-        return hits
+        return keyword_hits_from_results(results, self.name, logger=logging.getLogger(__name__))
 
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:
         payload = await self._http.request_json(
@@ -112,30 +81,12 @@ class TinyFishAdapter:
                 "image_links": False,
             },
         )
-        try:
-            return self._parse_fetch(payload, url)
-        except ExecutionFailure as exc:
-            exc.diagnostics = safe_diagnostic_fields(
-                {
-                    "category": "invalid_envelope",
-                    "semantic_result": "error",
-                    **exc.diagnostics,
-                }
-            )
-            raise
+        return parse_fetch_with_diagnostics(payload, lambda value: self._parse_fetch(value, url))
 
     def _fetch_response_diagnostics(
         self, response: httpx.Response, url: NormalizedURL
     ) -> Mapping[str, object]:
-        try:
-            payload = response.json()
-        except ValueError:
-            return {"category": "decode", "semantic_result": "unknown"}
-        try:
-            self._parse_fetch(payload, url)
-        except ExecutionFailure as exc:
-            return {"category": "invalid_envelope", "semantic_result": "error", **exc.diagnostics}
-        return {"response_kind": "object", "semantic_result": "success"}
+        return fetch_response_diagnostics(response, lambda value: self._parse_fetch(value, url))
 
     def _parse_fetch(self, payload: object, url: NormalizedURL) -> URLFetchCandidate:
         root = require_object(payload, self.name, "fetch", "response")

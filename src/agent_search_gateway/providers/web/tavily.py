@@ -15,32 +15,19 @@ from .common import (
     candidate_rejection_reason,
     endpoint,
     failure,
+    json_search_response_diagnostics,
     non_empty_string,
     normalized_match,
     optional_string,
     require_list,
     require_object,
-    selected_error_fields,
 )
 
 
 def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
-    try:
-        payload = response.json()
-    except ValueError:
-        return {"category": "decode", "semantic_result": "unknown"}
-    if not isinstance(payload, dict):
-        return {"category": "invalid_envelope", "semantic_result": "unknown"}
-    if payload.get("error") is not None:
-        return {
-            "category": "provider_response",
-            "semantic_result": "error",
-            "response_kind": "object",
-            **selected_error_fields(payload["error"]),
-        }
-    if not isinstance(payload.get("results"), list):
-        return {"category": "invalid_envelope", "semantic_result": "unknown"}
-    return {"semantic_result": "success", "response_kind": "object"}
+    return json_search_response_diagnostics(
+        response, results_key="results", include_invalid_results_kind=False
+    )
 
 
 def _fetch_response_diagnostics(

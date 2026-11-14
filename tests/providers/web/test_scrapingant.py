@@ -95,52 +95,18 @@ def test_scrapingant_requires_non_empty_api_url(api_url: object) -> None:
 async def test_fetch_reports_safe_response_diagnostics(
     caplog: pytest.LogCaptureFixture, payload: object, message: str | None, semantic: str
 ) -> None:
-    import logging
+    from tests.support.web_diagnostics import assert_json_fetch_diagnostics
 
-    import httpx
-
-    from agent_search_gateway.models import RetryPolicy
-    from agent_search_gateway.observability import DiagnosticText, KeyValueFormatter, SecretRedactor
-    from agent_search_gateway.providers.http import HttpJsonExecutor
-
-    caplog.set_level(logging.DEBUG)
-    async with httpx.AsyncClient(
-        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
-    ) as client:
-        adapter = ScrapingAntAdapter(
+    await assert_json_fetch_diagnostics(
+        caplog,
+        "scrapingant",
+        lambda executor: ScrapingAntAdapter(
             name="scrapingant",
             api_url="https://scrapingant.example.test",
             secret=SecretValue("PRIVATE_AUTH"),
-            http_executor=HttpJsonExecutor(
-                client, RetryPolicy(1, 0, 0, 5), provider_name="scrapingant"
-            ),
-        )
-        if message is None:
-            assert (
-                await adapter.fetch(normalize_url("https://example.com/page?key=PRIVATE_QUERY"))
-            ).content == "PRIVATE_BODY"
-        else:
-            with pytest.raises(ExecutionFailure) as caught:
-                await adapter.fetch(normalize_url("https://example.com/page?key=PRIVATE_QUERY"))
-            assert caught.value.message == f"scrapingant/fetch: {message}"
-            if semantic == "error":
-                selected = caught.value.diagnostics["upstream_message"]
-                assert isinstance(selected, DiagnosticText)
-                assert selected.text == "target blocked"
-    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
-    diagnostics = [
-        vars(record)["gateway_fields"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
-    ]
-    assert len(diagnostics) == 1
-    assert diagnostics[0]["semantic_result"] == semantic
-    rendered = "\n".join(
-        KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")])).format(record)
-        for record in records
+            http_executor=executor,
+        ),
+        payload,
+        message,
+        semantic,
     )
-    assert "PRIVATE_" not in rendered
-    if semantic == "error":
-        assert 'upstream_message="target blocked"' in rendered
-    else:
-        assert "target blocked" not in rendered

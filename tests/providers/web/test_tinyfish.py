@@ -73,8 +73,9 @@ async def test_fetch_reports_safe_response_diagnostics(
     import httpx
 
     from agent_search_gateway.models import RetryPolicy
-    from agent_search_gateway.observability import DiagnosticText, KeyValueFormatter, SecretRedactor
+    from agent_search_gateway.observability import DiagnosticText
     from agent_search_gateway.providers.http import HttpJsonExecutor
+    from tests.support.web_diagnostics import assert_safe_response_diagnostic
 
     caplog.set_level(logging.DEBUG)
     target = "https://example.com/page?key=PRIVATE_QUERY"
@@ -124,19 +125,9 @@ async def test_fetch_reports_safe_response_diagnostics(
             else:
                 assert caught.value.message == "tinyfish/fetch: result must be an object"
                 assert caught.value.diagnostics["semantic_result"] == "error"
-    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
-    diagnostic = [
-        vars(record)["gateway_fields"]
-        for record in records
-        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
-    ]
-    assert len(diagnostic) == 1
-    assert diagnostic[0]["semantic_result"] == ("success" if case == "success" else "error")
-    rendered = "\n".join(
-        KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")])).format(record)
-        for record in records
+    _, rendered = assert_safe_response_diagnostic(
+        caplog, "success" if case == "success" else "error"
     )
-    assert "PRIVATE_" not in rendered
     if case == "error":
         assert "upstream_code=blocked" in rendered
         assert 'upstream_message="target blocked"' in rendered
