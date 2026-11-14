@@ -271,6 +271,25 @@ def test_candidate_counts_are_local_and_track_zero_all_invalid_and_unprocessed()
     assert empty.rejection_counts == {}
 
 
+def test_candidate_counts_record_rewrite_before_rejection_or_unfinished_work() -> None:
+    counts = CandidateCounts(2)
+    counts.record_rewrite()
+    counts.reject("empty_abstract")
+    counts.record_rewrite()
+    assert counts.as_fields() == {
+        "received": 2,
+        "accepted": 0,
+        "rejected": 1,
+        "rejection_counts": {"empty_abstract": 1},
+        "rewritten": 2,
+        "processed": 1,
+        "unprocessed": 1,
+    }
+    counts.reject("judge_execution_failed")
+    with pytest.raises(ValueError, match="already been processed"):
+        counts.record_rewrite()
+
+
 @pytest.mark.parametrize("received", [-1, True, 1.5])
 def test_candidate_counts_reject_invalid_received_values(received: int) -> None:
     with pytest.raises(ValueError, match="nonnegative integer"):

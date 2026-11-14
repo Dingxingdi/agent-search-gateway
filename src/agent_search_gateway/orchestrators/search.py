@@ -29,7 +29,11 @@ from ..providers.contracts import (
     OAResolver,
     PaperSearchHit,
 )
-from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
+from ..providers.diagnostics import (
+    CandidateCounts,
+    diagnostic_fields_from_failure,
+    safe_failure_reason,
+)
 from ..request_ids import validate_request_id
 from ..result_writer import ResultWriter
 from ..search_result_urls import InvalidSearchResultRedirect, unwrap_search_result_url
@@ -582,20 +586,25 @@ class SearchOrchestrator:
                 f"Keyword provider {provider.name} returned invalid data",
             ) from exc
 
+        counts = CandidateCounts(len(hits))
         staged: list[_StagedKeyword] = []
         hit_failure: ExecutionFailure | None = None
         failed_hits = 0
         try:
             for hit in hits:
                 try:
-                    staged_hit = await self._stage_keyword_hit(hit, provider=provider.name)
+                    staged_hit = await self._stage_keyword_hit(
+                        hit, provider=provider.name, counts=counts
+                    )
                 except ExecutionFailure as exc:
                     # Keyword hits are independent; one failed judge must not discard sibling hits.
                     if hit_failure is None:
                         hit_failure = exc
+                    counts.reject("judge_execution_failed")
                     failed_hits += 1
                     continue
                 if staged_hit is not None:
+                    counts.accept()
                     staged.append(staged_hit)
         except asyncio.CancelledError as exc:
             self._log_provider_failure(provider.name, "hit_staging", started, exc)
@@ -606,6 +615,16 @@ class SearchOrchestrator:
                 ErrorCode.ALL_PROVIDERS_FAILED,
                 f"Keyword provider {provider.name} returned invalid data",
             ) from exc
+        finally:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "provider_candidates_summary",
+                provider=provider.name,
+                phase="staging",
+                exc_info=False,
+                **counts.as_fields(),
+            )
 
         if hit_failure is not None:
             if not staged:
@@ -635,16 +654,20 @@ class SearchOrchestrator:
         hit: KeywordSearchHit,
         *,
         provider: str,
+        counts: CandidateCounts,
     ) -> _StagedKeyword | None:
         if not isinstance(hit, KeywordSearchHit):
+            counts.reject("invalid_record")
             raise TypeError("keyword hit has invalid type")
         for value in (hit.url, hit.title, hit.snippet, hit.raw_content, hit.content):
             if not isinstance(value, str):
+                counts.reject("invalid_record")
                 raise TypeError("keyword hit fields must be strings")
 
         try:
             result_url = unwrap_search_result_url(hit.url)
         except InvalidSearchResultRedirect:
+            counts.reject("recognized_invalid_redirect")
             log_event(
                 self._logger,
                 logging.DEBUG,
@@ -653,8 +676,11 @@ class SearchOrchestrator:
                 reason="recognized_invalid_redirect",
             )
             return None
+        if result_url != hit.url:
+            counts.record_rewrite()
         abstract = hit.snippet.strip() or hit.title.strip()
         if not abstract:
+            counts.reject("empty_abstract")
             try:
                 logged_url = target_url_for_log(str(normalize_url(result_url)))
             except InputFailure:
@@ -668,7 +694,11 @@ class SearchOrchestrator:
                 reason="empty_abstract",
             )
             return None
-        url = normalize_url(result_url)
+        try:
+            url = normalize_url(result_url)
+        except InputFailure:
+            counts.reject("invalid_url")
+            raise
         log_event(
             self._logger,
             logging.DEBUG,

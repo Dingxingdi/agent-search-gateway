@@ -4,6 +4,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
@@ -425,3 +427,143 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
         "PROVIDER_FAILURE_DETAIL_SENTINEL",
     ):
         assert sentinel not in logged
+
+
+@pytest.mark.parametrize("only_failure", [False, True])
+async def test_keyword_staging_counts_judge_failure_and_retained_abstract(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, only_failure: bool
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": _JudgeClient()},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    hits = [
+        KeywordSearchHit(
+            "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Ffails",
+            snippet="Judge fails",
+            raw_content="explode-body",
+        )
+    ]
+    if not only_failure:
+        hits.append(
+            KeywordSearchHit(
+                "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Frejected-body",
+                snippet="Retained abstract",
+                raw_content="reject-body",
+            )
+        )
+    orchestrator = SearchOrchestrator(
+        keyword_providers=[FakeKeywordSearchProvider("web", hits)],
+        llm_invocations=(),
+        quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
+        stages=stages,
+        store=URLStore(),
+        result_writer=ResultWriter(tmp_path / "results"),
+    )
+    if only_failure:
+        with pytest.raises(ExecutionFailure):
+            await orchestrator.keyword_search("query", request_id="aa000001")
+    else:
+        path = Path(await orchestrator.keyword_search("query", request_id="aa000001"))
+        assert json.loads(path.read_text()) == {
+            "url": "https://example.org/rejected-body",
+            "abstract": "Retained abstract",
+        }
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "web",
+            "phase": "staging",
+            "received": len(hits),
+            "accepted": int(not only_failure),
+            "rejected": 1,
+            "rejection_counts": {"judge_execution_failed": 1},
+            "rewritten": len(hits),
+            "processed": len(hits),
+            "unprocessed": 0,
+        }
+    ]
+
+
+async def test_keyword_staging_cancellation_leaves_inflight_and_tail_unprocessed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    entered = asyncio.Event()
+
+    class WaitingJudge(_JudgeClient):
+        async def complete_json(
+            self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
+        ) -> Mapping[str, object]:
+            entered.set()
+            await asyncio.Future[None]()
+            return {"ok": True}
+
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": WaitingJudge()},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    orchestrator = SearchOrchestrator(
+        keyword_providers=[
+            FakeKeywordSearchProvider(
+                "web",
+                [
+                    KeywordSearchHit("https://example.org/kept", snippet="Staged"),
+                    KeywordSearchHit(
+                        "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Fwaiting",
+                        snippet="Waiting",
+                        raw_content="Waiting body",
+                    ),
+                    KeywordSearchHit("https://example.org/tail", snippet="Unprocessed"),
+                ],
+            )
+        ],
+        llm_invocations=(),
+        quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
+        stages=stages,
+        store=URLStore(),
+        result_writer=ResultWriter(tmp_path / "results"),
+    )
+    task = asyncio.create_task(orchestrator.keyword_search("query", request_id="aa000002"))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "web",
+            "phase": "staging",
+            "received": 3,
+            "accepted": 1,
+            "rejected": 0,
+            "rejection_counts": {},
+            "rewritten": 1,
+            "processed": 1,
+            "unprocessed": 2,
+        }
+    ]
+    terminals = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) in {"provider_failed", "provider_completed"}
+    ]
+    assert len(terminals) == 1
+    assert terminals[0]["reason"] == "cancelled"

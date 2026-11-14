@@ -261,15 +261,28 @@ async def test_provider_terminal_event_preserves_upstream_code_after_retries(
         terminal = events("provider_failed", "b")
         assert len(terminal) == 1
         summaries = events("provider_candidates_summary", "c")
-        assert len(summaries) == 1
+        assert len(summaries) == 2
+        adapter = [line for line in summaries if "phase=adapter" in line]
+        staging = [line for line in summaries if "phase=staging" in line]
+        assert len(adapter) == len(staging) == 1
         assert all(
-            field in summaries[0]
+            field in adapter[0]
             for field in (
-                "phase=adapter",
                 "received=10",
                 "accepted=5",
                 "rejected=5",
                 'rejection_counts={"invalid_record":2,"missing_url":3}',
+            )
+        )
+        assert all(
+            field in staging[0]
+            for field in (
+                "received=5",
+                "accepted=5",
+                "rejected=0",
+                "processed=5",
+                "unprocessed=0",
+                "rewritten=0",
             )
         )
         assert len(events("provider_completed", "c")) == 1

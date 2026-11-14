@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -88,6 +89,72 @@ async def test_invalid_google_goto_is_rejected_before_abstract(
     assert "opaque-test-value" not in repr([vars(record) for record in caplog.records])
 
 
+async def test_keyword_staging_reports_redirect_rewrites_and_rejections(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [
+            KeywordSearchHit(
+                "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Fa", snippet="A"
+            ),
+            KeywordSearchHit(
+                "https://www.google.com/goto?url=https%3A%2F%2Fexample.org%2Fb", snippet="B"
+            ),
+            KeywordSearchHit("https://google.com/goto?url=invalid", snippet="Invalid"),
+            KeywordSearchHit("https://example.org/direct", snippet="Direct"),
+        ],
+    )
+    path = Path(
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000009")
+    )
+    assert len(path.read_text(encoding="utf-8").splitlines()) == 3
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "web",
+            "phase": "staging",
+            "received": 4,
+            "accepted": 3,
+            "rejected": 1,
+            "rewritten": 2,
+            "rejection_counts": {"recognized_invalid_redirect": 1},
+            "processed": 4,
+            "unprocessed": 0,
+        }
+    ]
+    assert not any(
+        getattr(record, "gateway_event", None) == "provider_failed" for record in caplog.records
+    )
+
+
+async def test_keyword_staging_counts_rewrite_before_empty_abstract(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [
+            KeywordSearchHit("https://google.com/goto?url=https%3A%2F%2Fexample.org%2Fempty"),
+            KeywordSearchHit("https://example.org/direct", snippet="Direct"),
+        ],
+    )
+    await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000010")
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["rejection_counts"] == {"empty_abstract": 1}
+    assert summaries[0]["rewritten"] == 1
+
+
 @pytest.mark.parametrize("header_failure", [False, True], ids=["execution", "provider-header"])
 async def test_keyword_search_uses_pipeline_completion_rules(
     tmp_path: Path, header_failure: bool
@@ -166,3 +233,96 @@ async def test_keyword_search_uses_pipeline_completion_rules(
     assert set((tmp_path / "results").glob("keyword-*.jsonl")) == before
     assert success.calls == ["query"]
     assert failed.calls == ["query", "query"]
+
+
+@pytest.mark.parametrize(
+    ("invalid", "reason"),
+    [
+        (cast(KeywordSearchHit, object()), "invalid_record"),
+        (KeywordSearchHit(cast(str, 1), snippet="Invalid"), "invalid_record"),
+        (KeywordSearchHit("not-a-url", snippet="Invalid"), "invalid_url"),
+    ],
+)
+async def test_keyword_staging_strict_abort_counts_only_processed_hits(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    invalid: KeywordSearchHit,
+    reason: str,
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [
+            KeywordSearchHit("https://example.org/before", snippet="Before"),
+            invalid,
+            KeywordSearchHit("https://example.org/after", snippet="Unprocessed"),
+        ],
+    )
+    with pytest.raises(ExecutionFailure):
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000011")
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0] == {
+        "provider": "web",
+        "phase": "staging",
+        "received": 3,
+        "accepted": 1,
+        "rejected": 1,
+        "rewritten": 0,
+        "rejection_counts": {reason: 1},
+        "processed": 2,
+        "unprocessed": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://google.com/url?q=https%3A%2F%2Fexample.org%2Ftarget",
+        "https://EXAMPLE.org/direct",
+    ],
+)
+async def test_keyword_staging_counts_only_recognized_goto_rewrites(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, url: str
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    provider = FakeKeywordSearchProvider("web", [KeywordSearchHit(url, snippet="Abstract")])
+    path = Path(
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000012")
+    )
+    assert path.read_text() == (
+        '{"url":"' + url.replace("EXAMPLE.org", "example.org") + '","abstract":"Abstract"}\n'
+    )
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["accepted"] == 1 and summaries[0]["rewritten"] == 0
+
+
+@pytest.mark.parametrize("empty_list", [False, True])
+async def test_keyword_staging_reports_empty_and_all_rejected_lists(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, empty_list: bool
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    hits = [] if empty_list else [KeywordSearchHit("https://google.com/goto?url=invalid")]
+    path = Path(
+        await _orchestrator(tmp_path, [FakeKeywordSearchProvider("web", hits)]).keyword_search(
+            "query", request_id="00000013"
+        )
+    )
+    assert path.read_text() == ""
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["received"] == summaries[0]["rejected"] == int(not empty_list)
+    assert summaries[0]["accepted"] == summaries[0]["unprocessed"] == 0

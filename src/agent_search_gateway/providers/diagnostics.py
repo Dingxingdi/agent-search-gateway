@@ -203,8 +203,16 @@ class CandidateCounts:
         self._check_remaining()
         if type(rewritten) is not bool:
             raise ValueError("rewritten must be a boolean")
+        if rewritten:
+            self.record_rewrite()
         self.accepted += 1
-        self.rewritten += int(rewritten)
+
+    def record_rewrite(self) -> None:
+        """Record URL transformation independently of the candidate's eventual outcome."""
+        self._check_remaining()
+        if self.rewritten >= self.received:
+            raise ValueError("all received candidates have already been rewritten")
+        self.rewritten += 1
 
     def reject(self, reason: str) -> None:
         self._check_remaining()

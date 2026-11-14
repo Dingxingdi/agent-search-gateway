@@ -5,29 +5,51 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
+import httpx
 import pytest
 
+from agent_search_gateway.academic.aggregator import PaperAggregator
 from agent_search_gateway.cli import build_parser, run_command
+from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.daemon import ForegroundDaemon
-from agent_search_gateway.errors import ErrorCode
+from agent_search_gateway.errors import ErrorCode, InputFailure
+from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import (
+    AgentInvocation,
     ErrorResponse,
     KeywordSearchRequest,
+    LLMInvocation,
     LLMSearchRequest,
     PaperSearchRequest,
+    RetryPolicy,
+    SearchScope,
     ShutdownRequest,
     SuccessResponse,
     URLFetchRequest,
 )
+from agent_search_gateway.observability import SecretValue, configure_debug_logging
+from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
+from agent_search_gateway.orchestrators.paper import PaperSearchOrchestrator
+from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.protocol import parse_response_frame, send_request
+from agent_search_gateway.providers.contracts import PaperSearchHit
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
+from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
+from agent_search_gateway.result_writer import ResultWriter
+from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import normalize_url
+from agent_search_gateway.url_store import URLStore
 from tests.support.acceptance import (
     FilteringAcceptanceRuntime,
     build_acceptance_runtime,
     build_filtering_acceptance_runtime,
 )
+from tests.support.agent_search import RecordingRunner, paper_markdown, web_markdown
+from tests.support.fakes import FakeAcademicSearchProvider, FakeLLMClient
 
 _DAEMON_TIMEOUT_SECONDS = 2.0
 
@@ -530,3 +552,208 @@ async def test_failing_direct_paper_search_writes_no_result_file(tmp_path: Path)
             "Daemon stopped."
         )
         await daemon_task
+
+
+@pytest.mark.parametrize("wrapper_provider", ["brightdata", "scraperapi"])
+@pytest.mark.parametrize("existing_body", [False, True], ids=["scheduler-fetch", "existing-merge"])
+async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_identity(
+    tmp_path: Path, wrapper_provider: str, existing_body: bool
+) -> None:
+    target = "https://example.org/article?signature=[REDACTED_SECRET]&token=[REDACTED_SECRET]"
+    wrapper = "https://google.com/goto?url=" + quote(target, safe="")
+    rejected = "https://example.org/empty?signature=[REDACTED_SECRET]"
+    requests: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "brightdata.example.test":
+            body = json.loads(request.content)
+            requests.append(("brightdata", body["zone"], body["url"]))
+            if body["zone"] == "fetch":
+                assert body["url"] == target
+                return httpx.Response(200, text="Fetched article body")
+            return httpx.Response(
+                200,
+                json={
+                    "organic": [
+                        {
+                            "link": wrapper if wrapper_provider == "brightdata" else target,
+                            "description": "First abstract",
+                        },
+                        {"link": rejected},
+                        {"link": "https://google.com/goto?url=[REDACTED_SECRET]"},
+                    ]
+                },
+            )
+        assert request.url.host == "scraperapi.example.test"
+        assert request.url.path == "/structured/google/search"
+        requests.append(("scraperapi", "search", request.url.params["query"]))
+        return httpx.Response(
+            200,
+            json={
+                "organic_results": [
+                    {
+                        "link": wrapper if wrapper_provider == "scraperapi" else target,
+                        "snippet": "Second abstract",
+                    }
+                ]
+            },
+        )
+
+    store = URLStore()
+    url = normalize_url(target)
+    if existing_body:
+        store.admit(
+            url, "Existing abstract", raw_content="Existing raw", content="Existing content"
+        )
+    quotas = ProviderQuotaManager(web_limits={"brightdata": 1, "scraperapi": 1}, llm_limits={})
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": FakeLLMClient("judge")},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    log_file = tmp_path / "debug.log"
+    session = configure_debug_logging(log_file, stderr=io.StringIO())
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            brightdata = BrightDataAdapter(
+                name="brightdata",
+                api_url="https://brightdata.example.test",
+                search_zone="search",
+                fetch_zone="fetch",
+                secret=SecretValue("[REDACTED_SECRET]"),
+                http_executor=HttpJsonExecutor(
+                    client, RetryPolicy(1, 0, 1, 0), provider_name="brightdata"
+                ),
+            )
+            scraperapi = ScraperAPIAdapter(
+                name="scraperapi",
+                api_url="https://scraperapi.example.test",
+                secret=SecretValue("[REDACTED_SECRET]"),
+                http_executor=HttpJsonExecutor(
+                    client, RetryPolicy(1, 0, 1, 0), provider_name="scraperapi"
+                ),
+            )
+            search = SearchOrchestrator(
+                keyword_providers=[brightdata, scraperapi],
+                llm_invocations=(),
+                quotas=quotas,
+                stages=stages,
+                store=store,
+                result_writer=ResultWriter(tmp_path / "results"),
+            )
+            path = Path(await search.keyword_search("query", request_id="ab000001"))
+            abstract = "Existing abstract" if existing_body else "First abstract"
+            assert [json.loads(line) for line in path.read_text().splitlines()] == [
+                {"url": target, "abstract": abstract}
+            ]
+            snapshot = store.get(url)
+            assert snapshot is not None
+            assert snapshot.url == target and snapshot.abstract == abstract
+            assert (snapshot.raw_content, snapshot.content) == (
+                ("Existing raw", "Existing content") if existing_body else ("", "")
+            )
+            assert store.get(normalize_url(wrapper)) is None
+            assert store.get(normalize_url(rejected)) is None
+
+            fetch = FetchOrchestrator(
+                store=store,
+                scheduler=FetchScheduler([brightdata], quotas, stages),
+                stages=stages,
+            )
+            with pytest.raises(InputFailure) as not_admitted:
+                await fetch.url_fetch(wrapper)
+            assert not_admitted.value.code is ErrorCode.URL_NOT_ADMITTED
+            assert await fetch.url_fetch(target) == (
+                "Existing content" if existing_body else "Fetched article body"
+            )
+            assert store.get(normalize_url(wrapper)) is None
+            after = store.get(url)
+            assert after is not None and after.url == target and after.abstract == abstract
+            assert after.content == (
+                "Existing content" if existing_body else "Fetched article body"
+            )
+    finally:
+        session.close()
+
+    # Every observed request is an original provider call; goto never resolves over HTTP.
+    assert sorted((provider, stage) for provider, stage, _ in requests) == (
+        [("brightdata", "search"), ("scraperapi", "search")]
+        if existing_body
+        else [("brightdata", "fetch"), ("brightdata", "search"), ("scraperapi", "search")]
+    )
+    logged = log_file.read_text()
+    for event in ("candidate_accepted", "candidate_rejected", "body_skipped", "body_accepted"):
+        assert f"event={event}" in logged
+    assert "reason=duplicate" in logged
+    assert "phase=adapter" in logged and "phase=staging" in logged
+    assert "[REDACTED_SECRET]" not in logged
+    assert "signature=" not in logged and "token=" not in logged
+    if not existing_body:
+        assert "event=provider_selected" in logged and "stage=fetch" in logged
+
+
+@pytest.mark.parametrize("kind", ["llm-web", "llm-paper", "agent-web", "agent-paper", "paper"])
+async def test_google_goto_is_unchanged_outside_keyword_ingestion(
+    tmp_path: Path, kind: str
+) -> None:
+    target = "https://example.org/target"
+    wrapper = "https://google.com/goto?url=" + quote(target, safe="")
+    store = URLStore()
+    invocation = LLMInvocation("llm", "model", {})
+    markdown = paper_markdown(wrapper) if "paper" in kind else web_markdown(wrapper)
+    stages = LLMStages(
+        {"llm": FakeLLMClient("llm", text_result=markdown)},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+        agent_runners={"agent": RecordingRunner(markdown)},
+    )
+    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, academic_limits={"openalex": 1})
+    writer = ResultWriter(tmp_path / "results")
+    if kind == "paper":
+        academic = PaperSearchOrchestrator(
+            providers=[
+                FakeAcademicSearchProvider(
+                    "openalex",
+                    [
+                        PaperSearchHit(
+                            source="openalex",
+                            source_id="W1",
+                            title="Paper",
+                            abstract="Abstract",
+                            url=wrapper,
+                        )
+                    ],
+                )
+            ],
+            quotas=quotas,
+            aggregator=PaperAggregator(("openalex",)),
+            resolver=None,
+            store=store,
+            result_writer=writer,
+        )
+        path = Path(await academic.paper_search("query", request_id="ab000002"))
+    else:
+        search = SearchOrchestrator(
+            keyword_providers=(),
+            llm_invocations=[invocation],
+            agent_invocations=[AgentInvocation("agent")],
+            quotas=quotas,
+            stages=stages,
+            store=store,
+            result_writer=writer,
+        )
+        scope: SearchScope = "paper" if "paper" in kind else "web"
+        if kind.startswith("agent"):
+            result = await search.agent_search("query", request_id="ab000002", scope=scope)
+        else:
+            result = await search.llm_search("query", request_id="ab000002", scope=scope)
+        path = Path(result)
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(records) == 1 and records[0]["url"] == wrapper
+    assert store.get(normalize_url(wrapper)) is not None
+    assert store.get(normalize_url(target)) is None

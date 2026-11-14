@@ -3,6 +3,7 @@ import json
 import logging
 from io import StringIO
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -20,9 +21,11 @@ from agent_search_gateway.observability import (
 )
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.paths import RuntimePaths
+from agent_search_gateway.providers.contracts import KeywordSearchHit
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 from agent_search_gateway.result_writer import ResultWriter
+from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.doctor._support import environment_name, write_valid_config
 from tests.support.acceptance import (
@@ -34,7 +37,7 @@ from tests.support.acceptance import (
     DebugAcceptanceRuntime,
     build_debug_acceptance_runtime,
 )
-from tests.support.fakes import FakeLLMClient
+from tests.support.fakes import FakeKeywordSearchProvider, FakeLLMClient
 
 
 async def _start_acceptance_daemon(
@@ -498,7 +501,9 @@ async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_
                 1 if label == "alpha" else 2
             )
             summaries = [
-                line for line in good_lines if "event=provider_candidates_summary " in line
+                line
+                for line in good_lines
+                if "event=provider_candidates_summary " in line and "phase=adapter" in line
             ]
             assert len(summaries) == 1
             assert "phase=adapter" in summaries[0]
@@ -506,3 +511,73 @@ async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_
             assert f"accepted={2 if label == 'alpha' else 3}" in summaries[0]
             assert f"rejected={3 if label == 'alpha' else 2}" in summaries[0]
             assert ("missing_url" if label == "alpha" else "invalid_record") in summaries[0]
+            staging = [
+                line
+                for line in good_lines
+                if "event=provider_candidates_summary " in line and "phase=staging" in line
+            ]
+            assert len(staging) == 1
+            assert f"received={2 if label == 'alpha' else 3}" in staging[0]
+            assert f"accepted={2 if label == 'alpha' else 3}" in staging[0]
+            assert "rejected=0" in staging[0] and "unprocessed=0" in staging[0]
+
+
+async def test_keyword_redirect_body_rejection_logs_omit_signed_target_query(
+    tmp_path: Path,
+) -> None:
+    target = "https://example.org/article?signature=[REDACTED_SECRET]&token=[REDACTED_SECRET]"
+    wrapper = "https://www.google.com/goto?url=" + quote(target, safe="")
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": FakeLLMClient("judge", json_result={"ok": False})},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    store = URLStore()
+    provider = FakeKeywordSearchProvider(
+        "web",
+        [
+            KeywordSearchHit(wrapper, snippet="Retained abstract", raw_content="Rejected body"),
+            KeywordSearchHit(target, snippet="Later abstract", raw_content="Rejected body"),
+            KeywordSearchHit(
+                "https://example.org/empty?signature=[REDACTED_SECRET]",
+                snippet="",
+            ),
+        ],
+    )
+    log_file = tmp_path / "debug.log"
+    session = configure_debug_logging(log_file, stderr=StringIO())
+    try:
+        search = SearchOrchestrator(
+            keyword_providers=[provider],
+            llm_invocations=(),
+            quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
+            stages=stages,
+            store=store,
+            result_writer=ResultWriter(tmp_path / "results"),
+        )
+        path = Path(await search.keyword_search("query", request_id="ac000001"))
+    finally:
+        session.close()
+
+    assert json.loads(path.read_text()) == {"url": target, "abstract": "Retained abstract"}
+    snapshot = store.get(normalize_url(target))
+    assert snapshot is not None and snapshot.raw_content == snapshot.content == ""
+    assert store.get(normalize_url(wrapper)) is None
+    logged = log_file.read_text()
+    lines = logged.splitlines()
+    for event, reason in [
+        ("candidate_rejected", "empty_abstract"),
+        ("candidate_rejected", "duplicate"),
+        ("body_rejected", "judge_rejected"),
+    ]:
+        assert any(f"event={event}" in line and f"reason={reason}" in line for line in lines)
+    summary = [line for line in lines if "event=provider_candidates_summary" in line]
+    assert len(summary) == 1
+    assert "accepted=2" in summary[0] and "rejected=1" in summary[0] and "rewritten=1" in summary[0]
+    assert "phase=staging" in summary[0]
+    assert "[REDACTED_SECRET]" not in logged
+    assert "signature=" not in logged and "token=" not in logged
+    assert "Rejected body" not in logged and "Retained abstract" not in logged
