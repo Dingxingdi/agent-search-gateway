@@ -163,10 +163,14 @@ def test_debug_logging_session_installs_rotating_handlers_and_restores_state(
         if getattr(handler, "_agent_search_gateway_debug_owned", False)
     ]
     assert len(owned) == 2
-    assert sum(
-        isinstance(handler, logging.StreamHandler) and not isinstance(handler, RotatingFileHandler)
-        for handler in owned
-    ) == 1
+    assert (
+        sum(
+            isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, RotatingFileHandler)
+            for handler in owned
+        )
+        == 1
+    )
     assert sum(isinstance(handler, RotatingFileHandler) for handler in owned) == 1
     assert project_logger.level == logging.DEBUG
     assert project_logger.propagate is False
@@ -338,6 +342,7 @@ def test_formatter_failure_uses_safe_emergency_output_and_keeps_business_result(
     session = configure_debug_logging(tmp_path / "debug.log", stderr=stderr)
     monkeypatch.setattr(KeyValueFormatter, "format", broken)
     try:
+
         def business() -> str:
             log_event(logging.getLogger("agent_search_gateway"), logging.DEBUG, "diagnostic")
             return "business result"
