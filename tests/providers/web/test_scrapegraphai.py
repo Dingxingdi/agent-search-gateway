@@ -1,11 +1,15 @@
+import httpx
 import pytest
 
 from agent_search_gateway.errors import ExecutionFailure
+from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.contracts import KeywordSearchHit, URLFetchCandidate
+from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.scrapegraphai import ScrapeGraphAIAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingJsonExecutor
+from tests.support.logging import structured_test_logger
 
 
 async def test_scrapegraphai_search_uses_v2_search_and_sgai_apikey() -> None:
@@ -100,3 +104,99 @@ def test_scrapegraphai_requires_non_empty_api_url(api_url: object) -> None:
             secret=SecretValue("secret"),
             http_executor=RecordingJsonExecutor([]),
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "error", "expected"),
+    [
+        ("error", "Vendor quota exhausted", "Vendor quota exhausted"),
+        ("detail", "Vendor quota exhausted", "Vendor quota exhausted"),
+        (
+            "error",
+            {"code": 429, "message": "Vendor quota exhausted", "body": "PRIVATE_BODY"},
+            "Vendor quota exhausted",
+        ),
+        ("detail", {"message": "PRIVATE_NESTED_DETAIL", "detail": ["PRIVATE_LIST"]}, None),
+        ("detail", ["PRIVATE_LIST"], None),
+    ],
+)
+async def test_scrapegraphai_selects_only_known_error_fields(
+    field: str,
+    error: object,
+    expected: str | None,
+) -> None:
+    logger, stream = structured_test_logger("test.scrapegraphai.failure")
+    payload = {field: error, "results": [{"content": "PRIVATE_CONTENT"}]}
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    ) as client:
+        adapter = ScrapeGraphAIAdapter(
+            name="scrapegraphai",
+            api_url="https://scrapegraph.example.test",
+            secret=SecretValue("x"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 5), provider_name="scrapegraphai", logger=logger
+            ),
+        )
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.search("query")
+    assert caught.value.message == "scrapegraphai/search: provider reported failure"
+    rendered = stream.getvalue()
+    assert rendered.count("event=provider_response_diagnostic") == 1
+    assert "semantic_result=error" in rendered
+    assert "category=provider_response" in rendered
+    if expected is not None:
+        assert expected in rendered
+        assert "upstream_message" in caught.value.diagnostics
+    else:
+        assert "upstream_message" not in rendered
+        assert "upstream_code" not in rendered
+    assert "PRIVATE_" not in rendered
+
+
+@pytest.mark.parametrize(
+    ("payload", "message", "semantic"),
+    [
+        (
+            {
+                "error": {
+                    "code": "blocked",
+                    "message": "target blocked",
+                    "body": "PRIVATE_ERROR_BODY",
+                },
+                "results": {"markdown": {"data": ["PRIVATE_BODY"]}},
+            },
+            "provider reported failure",
+            "error",
+        ),
+        (
+            {"results": {"markdown": {"data": ["PRIVATE_BODY"], "error": "PRIVATE_CONTENT_ERROR"}}},
+            None,
+            "success",
+        ),
+        ({"results": {"markdown": {"data": []}}}, "page body is empty", "empty"),
+        (
+            {"results": {"markdown": {"data": ["", "PRIVATE_LATER_BODY"]}}},
+            "results.markdown.data[0] must be non-empty",
+            "empty",
+        ),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, payload: object, message: str | None, semantic: str
+) -> None:
+    from tests.support.web_diagnostics import assert_json_fetch_diagnostics
+
+    await assert_json_fetch_diagnostics(
+        caplog,
+        "scrapegraphai",
+        lambda executor: ScrapeGraphAIAdapter(
+            name="scrapegraphai",
+            api_url="https://scrapegraphai.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=executor,
+        ),
+        payload,
+        message,
+        semantic,
+    )

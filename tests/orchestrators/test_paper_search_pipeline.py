@@ -211,3 +211,143 @@ async def test_title_fallback_is_used_for_landing_admission_and_logs_are_payload
     assert query not in logs
     assert title not in logs
     assert doi not in logs
+
+
+async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
+    from agent_search_gateway.providers.academic.core import CoreProvider
+    from agent_search_gateway.providers.academic.crossref import CrossrefProvider
+    from agent_search_gateway.providers.academic.openalex import OpenAlexProvider
+    from agent_search_gateway.providers.academic.semantic_scholar import SemanticScholarProvider
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "crossref.test":
+            items = [
+                {"DOI": "10.1000/shared", "title": ["PRIVATE_CROSSREF_TITLE"]},
+                {},
+            ]
+            payload: object = {"message": {"items": items}}
+        elif request.url.host == "openalex.test":
+            results = [
+                {
+                    "id": "W123",
+                    "title": "PRIVATE_OPENALEX_TITLE",
+                    "doi": "10.1000/shared",
+                    "abstract_inverted_index": {"PRIVATE_ABSTRACT": [0]},
+                }
+            ]
+            payload = {"results": results}
+        elif request.url.host == "core.test":
+            payload = {"results": [None, {}]}
+        else:
+            payload = {"error": "quota blocked"}
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+
+        def executor(name: str) -> HttpJsonExecutor:
+            return HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name=name)
+
+        providers: list[object] = [
+            CrossrefProvider(executor("crossref"), api_url="https://crossref.test"),
+            OpenAlexProvider(executor("openalex"), api_url="https://openalex.test"),
+            CoreProvider(
+                executor("core"),
+                api_url="https://core.test",
+                api_key=SecretValue("[REDACTED_SECRET]"),
+            ),
+            SemanticScholarProvider(executor("semantic_scholar"), api_url="https://semantic.test"),
+        ]
+        orchestrator = _orchestrator(tmp_path, providers)
+        target = await orchestrator.paper_search("mixed", request_id="77777777")
+        rows = [json.loads(line) for line in Path(target).read_text().splitlines()]
+        assert len(rows) == 1
+        assert rows[0]["title"] == "PRIVATE_OPENALEX_TITLE"
+        assert rows[0]["identifiers"]["doi"] == "10.1000/shared"
+        assert "diagnostics" not in rows[0]
+
+    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 3
+    partitions = [
+        (fields["provider"], fields["received"], fields["accepted"], fields["rejected"])
+        for fields in summaries
+    ]
+    assert sorted(partitions) == [("core", 2, 0, 2), ("crossref", 2, 1, 1), ("openalex", 1, 1, 0)]
+    formatter = KeyValueFormatter(SecretRedactor([]))
+    assert "PRIVATE_" not in "\n".join(formatter.format(record) for record in records)
+
+
+async def test_oa_outage_keeps_paper_search_completion_and_all_papers(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
+    from agent_search_gateway.providers.academic.unpaywall import UnpaywallResolver
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+    provider = FakeAcademicSearchProvider(
+        "openalex",
+        [
+            _hit("openalex", "W1501", title="First", doi="10.1000/first"),
+            _hit("openalex", "W1502", title="Second", doi="10.1000/second"),
+        ],
+    )
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(500, json={"error": "PRIVATE_OUTAGE"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        resolver = UnpaywallResolver(
+            HttpJsonExecutor(client, RetryPolicy(2, 0, 0, 5), provider_name="unpaywall"),
+            contact_email=SecretValue("PRIVATE_EMAIL@example.test"),
+        )
+        target = await _orchestrator(tmp_path, [provider], resolver=resolver).paper_search(
+            "query", request_id="15151515"
+        )
+    rows = [json.loads(line) for line in Path(target).read_text().splitlines()]
+    assert [row["title"] for row in rows] == ["First", "Second"]
+    assert calls == 4
+    records = [record for record in caplog.records if getattr(record, "gateway_event", "")]
+    terminals = [
+        (
+            vars(record)["gateway_event"],
+            vars(record)["gateway_fields"]["provider"],
+            vars(record)["gateway_fields"]["stage"],
+        )
+        for record in records
+        if vars(record)["gateway_event"] in {"provider_completed", "provider_failed"}
+    ]
+    assert terminals == [
+        ("provider_completed", "openalex", "paper_search"),
+        ("provider_failed", "unpaywall", "oa_resolve"),
+        ("provider_failed", "unpaywall", "oa_resolve"),
+    ]
+    assert (
+        sum(vars(record)["gateway_event"] == "paper_enrichment_failed" for record in records) == 2
+    )
+    assert not any("diagnostics" in row for row in rows)
+    formatter = KeyValueFormatter(SecretRedactor([]))
+    assert "PRIVATE_" not in "\n".join(formatter.format(record) for record in records)

@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Mapping
+
+import httpx
+
 from ...academic.normalization import normalize_openalex_id
 from ...observability import SecretValue
 from ..contracts import PaperSearchHit
@@ -10,10 +15,11 @@ from .common import (
     as_list,
     as_mapping,
     join_url,
+    json_candidates_diagnostics,
+    map_paper_candidates,
     nonnegative_int,
     parse_iso_date,
     protocol_failure,
-    reject_item,
     text,
 )
 
@@ -41,6 +47,10 @@ def reconstruct_abstract(value: object) -> str:
     return " ".join(word for _, word in positioned)
 
 
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    return json_candidates_diagnostics(response, "results")
+
+
 class OpenAlexProvider:
     name = "openalex"
 
@@ -65,28 +75,24 @@ class OpenAlexProvider:
             join_url(self._api_url, "works"),
             stage="paper_search",
             params=params,
+            response_diagnostics=_response_diagnostics,
         )
         envelope = as_mapping(payload)
         results = as_list(envelope.get("results")) if envelope is not None else None
         if results is None:
             raise protocol_failure(self.name, "response results envelope was invalid")
-        hits: list[PaperSearchHit] = []
-        for item in results:
-            mapped = self._map_item(item)
-            if mapped is None:
-                reject_item(self.name)
-            else:
-                hits.append(mapped)
-        return hits
+        return map_paper_candidates(
+            self.name, results, self._map_item, logger=logging.getLogger(__name__)
+        )
 
-    def _map_item(self, value: object) -> PaperSearchHit | None:
+    def _map_item(self, value: object) -> tuple[PaperSearchHit | None, str]:
         item = as_mapping(value)
         if item is None:
-            return None
+            return None, "invalid_record_shape"
         source_id = normalize_openalex_id(text(item.get("id")))
         title = text(item.get("title"))
         if source_id is None or not title:
-            return None
+            return None, "missing_required_field"
         primary = as_mapping(item.get("primary_location")) or {}
         oa = as_mapping(item.get("open_access")) or {}
         landing = text(primary.get("landing_page_url")) or f"https://openalex.org/{source_id}"
@@ -110,7 +116,7 @@ class OpenAlexProvider:
             is_open_access=is_oa,
             oa_status=text(oa.get("oa_status")),
             license=text(primary.get("license")),
-        )
+        ), ""
 
     @staticmethod
     def _authors(value: object) -> tuple[str, ...]:

@@ -10,6 +10,14 @@ from agent_search_gateway.providers.academic.openalex import (
     OpenAlexProvider,
     reconstruct_abstract,
 )
+from tests.support.academic_diagnostics import (
+    academic_response,
+    assert_json_candidates,
+    assert_private_payload_absent,
+    assert_response_classification,
+    candidate_case,
+    private_json_response,
+)
 from tests.support.http import RecordingJsonExecutor
 
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "providers" / "academic" / "openalex"
@@ -71,3 +79,48 @@ async def test_openalex_invalid_results_envelope_is_protocol_failure() -> None:
     with pytest.raises(ProtocolFailure) as caught:
         await OpenAlexProvider(executor).search("query")
     assert caught.value.code is ErrorCode.PROTOCOL_ERROR
+
+
+@pytest.mark.parametrize("case", ["valid", "mixed", "all_invalid", "empty"])
+async def test_paper_response_reports_candidate_summary(
+    caplog: pytest.LogCaptureFixture, case: str
+) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    valid = {"id": "https://openalex.org/W123", "title": "Paper"}
+    invalid: list[object] = [None, {}, {"id": "W123"}, {"title": "Paper"}]
+    items, accepted, rejected = candidate_case(case, valid, invalid)
+    payload = {"results": items}
+    async with academic_response("openalex", payload=payload) as executor:
+        hits = await OpenAlexProvider(executor).search("query")
+    assert_json_candidates(caplog, "openalex", hits, payload, len(items), accepted, rejected)
+
+
+@pytest.mark.parametrize("case", ["success", "unknown", "array", "decode"])
+async def test_response_classification_never_logs_paper_payload(
+    caplog: pytest.LogCaptureFixture, case: str
+) -> None:
+    import logging
+
+    caplog.set_level(logging.DEBUG)
+    candidate: dict[str, object] = {
+        "id": "W123",
+        "title": "PRIVATE_TITLE",
+        "abstract_inverted_index": {"PRIVATE_ABSTRACT_INDEX": [0]},
+    }
+    candidate.update(
+        abstract="PRIVATE_ABSTRACT",
+        error={"message": "PRIVATE_CANDIDATE_ERROR", "code": "PRIVATE_CANDIDATE_CODE"},
+    )
+    payload: object = {"results": [candidate]}
+    response = private_json_response(case, payload)
+    async with academic_response("openalex", response=response) as executor:
+        provider = OpenAlexProvider(executor)
+        if case == "success":
+            assert len(await provider.search("query")) == 1
+        else:
+            with pytest.raises(ProtocolFailure):
+                await provider.search("query")
+    records = assert_response_classification(caplog, response, case)
+    assert_private_payload_absent(records)

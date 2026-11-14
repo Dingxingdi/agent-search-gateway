@@ -14,6 +14,7 @@ from ..errors import ErrorCode, ExecutionFailure, InputFailure
 from ..models import PaperRecord
 from ..observability import elapsed_ms, log_event
 from ..providers.contracts import AcademicSearchProvider, OAResolver, PaperSearchHit
+from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
 from ..request_ids import validate_request_id
 from ..result_writer import ResultWriter
 from ..url_store import URLStore
@@ -137,7 +138,8 @@ class PaperSearchOrchestrator:
                 raise TypeError("academic provider search result must be a list")
             if any(not isinstance(hit, PaperSearchHit) for hit in hits):
                 raise TypeError("academic provider search result contains an invalid item")
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self._log_provider_failure(provider.name, started, exc)
             raise
         except ExecutionFailure as exc:
             self._log_provider_failure(provider.name, started, exc)
@@ -165,18 +167,6 @@ class PaperSearchOrchestrator:
         started: float,
         exc: BaseException,
     ) -> None:
-        if isinstance(exc, ExecutionFailure) and exc.reason:
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "provider_failed",
-                provider=provider,
-                stage="paper_search",
-                error_type=type(exc).__name__,
-                elapsed_ms=elapsed_ms(self._monotonic, started),
-                reason=exc.reason,
-            )
-            return
         log_event(
             self._logger,
             logging.DEBUG,
@@ -185,4 +175,7 @@ class PaperSearchOrchestrator:
             stage="paper_search",
             error_type=type(exc).__name__,
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            reason=safe_failure_reason(exc),
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )

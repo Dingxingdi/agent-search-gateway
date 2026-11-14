@@ -67,3 +67,46 @@ def test_scrapingant_requires_non_empty_api_url(api_url: object) -> None:
             secret=SecretValue("secret"),
             http_executor=RecordingJsonExecutor([]),
         )
+
+
+@pytest.mark.parametrize(
+    ("payload", "message", "semantic"),
+    [
+        (
+            {
+                "error": {
+                    "code": "blocked",
+                    "message": "target blocked",
+                    "body": "PRIVATE_ERROR_BODY",
+                },
+                "markdown": "PRIVATE_BODY",
+            },
+            "provider reported failure",
+            "error",
+        ),
+        (
+            {"markdown": "PRIVATE_BODY", "metadata": {"error": "PRIVATE_CONTENT_ERROR"}},
+            None,
+            "success",
+        ),
+        ({"markdown": "  "}, "markdown must be non-empty", "empty"),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, payload: object, message: str | None, semantic: str
+) -> None:
+    from tests.support.web_diagnostics import assert_json_fetch_diagnostics
+
+    await assert_json_fetch_diagnostics(
+        caplog,
+        "scrapingant",
+        lambda executor: ScrapingAntAdapter(
+            name="scrapingant",
+            api_url="https://scrapingant.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=executor,
+        ),
+        payload,
+        message,
+        semantic,
+    )

@@ -119,3 +119,91 @@ async def test_tavily_fetch_classifies_unusable_extract_responses(
 
     assert caught.value.reason == reason
     assert reason in caught.value.message
+
+
+@pytest.mark.parametrize(
+    ("results", "reason", "semantic"),
+    [
+        (
+            [
+                None,
+                {"url": 1},
+                {"url": "https://example.com/other"},
+                {
+                    "url": "https://example.com/a?target=PRIVATE_QUERY",
+                    "raw_content": "PRIVATE_BODY",
+                },
+                {"url": "https://example.com/a", "raw_content": "UNPROCESSED_BODY"},
+            ],
+            None,
+            "success",
+        ),
+        ([], "no_matching_result", "no_match"),
+        (
+            [{"url": "https://example.com/a?target=PRIVATE_QUERY", "raw_content": ""}],
+            "empty_raw_content",
+            "empty",
+        ),
+        ({}, "invalid_results_envelope", "unknown"),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, results: object, reason: str | None, semantic: str
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    caplog.set_level(logging.DEBUG)
+    target = normalize_url("https://example.com/a?target=PRIVATE_QUERY")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"results": results})
+        )
+    ) as client:
+        adapter = TavilyAdapter(
+            name="tavily",
+            api_url="https://tavily.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 5), provider_name="tavily"),
+        )
+        if reason is None:
+            candidate = await adapter.fetch(target)
+            assert candidate.raw_content == "PRIVATE_BODY"
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await adapter.fetch(target)
+            assert caught.value.reason == reason
+            assert caught.value.message == f"tavily/fetch: {reason}"
+            assert caught.value.diagnostics["semantic_result"] == semantic
+    records = [record for record in caplog.records if getattr(record, "gateway_event", None)]
+    diagnostics = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == semantic
+    if reason is not None:
+        formatter = KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")]))
+        rendered = "\n".join(formatter.format(record) for record in records)
+        assert "PRIVATE_" not in rendered
+        return
+    summary = [
+        vars(record)["gateway_fields"]
+        for record in records
+        if getattr(record, "gateway_event", None) == "provider_fetch_summary"
+    ][0]
+    assert summary["collection"] == "results"
+    assert summary["processed"] == 4
+    assert summary["unprocessed"] == 1
+    assert summary["invalid_records"] == 2
+    assert summary["unmatched"] == 1
+    formatter = KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")]))
+    rendered = "\n".join(formatter.format(record) for record in records)
+    assert "PRIVATE_" not in rendered
+    assert "UNPROCESSED_BODY" not in rendered

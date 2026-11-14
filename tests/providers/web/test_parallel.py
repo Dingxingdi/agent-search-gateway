@@ -694,3 +694,75 @@ async def test_parallel_policy_mutation_does_not_change_captured_configuration()
             },
         },
     }
+
+
+@pytest.mark.parametrize("case", ["error", "success", "strict"])
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, case: str
+) -> None:
+    import logging
+
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.observability import DiagnosticText
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+    from tests.support.web_diagnostics import assert_safe_response_diagnostic
+
+    caplog.set_level(logging.DEBUG)
+    target = "https://example.com/page?key=PRIVATE_QUERY"
+    results: list[object] = (
+        []
+        if case == "error"
+        else [{"url": target, "full_content": "PRIVATE_BODY", "error": "PRIVATE_CONTENT_ERROR"}]
+    )
+    if case == "strict":
+        results.insert(0, None)
+    payload = {
+        "results": results,
+        "errors": [
+            {"url": "https://example.com/other", "error": "PRIVATE_UNMATCHED"},
+            {
+                "url": target,
+                "error": {
+                    "code": "blocked",
+                    "message": "target blocked",
+                    "body": "PRIVATE_ERROR_BODY",
+                },
+            },
+        ],
+    }
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))
+    ) as client:
+        adapter = ParallelAdapter(
+            name="parallel",
+            api_url="https://parallel.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 5), provider_name="parallel"
+            ),
+        )
+        if case == "success":
+            assert (await adapter.fetch(normalize_url(target))).content == "PRIVATE_BODY"
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await adapter.fetch(normalize_url(target))
+            if case == "error":
+                assert (
+                    caught.value.message == "parallel/fetch: provider reported extraction failure"
+                )
+                message = caught.value.diagnostics["upstream_message"]
+                assert isinstance(message, DiagnosticText)
+                assert message.text == "target blocked"
+            else:
+                assert caught.value.message == "parallel/fetch: result must be an object"
+                assert caught.value.diagnostics["semantic_result"] == "error"
+    _, rendered = assert_safe_response_diagnostic(
+        caplog, "success" if case == "success" else "error"
+    )
+    if case == "error":
+        assert "upstream_code=blocked" in rendered
+        assert 'upstream_message="target blocked"' in rendered
+    else:
+        assert "target blocked" not in rendered

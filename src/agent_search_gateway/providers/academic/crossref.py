@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import html
+import logging
 import re
+from collections.abc import Mapping
 from datetime import date
+
+import httpx
 
 from ...academic.normalization import normalize_doi
 from ...observability import SecretValue
@@ -14,15 +18,20 @@ from .common import (
     as_list,
     as_mapping,
     join_url,
+    json_candidates_diagnostics,
+    map_paper_candidates,
     nonnegative_int,
     protocol_failure,
-    reject_item,
     text,
 )
 
 _DEFAULT_API_URL = "https://api.crossref.org"
 _TAG_RE = re.compile(r"<[^>]+>")
 _DATE_KEYS = ("published-print", "published-online", "published", "issued", "created")
+
+
+def _response_diagnostics(response: httpx.Response) -> Mapping[str, object]:
+    return json_candidates_diagnostics(response, "message", "items")
 
 
 class CrossrefProvider:
@@ -54,29 +63,25 @@ class CrossrefProvider:
             join_url(self._api_url, "works"),
             stage="paper_search",
             params=params,
+            response_diagnostics=_response_diagnostics,
         )
         envelope = as_mapping(payload)
         message = as_mapping(envelope.get("message")) if envelope is not None else None
         items = as_list(message.get("items")) if message is not None else None
         if items is None:
             raise protocol_failure(self.name, "response message.items envelope was invalid")
-        hits: list[PaperSearchHit] = []
-        for item in items:
-            mapped = self._map_item(item)
-            if mapped is None:
-                reject_item(self.name)
-            else:
-                hits.append(mapped)
-        return hits
+        return map_paper_candidates(
+            self.name, items, self._map_item, logger=logging.getLogger(__name__)
+        )
 
-    def _map_item(self, value: object) -> PaperSearchHit | None:
+    def _map_item(self, value: object) -> tuple[PaperSearchHit | None, str]:
         item = as_mapping(value)
         if item is None:
-            return None
+            return None, "invalid_record_shape"
         doi = normalize_doi(text(item.get("DOI")))
         title = self._first_string(item.get("title"))
         if doi is None or not title:
-            return None
+            return None, "missing_required_field"
         authors = self._authors(item.get("author"))
         venue = self._first_string(item.get("container-title"))
         url = text(item.get("URL")) or f"https://doi.org/{doi}"
@@ -92,7 +97,7 @@ class CrossrefProvider:
             pdf_url=self._pdf_url(item.get("link")),
             venue=venue,
             citation_count=nonnegative_int(item.get("is-referenced-by-count")),
-        )
+        ), ""
 
     @staticmethod
     def _first_string(value: object) -> str:

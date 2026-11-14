@@ -3,14 +3,18 @@ import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+import httpx
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate, ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.models import LLMInvocation, RetryPolicy
+from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import ChatMessage
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.llm.openai_chat import OpenAIChatCompletionsClient
 from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_normalization import normalize_url
@@ -258,3 +262,82 @@ async def test_llm_search_debug_events_cover_invocations_parse_failures_and_pers
         "MODEL_FAILURE_SENTINEL",
     ):
         assert sentinel not in logged
+
+
+@pytest.mark.parametrize("exhausted", [False, True])
+async def test_protocol_retry_has_one_provider_terminal_outcome(
+    tmp_path: Path, exhausted: bool
+) -> None:
+    logger, stream = structured_test_logger("tests.search.protocol-retry")
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        content = "## Result\nURL: https://example.com/result\nAbstract: ANSWER_SENTINEL\n"
+        payload = (
+            {"choices": []}
+            if attempts == 1 or exhausted
+            else {"choices": [{"message": {"content": content}}]}
+        )
+        return httpx.Response(200, json=payload, request=request)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    invocation = LLMInvocation("openai", "model", {})
+    policy = RetryPolicy(2, 0.01, 0.02, 1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+        client = OpenAIChatCompletionsClient(
+            name="openai",
+            api_url="https://llm.example.test",
+            secret=SecretValue("secret"),
+            executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
+            quota=CapacityGate(1),
+            retry_policy=policy,
+            sleep=no_sleep,
+            logger=logger,
+        )
+        stages = LLMStages(
+            {"openai": client},
+            judge=invocation,
+            safety=invocation,
+            content_clean=invocation,
+            focus_summary=invocation,
+            logger=logger,
+        )
+        orchestrator = SearchOrchestrator(
+            keyword_providers=(),
+            llm_invocations=(invocation,),
+            quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
+            stages=stages,
+            store=URLStore(),
+            result_writer=ResultWriter(tmp_path / "results"),
+            logger=logger,
+        )
+        if exhausted:
+            with pytest.raises(ExecutionFailure) as caught:
+                await orchestrator.llm_search("PROMPT_SENTINEL", request_id="aa000001")
+            assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+        else:
+            path = Path(await orchestrator.llm_search("PROMPT_SENTINEL", request_id="aa000001"))
+            assert path.is_file()
+    assert attempts == 2
+    logged = stream.getvalue()
+    lines = logged.splitlines()
+    retrying = [line for line in lines if "event=provider_retrying" in line]
+    assert len(retrying) == 1
+    assert "attempt=1" in retrying[0] and "next_attempt=2" in retrying[0]
+    assert "retry_scope=protocol" in retrying[0] and "delay_ms=10" in retrying[0]
+    completed = [line for line in lines if "event=provider_completed" in line]
+    failed = [line for line in lines if "event=provider_failed" in line]
+    stage_failed = [line for line in lines if "event=llm_stage_failed" in line]
+    if exhausted:
+        assert not completed
+        assert len(failed) == 1 and "stage=llm_search" in failed[0]
+        assert len(stage_failed) == 1 and "category=protocol" in stage_failed[0]
+        assert "event=llm_protocol_completed" not in logged
+    else:
+        assert len(completed) == 1 and "stage=llm_search" in completed[0]
+        assert not failed and not stage_failed
+    assert "PROMPT_SENTINEL" not in logged and "ANSWER_SENTINEL" not in logged

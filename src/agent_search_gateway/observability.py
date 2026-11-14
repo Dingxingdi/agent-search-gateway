@@ -3,11 +3,12 @@
 import json
 import logging
 import re
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
 from .errors import ConfigFailure, ErrorCode
@@ -20,7 +21,79 @@ FileHandlerFactory = Callable[..., logging.Handler]
 
 _FIELD_NAME = re.compile(r"[a-z][a-z0-9_]*\Z")
 _PREFERRED_FIELD_ORDER = ("provider", "stage", "url", "event")
+DIAGNOSTIC_TEXT_LIMITS = (
+    ("upstream_code", 128),
+    ("upstream_status", 128),
+    ("upstream_type", 128),
+    ("upstream_message", 512),
+)
 _EMERGENCY_MESSAGE = "agent-search-gateway debug logging sink failure\n"
+
+CANDIDATE_REJECTION_REASONS = frozenset(
+    {
+        "missing_url",
+        "invalid_url",
+        "missing_required_field",
+        "invalid_record",
+        "invalid_record_shape",
+        "unsupported_scheme",
+        "recognized_invalid_redirect",
+        "decode_error",
+        "empty_abstract",
+        "judge_execution_failed",
+        "duplicate",
+        "missing_title",
+        "missing_source_id",
+        "invalid_identifier",
+        "identifier_conflict",
+        "invalid_date",
+        "invalid_landing_url",
+    }
+)
+
+
+def safe_rejection_counts(value: object) -> dict[str, int] | None:
+    """Snapshot only a bounded mapping of known reasons and nonnegative counts."""
+    if not isinstance(value, Mapping) or len(value) > len(CANDIDATE_REJECTION_REASONS):
+        return None
+    counts: dict[str, int] = {}
+    for reason, count in value.items():
+        if (
+            type(reason) is not str
+            or reason not in CANDIDATE_REJECTION_REASONS
+            or type(count) is not int
+            or count < 0
+        ):
+            return None
+        counts[reason] = count
+    return counts
+
+
+def _render_field(name: str, value: object) -> str:
+    if name == "rejection_counts":
+        counts = safe_rejection_counts(value)
+        if counts is not None:
+            return json.dumps(counts, sort_keys=True, separators=(",", ":"))
+    return _render_scalar(value)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class DiagnosticText:
+    """Selected upstream scalar text, rendered only with the active redactor."""
+
+    text: str
+    max_chars: int
+
+    def __post_init__(self) -> None:
+        if type(self.text) is not str:
+            raise TypeError("diagnostic text must be a string")
+        if type(self.max_chars) is not int or not 1 <= self.max_chars <= 512:
+            raise ValueError("diagnostic text limit must be between 1 and 512")
+
+    def __repr__(self) -> str:
+        return "<DiagnosticText>"
+
+    __str__ = __repr__
 
 
 class SecretValue:
@@ -97,15 +170,20 @@ def elapsed_ms(monotonic: Callable[[], float], started: float) -> int:
 
 
 def target_url_for_log(value: str) -> str:
-    """Strip URI userinfo while retaining target path/query/fragment diagnostics."""
+    """Render a target path without userinfo, query, or fragment."""
 
-    return _url_for_log(value, keep_query=True, keep_fragment=True)
+    return _url_for_log(value, keep_query=False, keep_fragment=False)
 
 
 def http_endpoint_for_log(value: str) -> str:
     """Render an HTTP endpoint without userinfo or request-specific query data."""
 
-    return _url_for_log(value, keep_query=False, keep_fragment=False)
+    rendered = _url_for_log(value, keep_query=False, keep_fragment=False)
+    parsed = urlsplit(rendered)
+    # Reader-style endpoints can embed a complete target URL in the path.
+    if re.search(r"https?:(?:/|%2f){2}", parsed.path, re.IGNORECASE):
+        return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    return rendered
 
 
 def _url_for_log(value: str, *, keep_query: bool, keep_fragment: bool) -> str:
@@ -128,6 +206,28 @@ def _url_for_log(value: str, *, keep_query: bool, keep_fragment: bool) -> str:
     )
 
 
+_DIAGNOSTIC_URL = re.compile(
+    r"https?(?::|%3a)(?:/|\\+/|%2f){2}(?:<redacted>|[^\s<>\"'])+", re.IGNORECASE
+)
+_DIAGNOSTIC_AUTH = re.compile(
+    r"\b(?:authorization|proxy-authorization|cookie|set-cookie)[\"']?\s*[:=][^\r\n]*"
+    r"|\b(?:bearer|basic)\s+[^\s,;]+"
+    r"|\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|password|secret|signature)"
+    r"[\"']?\s*[:=]\s*(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s,;]+)",
+    re.IGNORECASE,
+)
+
+
+def _diagnostic_text_for_log(value: str, redactor: SecretRedactor) -> str:
+    # Never decode/unescape URLs here: that could create a secret after redaction.
+    value = redactor.redact(value)
+    # Provider-supplied URLs can carry unregistered secrets in any component.
+    value = _DIAGNOSTIC_URL.sub("<redacted-url>", value)
+    value = _DIAGNOSTIC_AUTH.sub("<redacted>", value)
+    value = "".join(character if character.isprintable() else " " for character in value)
+    return " ".join(value.split())
+
+
 def _render_string(value: str) -> str:
     if (
         value
@@ -145,7 +245,7 @@ def _render_scalar(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, str):
         return _render_string(value)
-    if isinstance(value, (int, float)):
+    if type(value) in (int, float):
         return repr(value)
     return _render_string(f"<{type(value).__name__}>")
 
@@ -175,6 +275,20 @@ class KeyValueFormatter(logging.Formatter):
         values: dict[str, object] = {
             _validated_field_name(str(key)): value for key, value in fields.items()
         }
+        for name, limit in DIAGNOSTIC_TEXT_LIMITS:
+            value = values.get(name)
+            if type(value) is int and name != "upstream_message":
+                value = str(value)
+            if type(value) is str:
+                value = DiagnosticText(value, limit)
+            if type(value) is DiagnosticText:
+                safe = _diagnostic_text_for_log(value.text, self._redactor)
+                max_chars = min(limit, value.max_chars)
+                values[name] = normalize_log_reason(safe, max_chars)
+                if name == "upstream_message":
+                    values["upstream_message_chars"] = len(value.text)
+                    values["upstream_message_bytes"] = len(value.text.encode("utf-8"))
+                    values["upstream_message_truncated"] = len(safe) > max_chars
         values["event"] = event
         request_id = current_request_id() or "-"
         parts = [record.levelname, f"request={request_id}"]
@@ -182,10 +296,10 @@ class KeyValueFormatter(logging.Formatter):
         for name in _PREFERRED_FIELD_ORDER:
             if name not in values:
                 continue
-            parts.append(f"{name}={_render_scalar(values[name])}")
+            parts.append(f"{name}={_render_field(name, values[name])}")
             emitted.add(name)
         for name in sorted(values.keys() - emitted):
-            parts.append(f"{name}={_render_scalar(values[name])}")
+            parts.append(f"{name}={_render_field(name, values[name])}")
 
         if record.exc_info:
             traceback_text = self.formatException(record.exc_info)
@@ -206,12 +320,26 @@ def log_event(
     _validated_field_name(event)
     for name in fields:
         _validated_field_name(name)
-    logger.log(
-        level,
-        "",
-        exc_info=exc_info,
-        extra={"gateway_event": event, "gateway_fields": dict(fields)},
-    )
+    try:
+        for name, limit in DIAGNOSTIC_TEXT_LIMITS:
+            value = fields.get(name)
+            if type(value) is int and name != "upstream_message":
+                value = str(value)
+            if type(value) is str:
+                fields[name] = DiagnosticText(value, limit)
+        if "rejection_counts" in fields:
+            counts = safe_rejection_counts(fields["rejection_counts"])
+            if counts is not None:
+                fields["rejection_counts"] = counts
+        logger.log(
+            level,
+            "",
+            exc_info=exc_info,
+            extra={"gateway_event": event, "gateway_fields": dict(fields)},
+        )
+    except Exception:
+        # Logging and diagnostic preparation must not change the business result.
+        pass
 
 
 def _write_emergency(stderr: TextIO) -> None:
@@ -220,6 +348,23 @@ def _write_emergency(stderr: TextIO) -> None:
         stderr.flush()
     except Exception:
         pass
+
+
+if TYPE_CHECKING:
+    _StreamHandlerBase = logging.StreamHandler[TextIO]
+else:
+    _StreamHandlerBase = logging.StreamHandler
+
+
+class _SafeStreamHandler(_StreamHandlerBase):
+    """Report formatter/stream failures without logging's unsafe exception dump."""
+
+    def __init__(self, stderr: TextIO) -> None:
+        super().__init__(stderr)
+        self._emergency_stderr = stderr
+
+    def handleError(self, record: logging.LogRecord) -> None:  # noqa: N802
+        _write_emergency(self._emergency_stderr)
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -346,7 +491,7 @@ def configure_debug_logging(
         redactor = SecretRedactor()
         formatter = KeyValueFormatter(redactor)
 
-        stderr_handler = logging.StreamHandler(stderr)
+        stderr_handler = _SafeStreamHandler(stderr)
         stderr_handler.setFormatter(formatter)
         handlers.append(stderr_handler)
 

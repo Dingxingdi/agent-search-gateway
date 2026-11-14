@@ -26,5 +26,10 @@ class JinaReaderAdapter:
             json_body={"url": str(url)},
         )
         if not text.strip():
-            raise failure(self.name, "fetch", "page body is empty")
+            raise failure(
+                self.name,
+                "fetch",
+                "page body is empty",
+                diagnostics={"semantic_result": "empty", "response_kind": "text"},
+            )
         return URLFetchCandidate(text, text)

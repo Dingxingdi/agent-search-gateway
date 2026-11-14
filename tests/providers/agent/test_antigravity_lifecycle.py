@@ -106,6 +106,7 @@ async def test_cancellation_cleans_grandchildren_in_the_owned_process_group(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=10,
             pass_env=(),
@@ -140,6 +141,7 @@ async def test_timeout_terminates_process_group_before_releasing_quota(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.3,
             pass_env=(),
@@ -163,14 +165,17 @@ async def test_timeout_terminates_process_group_before_releasing_quota(
 async def test_cancellation_and_second_cancel_wait_for_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.1, raising=False)
+    caplog.set_level(logging.DEBUG, logger=adapter.__name__)
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     gate = CapacityGate(1)
     task = asyncio.create_task(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=10,
             pass_env=(),
@@ -181,10 +186,27 @@ async def test_cancellation_and_second_cancel_wait_for_cleanup(
     try:
         task.cancel()
         await asyncio.sleep(0.02)
+        assert not any(
+            getattr(record, "gateway_event", None) == "agent_process_diagnostic"
+            for record in caplog.records
+        )
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError) as caught:
             await asyncio.wait_for(task, 2)
         assert_clean(state, gate)
+        events = [
+            record
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "agent_process_diagnostic"
+        ]
+        assert len(events) == 1
+        fields = getattr(events[0], "gateway_fields", {})
+        assert fields["reason"] == fields["category"] == "cancelled"
+        assert fields["provider"] == "agy" and fields["stage"] == "agent_process"
+        assert fields["exit_code"] == -signal.SIGKILL
+        assert fields["stdout_bytes"] == fields["stderr_bytes"] == 0
+        assert "upstream_status" not in fields
+        assert not hasattr(caught.value, "diagnostics")
     finally:
         force_cleanup(state)
         task.cancel()
@@ -228,6 +250,7 @@ async def test_leader_exit_with_inherited_pipe_is_bounded(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.3,
             pass_env=(),
@@ -274,6 +297,7 @@ async def test_terminal_exit_cleans_remaining_descendants(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=1,
             pass_env=(),
@@ -301,9 +325,11 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     deny_group_probe: bool,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.05, raising=False)
     command, ready = hanging_cli(tmp_path, ignore_term=deny_group_probe)
+    caplog.set_level(logging.DEBUG, logger=adapter.__name__)
     original = asyncio.create_subprocess_exec
     created, release = asyncio.Event(), asyncio.Event()
 
@@ -319,6 +345,7 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=1,
             pass_env=(),
@@ -345,6 +372,16 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
         assert_clean(state, gate)
+        events = [
+            record
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "agent_process_diagnostic"
+        ]
+        assert len(events) == 1
+        fields = getattr(events[0], "gateway_fields", {})
+        assert fields["reason"] == "cancelled"
+        assert fields.get("exit_code") == (-signal.SIGKILL if deny_group_probe else -signal.SIGTERM)
+        assert "upstream_status" not in fields
         if deny_group_probe:
             assert 0 in signals
             assert signal.SIGTERM in signals
@@ -370,6 +407,7 @@ async def test_cancel_queued_invocation_never_spawns(
             adapter.run_antigravity(
                 None,
                 [],
+                provider_name="agy",
                 command="unused",
                 timeout_seconds=1,
                 pass_env=(),
@@ -394,6 +432,7 @@ async def test_spawn_failure_is_safe_and_releases_capacity(tmp_path: Path, exist
         await adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=1,
             pass_env=(),
@@ -432,6 +471,7 @@ async def test_stdout_over_limit_fails_and_reaps_child(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.5,
             pass_env=(),
@@ -473,6 +513,7 @@ async def test_output_limits_count_bytes_and_include_exact_boundary(
     operation = adapter.run_antigravity(
         None,
         [],
+        provider_name="agy",
         command=str(command),
         timeout_seconds=2,
         pass_env=(),
@@ -505,6 +546,7 @@ async def test_interleaved_pipes_are_drained_without_deadlock(tmp_path: Path) ->
             await adapter.run_antigravity(
                 None,
                 [],
+                provider_name="agy",
                 command=str(command),
                 timeout_seconds=2,
                 pass_env=(),
@@ -530,6 +572,7 @@ async def test_detached_descendant_cannot_hold_cleanup_open(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.3 if outcome == "timeout" else 5,
             pass_env=(),
@@ -615,9 +658,15 @@ async def test_signal_errors_keep_cleanup_bounded_and_preserve_outcome(
         processes.append(process)
         return process
 
-    async def capture_read(stream: asyncio.StreamReader, *, capture: bool, limit: int) -> bytes:
+    async def capture_read(
+        stream: asyncio.StreamReader,
+        *,
+        capture: bool,
+        limit: int,
+        counter: adapter._ByteCount | None = None,
+    ) -> bytes:
         try:
-            return await original_read(stream, capture=capture, limit=limit)
+            return await original_read(stream, capture=capture, limit=limit, counter=counter)
         finally:
             readers_finished.append(stream)
 
@@ -639,6 +688,7 @@ async def test_signal_errors_keep_cleanup_bounded_and_preserve_outcome(
         adapter.run_antigravity(
             None,
             [],
+            provider_name="agy",
             command=str(command),
             timeout_seconds=0.3 if outcome == "timeout" else 5,
             pass_env=(),
@@ -690,3 +740,83 @@ async def test_signal_errors_keep_cleanup_bounded_and_preserve_outcome(
         await asyncio.gather(task, return_exceptions=True)
         for process in processes:
             await asyncio.wait_for(process.wait(), 1)
+
+
+@pytest.mark.parametrize("timeout_seconds", [3600, 7200])
+@pytest.mark.parametrize("outcome", ["success", "timeout"])
+async def test_long_configured_budget_controls_real_process_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_seconds: int,
+    outcome: str,
+) -> None:
+    ready, release = tmp_path / "ready.json", tmp_path / "release"
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        Path({str(ready)!r}).write_text(json.dumps({{
+            "pid": os.getpid(), "children": [], "cwd": os.getcwd(), "argv": sys.argv[1:],
+        }}))
+        while not Path({str(release)!r}).exists():
+            time.sleep(0.005)
+        print(json.dumps({{"status": "SUCCESS", "response": "done"}}))
+        """,
+    )
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    clock_offset = 0.0
+    gate = CapacityGate(1)
+    state: dict[str, object] = {}
+    with monkeypatch.context() as clock_patch:
+        clock_patch.setattr(loop, "time", lambda: real_time() + clock_offset)
+        async with gate.lease():
+            task = asyncio.create_task(
+                adapter.run_antigravity(
+                    None,
+                    [],
+                    provider_name="long-budget",
+                    command=str(command),
+                    timeout_seconds=timeout_seconds,
+                    pass_env=(),
+                    quota=gate,
+                )
+            )
+            await asyncio.sleep(0)
+            # Quota waiting may exceed the entire configured process budget.
+            clock_offset += timeout_seconds * 2
+            await asyncio.sleep(0)
+            assert not ready.exists() and not task.done()
+        try:
+            state = await wait_for_json(ready)
+            argv = state["argv"]
+            assert isinstance(argv, list)
+            assert argv[argv.index("--print-timeout") + 1] == f"{timeout_seconds}s"
+            clock_offset += timeout_seconds + 4
+            await asyncio.sleep(0.02)
+            assert not task.done(), "configured +5 deadline fired too early"
+            if outcome == "success":
+                release.touch()
+            else:
+                clock_offset += 2
+            done, _ = await asyncio.wait({task}, timeout=2)
+            assert task in done, "configured +5 deadline did not supervise the process"
+            if outcome == "success":
+                assert await task == "done"
+            else:
+                with pytest.raises(ExecutionFailure) as caught:
+                    await task
+                assert caught.value.reason == "timeout"
+            assert_clean(state, gate)
+        finally:
+            force_cleanup(state)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_stderr_reader_counts_bytes_without_retaining_content() -> None:
+    stream = asyncio.StreamReader()
+    stream.feed_data(b"STDERR_SENTINEL" * 100)
+    stream.feed_eof()
+    counter = adapter._ByteCount()
+    assert await adapter._read_stream(stream, capture=False, limit=4096, counter=counter) == b""
+    assert counter.observed == len(b"STDERR_SENTINEL" * 100)

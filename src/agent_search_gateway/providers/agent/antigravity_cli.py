@@ -8,12 +8,15 @@ import os
 import signal
 from collections.abc import Sequence
 from contextlib import suppress
+from dataclasses import dataclass
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 
 from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ...observability import log_event
 from ..contracts import ChatMessage
+from ..diagnostics import best_effort_diagnostics, safe_diagnostic_fields
 
 _BASE_ENVIRONMENT = (
     "PATH",
@@ -60,7 +63,9 @@ def _reject_constant(value: str) -> None:
     raise ValueError("Nonstandard JSON constant")
 
 
-def _decode_terminal_response(stdout: bytes, returncode: int) -> str:
+def _decode_terminal_response(
+    stdout: bytes, returncode: int, *, diagnostics: dict[str, object] | None = None
+) -> str:
     if returncode != 0:
         raise _execution_failure("nonzero_exit")
     try:
@@ -73,7 +78,18 @@ def _decode_terminal_response(stdout: bytes, returncode: int) -> str:
         raise ProtocolFailure(
             ErrorCode.PROTOCOL_ERROR, "Invalid Agent terminal envelope", reason="invalid_json"
         )
+    if diagnostics is not None:
+        diagnostics.update(
+            best_effort_diagnostics(
+                lambda: {
+                    "upstream_status": envelope["status"],
+                    "response_kind": "object",
+                }
+            )
+        )
     if envelope["status"] != "SUCCESS":
+        if diagnostics is not None:
+            diagnostics.update(best_effort_diagnostics(lambda: _terminal_error_fields(envelope)))
         raise _execution_failure("terminal_status_failure")
     response = envelope.get("response")
     if not isinstance(response, str):
@@ -81,19 +97,41 @@ def _decode_terminal_response(stdout: bytes, returncode: int) -> str:
             ErrorCode.PROTOCOL_ERROR, "Invalid Agent terminal envelope", reason="invalid_json"
         )
     if not response.strip():
+        if diagnostics is not None:
+            diagnostics["category"] = "empty_output"
         raise _execution_failure("empty_response")
     return response
+
+
+def _terminal_error_fields(envelope: dict[str, object]) -> dict[str, object]:
+    error = envelope.get("error")
+    fields = safe_diagnostic_fields(
+        {"upstream_code": error.get("code"), "upstream_message": error.get("message")}
+        if isinstance(error, dict)
+        else {}
+    )
+    fields["category"] = "provider_response" if fields else "unknown"
+    return fields
+
+
+@dataclass(slots=True)
+class _ByteCount:
+    observed: int = 0
 
 
 _STDOUT_LIMIT_BYTES = 4 * 1024 * 1024
 _STDERR_LIMIT_BYTES = 256 * 1024
 
 
-async def _read_stream(stream: asyncio.StreamReader, *, capture: bool, limit: int) -> bytes:
+async def _read_stream(
+    stream: asyncio.StreamReader, *, capture: bool, limit: int, counter: _ByteCount | None = None
+) -> bytes:
     chunks: list[bytes] = []
     size = 0
     while chunk := await stream.read(64 * 1024):
         size += len(chunk)
+        if counter is not None:
+            counter.observed = size
         if size > limit:
             raise _execution_failure("output_limit")
         if capture:
@@ -214,6 +252,7 @@ async def run_antigravity(
     model: str | None,
     messages: Sequence[ChatMessage],
     *,
+    provider_name: str,
     command: str,
     timeout_seconds: float,
     pass_env: Sequence[str],
@@ -222,6 +261,9 @@ async def run_antigravity(
     prompt = "\n\n".join(
         f"[{message['role'].upper()}]\n{message['content']}" for message in messages
     )
+    timeout_argument = format(Decimal(str(timeout_seconds)), "f")
+    if "." in timeout_argument:
+        timeout_argument = timeout_argument.rstrip("0").rstrip(".")
     argv = [
         command,
         "-p",
@@ -229,7 +271,7 @@ async def run_antigravity(
         "--output-format",
         "json",
         "--print-timeout",
-        f"{timeout_seconds:g}s",
+        f"{timeout_argument}s",
     ]
     if model is not None:
         argv.extend(["--model", model])
@@ -238,6 +280,64 @@ async def run_antigravity(
             spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
             tasks: list[asyncio.Task[bytes] | asyncio.Task[int]] = []
             succeeded = False
+            started = asyncio.get_running_loop().time()
+            process: asyncio.subprocess.Process | None = None
+            stdout_count, stderr_count = _ByteCount(), _ByteCount()
+            diagnostics: dict[str, object] = {}
+            failure: ExecutionFailure | None = None
+            cancelled = False
+            cleanup_failed = False
+
+            def record_diagnostic() -> dict[str, object]:
+                # Cleanup may acquire the handle after cancellation during shielded spawn.
+                known_process = process
+                if (
+                    known_process is None
+                    and spawn is not None
+                    and spawn.done()
+                    and not spawn.cancelled()
+                    and spawn.exception() is None
+                ):
+                    known_process = spawn.result()
+                reason: str | None = "success" if succeeded else "execution_failure"
+                if failure is not None:
+                    reason = failure.reason
+                category = diagnostics.get(
+                    "category", failure.reason if failure is not None else "unknown"
+                )
+                if cleanup_failed:
+                    reason, category = "execution_failure", "unknown"
+                if cancelled:
+                    reason, category = "cancelled", "cancelled"
+                failed = not succeeded or failure is not None or cancelled or cleanup_failed
+                fields = safe_diagnostic_fields(
+                    {
+                        **diagnostics,
+                        "category": category,
+                        "semantic_result": "error" if failed else "success",
+                        "exit_code": known_process.returncode
+                        if known_process is not None
+                        else None,
+                        "stdout_bytes": stdout_count.observed,
+                        "stderr_bytes": stderr_count.observed,
+                    }
+                )
+                if failure is not None:
+                    failure.diagnostics = fields
+                log_event(
+                    logging.getLogger(__name__),
+                    logging.DEBUG,
+                    "agent_process_diagnostic",
+                    exc_info=False,
+                    **fields,
+                    provider=provider_name,
+                    model=model,
+                    stage="agent_process",
+                    elapsed_ms=int((asyncio.get_running_loop().time() - started) * 1000),
+                    reason=reason,
+                )
+                return fields
+
             try:
                 async with asyncio.timeout(timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS):
                     spawn = asyncio.create_task(
@@ -254,24 +354,56 @@ async def run_antigravity(
                     process = await asyncio.shield(spawn)
                     assert process.stdout is not None and process.stderr is not None
                     stdout = asyncio.create_task(
-                        _read_stream(process.stdout, capture=True, limit=_STDOUT_LIMIT_BYTES)
+                        _read_stream(
+                            process.stdout,
+                            capture=True,
+                            limit=_STDOUT_LIMIT_BYTES,
+                            counter=stdout_count,
+                        )
                     )
                     stderr = asyncio.create_task(
-                        _read_stream(process.stderr, capture=False, limit=_STDERR_LIMIT_BYTES)
+                        _read_stream(
+                            process.stderr,
+                            capture=False,
+                            limit=_STDERR_LIMIT_BYTES,
+                            counter=stderr_count,
+                        )
                     )
                     wait = asyncio.create_task(process.wait())
                     tasks.extend((stdout, stderr, wait))
                     await asyncio.gather(*tasks)
-                    response = _decode_terminal_response(stdout.result(), wait.result())
+                    response = _decode_terminal_response(
+                        stdout.result(), wait.result(), diagnostics=diagnostics
+                    )
                     succeeded = True
                     return response
             except TimeoutError:
-                raise _execution_failure("timeout") from None
+                failure = _execution_failure("timeout")
+                raise failure from None
             except OSError as exc:
+                diagnostics["category"] = "spawn"
                 reason = "argument_limit" if exc.errno == errno.E2BIG else "spawn_failure"
-                raise _execution_failure(reason) from None
+                failure = _execution_failure(reason)
+                raise failure from None
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            except ExecutionFailure as exc:
+                failure = exc
+                raise
             finally:
                 cleanup = asyncio.create_task(_cleanup_process(spawn, tasks))
-                cleanup_reason = await _finish_cleanup(cleanup)
-                if succeeded and cleanup_reason is not None:
-                    raise _execution_failure(cleanup_reason)
+                try:
+                    cleanup_reason = await _finish_cleanup(cleanup)
+                    if succeeded and cleanup_reason is not None:
+                        diagnostics["category"] = "unknown"
+                        failure = _execution_failure(cleanup_reason)
+                        raise failure
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
+                except Exception:
+                    cleanup_failed = True
+                    raise
+                finally:
+                    best_effort_diagnostics(record_diagnostic)

@@ -99,9 +99,11 @@ Edit these two keys in the existing provider block; keep its credential referenc
 
 #### Known provider limitations
 
-ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in their organic search results instead of the underlying destination URLs. The gateway currently preserves these provider-supplied links; it does not decode or resolve the wrappers. This can affect URL identity, deduplication, and later `url-fetch` requests. The provider limitation is tracked in [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) and is not fixed in the gateway.
+ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in organic search results; [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) documents the observed limitation. At the shared keyword-result entry point, the gateway unwraps absolute HTTP(S) URLs whose hostname is exactly `google.com` or `www.google.com`, path is exactly `/goto`, and query contains exactly one `url` parameter with a valid HTTP(S) destination. It decodes that query value once, before normal URL normalization, deduplication, admission, and cached-body merging, so later `url-fetch` uses the destination identity.
 
-When destination URLs are required, use results from other search providers and set `enable_search = false` in the `[web_providers.scraperapi]` and `[web_providers.scrape_do]` configuration blocks. Their `enable_fetch` flags are independent and may remain enabled. Disabling search does not remove wrapper URLs already admitted to the running daemon; restarting clears that state and requires searching again before fetching URLs.
+A recognized wrapper with a missing, duplicate, empty, malformed, or unsafe destination is discarded individually. Unknown URL shapes, including unsupported opaque formats outside this rule, pass through unchanged to the existing URL rules. The gateway does not follow network redirects, recursively unwrap destinations, or decode opaque tokens. This shared rule covers matching links from every keyword provider; it does not rewrite LLM, Agent, or paper-search URLs, migrate previously admitted URLs, or establish that a particular provider has returned this shape in a live test.
+
+If unsupported wrapper formats affect your results, use another search provider or set `enable_search = false` in the `[web_providers.scraperapi]` and `[web_providers.scrape_do]` blocks. Their `enable_fetch` flags are independent and may remain enabled. Restarting clears previously admitted links and requires searching again before fetching URLs.
 
 ## Commands
 
@@ -236,7 +238,7 @@ LLM provider aliases, even when their names match.
 | `harness` | Required string | Only `"antigravity"` is supported |
 | `command` | String, `"agy"` | One executable name or path; relative paths are anchored to the daemon's startup cwd, bare names use PATH; no shell command, embedded flags, or expansion |
 | `max_concurrency` | Integer, `1` | Positive; shared by every invocation of that alias |
-| `timeout_seconds` | Number, `300` | Positive, finite, at most `540` |
+| `timeout_seconds` | Number, `300` | Representable finite positive number; no Gateway-imposed upper bound |
 | `pass_env` | Array of strings, `[]` | Additional environment-variable names, never values |
 | Invocation `provider` | Required string | Exact key in `agent_providers` |
 | Invocation `model` | Optional string | If present, nonempty; omission delegates to the Harness default |
@@ -281,20 +283,34 @@ not resume a previous conversation.
 A successful branch may return no admissible rows and still create an empty file.
 Individual invocation or branch failures do not discard successful siblings.
 If all selected invocations or both branches fail, no result file is created.
-A whole-workflow timeout cancels unfinished work and does not write partial output.
 Only parsed and admitted landing URLs can be fetched; PDF metadata is not admitted.
 
 | Budget | Limit |
 |---|---|
-| Harness print timeout | `timeout_seconds`, explicitly passed on every call |
+| Harness print timeout | Configured `timeout_seconds`, explicitly passed to agy on every call |
 | Python process deadline | Print timeout plus 5 seconds, starting after quota acquisition |
 | Process termination | SIGTERM to the process group, then SIGKILL after up to 2 seconds |
-| Whole Agent workflow | 1140 seconds, including quota queues and paper enrichment |
-| Agent socket response wait | 1200 seconds; other requests retain 300 seconds |
+| Whole Agent workflow | No fixed Gateway deadline; quota queues, separate scope calls, and paper OA enrichment add to total time |
+| Agent socket response wait | No fixed default deadline; cancellation or disconnection ends the wait |
+| Other socket response wait | 600 seconds |
 | Captured output | stdout 4 MiB; stderr 256 KiB; overflow fails without accepting truncated output |
 
+The default single-process timeout remains 300 seconds. A configured deadline still
+ends an overlong call and triggers process cleanup; request cancellation and client
+disconnection also clean up active Agent work. Quota waiting happens before that
+process deadline begins. Two scope branches and any subsequent OA enrichment are
+separate work, so total workflow duration can exceed a single process budget.
+An unresponsive but connected daemon can leave the Agent client waiting until
+interrupted or disconnected. Explicit numeric socket timeouts supplied by internal
+callers remain honored.
+
+The gateway accepts representable finite positive timeout values without a fixed
+maximum, but the external agy duration parser may reject extreme values; the gateway
+does not guarantee that agy supports every such duration.
+
 These asynchronous deadlines cannot interrupt synchronous OS process creation if
-the operating system stalls before Python receives the process handle.
+the operating system stalls before Python receives the process handle. Process-group
+cleanup also cannot guarantee termination of descendants that escape the group.
 
 Agent calls are not retried by the gateway; the HTTP retry configuration does not
 apply. Success requires exit code zero and one valid JSON terminal object with
@@ -408,9 +424,21 @@ The daemon writes the same project events to stderr and to:
 
 The current log rotates at 5 MiB and retains 3 backups (`debug.log.1`, `.2`, and `.3`). The file is append-oriented across daemon restarts and contains explicit `session_started` / `session_stopped` boundaries when orderly lifecycle events are available.
 
-DEBUG events expose operational metadata such as request ID, provider, semantic stage, model, retry attempt, HTTP status, timing, result counts, scheduler/quota decisions, candidate URLs, and fixed acceptance/rejection reason codes. Target URL path/query/fragment values may be persisted, but URI userinfo is stripped first. HTTP transport endpoint fields additionally omit userinfo, query, and fragment so request-specific search/query content is not recorded as endpoint metadata. Treat the debug files as sensitive local artifacts because target URLs can themselves contain private or signed query values.
+DEBUG diagnostics cover Web search and Fetch providers, JSON/XML academic providers and OA resolvers, HTTP execution, LLM calls, and Agent processes. Success events retain useful metadata and counts; failures add allowlisted upstream code, status, type, and short messages where the provider's response format supports safe extraction. HTTP status remains separate from an upstream status inside a response, including errors carried by HTTP 200. Response byte counts describe the content actually read, rather than trusting Content-Length.
 
-The implementation does not intentionally log query/prompt/page/model-response bodies or authentication values. Central secret redaction is also applied to final rendered messages and debug tracebacks as defense in depth. DEBUG mode is diagnostic rather than a raw payload/TRACE mode.
+| Event layer | Meaning |
+|---|---|
+| HTTP attempts and responses | `http_attempt_started`, `http_attempt_completed`, and `provider_response_diagnostic` describe individual attempts and received responses; a transport failure without a response does not invent response metadata |
+| HTTP retry and failure | `http_retrying` records another scheduled attempt; `http_failed` marks terminal HTTP failure |
+| LLM protocol and stages | `llm_protocol_attempt_started`, `provider_retrying`, and `llm_protocol_completed` describe protocol work; `llm_stage_*` events describe judge, safety, cleaning, and summary stages |
+| Provider terminal outcome | The owning search, Fetch, or OA pipeline emits one `provider_completed` or `provider_failed` for each invocation and scope; retries and different scopes are separate from that outcome |
+| Workflow outcome | The daemon's `workflow_completed` or `workflow_failed` describes the whole command; one provider failure need not fail successful sibling work |
+
+Candidate summaries keep adapter parsing (`phase=adapter`) separate from keyword admission preparation (`phase=staging`). Each phase reports received, accepted, rejected, grouped rejection reasons, and rewritten counts where relevant. Early termination distinguishes processed from unprocessed candidates rather than calling untouched candidates rejected. Unpaywall HTTP 404 is a completed OA lookup with no match, not a provider failure. Agent diagnostics include safe process classifications, exit status, and stdout/stderr byte counts after cleanup.
+
+Events retain request ID, provider, stage, model, timing, scheduler/quota decisions, and safe URL components. Target URL path/query/fragment values are filtered before logging: paths may remain, while query and fragment are omitted. URI userinfo is stripped from logged URLs; HTTP transport endpoint fields follow the same rule. Upstream error text is redacted before sanitizing and truncating: code/status/type fields are capped at 128 characters and messages at 512. Message length and truncation metadata can explain omitted detail.
+
+The implementation does not intentionally log full response payloads, query/prompt/page/model-response bodies, Agent stdout/stderr content, or authentication values. Central secret redaction is also applied to final rendered messages and debug tracebacks as defense in depth. DEBUG mode is diagnostic rather than a raw payload/TRACE mode. Treat debug files as sensitive local artifacts and review them before sharing; URL paths and operational metadata can still be private. Normal business-command stdout/stderr contracts are unchanged.
 
 Transport retry (`http_retrying`) and terminal failure (`http_failed`) events include a `transport_type` field such as `ReadTimeout`, `ConnectTimeout`, or `ConnectError`. Only the concrete exception class name is recorded, not its message. HTTP status and JSON decode failures do not carry this field.
 

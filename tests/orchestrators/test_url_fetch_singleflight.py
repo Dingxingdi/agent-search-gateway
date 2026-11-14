@@ -217,4 +217,5 @@ async def test_url_fetch_singleflight_preserves_leader_provider_correlation() ->
     assert all("event=provider_started" not in line for line in follower_lines)
     assert all("event=provider_completed" not in line for line in follower_lines)
     assert all("event=url_lock_acquired" not in line for line in follower_lines)
-    assert "url=https://example.com/correlated?id=42&mode=test" in stream.getvalue()
+    assert "url=https://example.com/correlated " in stream.getvalue()
+    assert "?id=42&mode=test" not in stream.getvalue()

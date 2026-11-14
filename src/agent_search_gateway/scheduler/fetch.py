@@ -11,6 +11,7 @@ from ..llm.stages import LLMStages, cheap_check
 from ..models import FetchOutcome
 from ..observability import elapsed_ms, log_event, target_url_for_log
 from ..providers.contracts import URLFetchCandidate, URLFetchProvider
+from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
 from ..url_normalization import NormalizedURL
 
 
@@ -110,7 +111,8 @@ class FetchScheduler:
         try:
             candidate = await provider.fetch(url)
             self._validate_candidate(candidate)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self._log_provider_failed(provider.name, url, started, exc)
             raise
         except ExecutionFailure as exc:
             self._log_provider_failed(provider.name, url, started, exc)
@@ -123,30 +125,43 @@ class FetchScheduler:
             )
             return FetchOutcome("execution_failure", failures=(failure,))
 
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            "candidate_accepted",
-            provider=provider.name,
-            url=target_url_for_log(str(url)),
-            raw_chars=len(candidate.raw_content),
-            content_chars=len(candidate.content),
-        )
-        validation_candidate = candidate.content or candidate.raw_content
-        if not cheap_check(validation_candidate):
-            self._log_body_rejected(provider.name, url, "cheap_check")
-            self._log_provider_completed(provider.name, url, started, "semantic_failure")
-            return FetchOutcome("semantic_failure")
+        try:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "candidate_accepted",
+                provider=provider.name,
+                url=target_url_for_log(str(url)),
+                raw_chars=len(candidate.raw_content),
+                content_chars=len(candidate.content),
+            )
+            validation_candidate = candidate.content or candidate.raw_content
+            if not cheap_check(validation_candidate):
+                self._log_body_rejected(provider.name, url, "cheap_check")
+                self._log_provider_completed(provider.name, url, started, "semantic_failure")
+                return FetchOutcome("semantic_failure")
+        except (asyncio.CancelledError, Exception) as exc:
+            self._log_provider_failed(provider.name, url, started, exc)
+            raise
 
         try:
             decision = await self._stages.judge(validation_candidate)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            self._log_provider_failed(
+                provider.name,
+                url,
+                started,
+                exc,
+                failed_stage="judge",
+                dependency=self._stages.judge_provider,
+            )
             raise
         except ExecutionFailure as exc:
             failure = ExecutionFailure(
                 exc.code,
                 exc.message,
                 reason=exc.reason or "judge_execution_failed",
+                diagnostics=diagnostic_fields_from_failure(exc),
             )
             self._log_provider_failed(
                 provider.name,
@@ -227,40 +242,14 @@ class FetchScheduler:
         provider: str,
         url: NormalizedURL,
         started: float,
-        exc: Exception,
+        exc: BaseException,
         *,
         failed_stage: str | None = None,
         dependency: str | None = None,
     ) -> None:
-        reason = exc.reason if isinstance(exc, ExecutionFailure) else None
+        fields = diagnostic_fields_from_failure(exc)
         if failed_stage is not None:
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "provider_failed",
-                provider=provider,
-                stage="fetch",
-                url=target_url_for_log(str(url)),
-                error_type=type(exc).__name__,
-                elapsed_ms=elapsed_ms(self._monotonic, started),
-                failed_stage=failed_stage,
-                dependency=dependency or "-",
-                reason=reason or "judge_execution_failed",
-            )
-            return
-        if reason:
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "provider_failed",
-                provider=provider,
-                stage="fetch",
-                url=target_url_for_log(str(url)),
-                error_type=type(exc).__name__,
-                elapsed_ms=elapsed_ms(self._monotonic, started),
-                reason=reason,
-            )
-            return
+            fields.update(failed_stage=failed_stage, dependency=dependency or "-")
         log_event(
             self._logger,
             logging.DEBUG,
@@ -270,6 +259,9 @@ class FetchScheduler:
             url=target_url_for_log(str(url)),
             error_type=type(exc).__name__,
             elapsed_ms=elapsed_ms(self._monotonic, started),
+            reason=safe_failure_reason(exc),
+            exc_info=False,
+            **fields,
         )
 
     @staticmethod

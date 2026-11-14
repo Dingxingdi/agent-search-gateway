@@ -86,3 +86,31 @@ def test_scrape_do_requires_non_empty_api_url(api_url: object) -> None:
             secret=SecretValue("secret"),
             http_executor=RecordingHttpExecutor(),
         )
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "semantic"),
+    [
+        ("# PRIVATE_BODY\n<html>PRIVATE_HTML</html>", 200, "success"),
+        (" \n\t", 200, "empty"),
+        ("<html>PRIVATE_HTTP_ERROR</html>", 403, "error"),
+    ],
+)
+async def test_fetch_reports_safe_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, body: str, status: int, semantic: str
+) -> None:
+    from tests.support.web_diagnostics import assert_text_fetch_diagnostics
+
+    await assert_text_fetch_diagnostics(
+        caplog,
+        "scrape_do",
+        lambda executor: ScrapeDoAdapter(
+            name="scrape_do",
+            api_url="https://scrape_do.example.test",
+            secret=SecretValue("PRIVATE_AUTH"),
+            http_executor=executor,
+        ),
+        body,
+        status,
+        semantic,
+    )

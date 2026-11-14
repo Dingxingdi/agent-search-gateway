@@ -29,7 +29,6 @@ _MAX_RESPONSE_FRAME_BYTES = 8 << 20
 # Allow the example's three 180-second HTTP attempts plus backoff and response overhead.
 # This is a client wait limit, not a bound on arbitrary multi-stage workflows.
 _RESPONSE_TIMEOUT_SECONDS = 600.0
-_AGENT_RESPONSE_TIMEOUT_SECONDS = 1200.0
 
 
 def _bad_request(message: str) -> ErrorResponse:
@@ -269,12 +268,8 @@ async def send_request(
     *,
     response_timeout_seconds: float | None = None,
 ) -> Response:
-    if response_timeout_seconds is None:
-        response_timeout_seconds = (
-            _AGENT_RESPONSE_TIMEOUT_SECONDS
-            if isinstance(request, AgentSearchRequest)
-            else _RESPONSE_TIMEOUT_SECONDS
-        )
+    if response_timeout_seconds is None and not isinstance(request, AgentSearchRequest):
+        response_timeout_seconds = _RESPONSE_TIMEOUT_SECONDS
     try:
         reader, writer = await asyncio.open_unix_connection(
             path=socket_path,
