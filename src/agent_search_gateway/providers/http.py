@@ -310,6 +310,11 @@ class HttpJsonExecutor:
                         response_fields.update(
                             category="provider_response", semantic_result="error"
                         )
+                    elif (
+                        not response.is_success
+                        and response_fields.get("semantic_result") == "success"
+                    ):
+                        response_fields.update(category="http_status", semantic_result="error")
                     diagnostic_context = {**response_fields, **context}
                     log_event(
                         self._logger,

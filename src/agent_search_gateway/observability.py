@@ -221,7 +221,8 @@ _DIAGNOSTIC_AUTH = re.compile(
 def _diagnostic_text_for_log(value: str, redactor: SecretRedactor) -> str:
     # Never decode/unescape URLs here: that could create a secret after redaction.
     value = redactor.redact(value)
-    value = _DIAGNOSTIC_URL.sub(lambda match: http_endpoint_for_log(match.group()), value)
+    # Provider-supplied URLs can carry unregistered secrets in any component.
+    value = _DIAGNOSTIC_URL.sub("<redacted-url>", value)
     value = _DIAGNOSTIC_AUTH.sub("<redacted>", value)
     value = "".join(character if character.isprintable() else " " for character in value)
     return " ".join(value.split())

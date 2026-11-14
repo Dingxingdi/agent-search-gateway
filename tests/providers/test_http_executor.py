@@ -139,6 +139,102 @@ async def test_http_status_exhaustion_carries_last_response_diagnostics() -> Non
     assert "event=provider_failed " not in stream.getvalue()
 
 
+@pytest.mark.parametrize(
+    ("provider", "recovers"),
+    [("arxiv", True), ("arxiv", False), ("dblp", True), ("dblp", False), ("json", False)],
+)
+async def test_http_status_overrides_successful_content_diagnostics(
+    caplog: pytest.LogCaptureFixture, provider: str, recovers: bool
+) -> None:
+    from agent_search_gateway.providers.academic.arxiv import (
+        _response_diagnostics as arxiv_diagnostics,
+    )
+    from agent_search_gateway.providers.academic.dblp import (
+        _response_diagnostics as dblp_diagnostics,
+    )
+
+    caplog.set_level(logging.DEBUG)
+    body = {
+        "arxiv": '<feed xmlns="http://www.w3.org/2005/Atom"/>',
+        "dblp": "<result><hits/></result>",
+        "json": '{"ok":true}',
+    }[provider]
+    content_type = "application/json" if provider == "json" else "application/xml"
+    response_kind = "object" if provider == "json" else "xml"
+
+    def json_diagnostics(_response: httpx.Response) -> dict[str, object]:
+        return {"semantic_result": "success", "response_kind": "object"}
+
+    extractor = {"arxiv": arxiv_diagnostics, "dblp": dblp_diagnostics, "json": json_diagnostics}[
+        provider
+    ]
+    statuses = [500, 200 if recovers else 500]
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            statuses.pop(0), text=body, headers={"Content-Type": content_type}, request=request
+        )
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0.25, 2.0, 30.0), provider_name=provider, sleep=sleep
+        )
+        request = executor.request_json if provider == "json" else executor.request_text
+        if recovers:
+            assert (
+                await request(
+                    "GET",
+                    "https://provider.example.test/data",
+                    stage="search",
+                    response_diagnostics=extractor,
+                )
+                == body
+            )
+        else:
+            with pytest.raises(HttpStatusFailure) as caught:
+                await request(
+                    "GET",
+                    "https://provider.example.test/data",
+                    stage="search",
+                    response_diagnostics=extractor,
+                )
+            assert caught.value.status_code == 500
+            assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+            assert caught.value.diagnostics["semantic_result"] == "error"
+            assert caught.value.diagnostics["category"] == "http_status"
+            assert caught.value.diagnostics["response_kind"] == response_kind
+            assert caught.value.diagnostics["response_bytes"] == len(body.encode())
+            assert caught.value.diagnostics["content_type"] == content_type
+
+    assert statuses == [] and delays == [0.25]
+    events = [
+        (getattr(record, "gateway_event", None), vars(record).get("gateway_fields", {}))
+        for record in caplog.records
+    ]
+    diagnostics = [fields for event, fields in events if event == "provider_response_diagnostic"]
+    assert len(diagnostics) == 2
+    for attempt, fields in enumerate(diagnostics, 1):
+        status = 200 if recovers and attempt == 2 else 500
+        assert fields["attempt"] == attempt
+        assert fields["http_status"] == fields["status"] == status
+        assert fields["response_kind"] == response_kind
+        assert fields["response_bytes"] == len(body.encode())
+        assert fields["content_type"] == content_type
+        assert fields["semantic_result"] == ("success" if status == 200 else "error")
+        if status == 500:
+            assert fields["category"] == "http_status"
+    retries = [fields for event, fields in events if event == "http_retrying"]
+    failures = [fields for event, fields in events if event == "http_failed"]
+    assert len(retries) == 1 and len(failures) == (0 if recovers else 1)
+    for fields in [*retries, *failures]:
+        assert fields["category"] == "status"
+        assert fields["semantic_result"] == "error"
+
+
 @pytest.mark.parametrize("first_response", [False, True])
 async def test_transport_failure_does_not_inherit_response_metadata(first_response: bool) -> None:
     requests: list[httpx.Request] = []

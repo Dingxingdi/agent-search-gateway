@@ -100,8 +100,31 @@ def test_diagnostic_text_redacts_disguised_urls_without_decoding(url: str) -> No
     assert "PRIVATE_FRAGMENT" not in rendered
     assert secret.reveal() not in rendered
     assert "provider failed at" in rendered
-    assert "<invalid-url>" in rendered
+    assert "<redacted-url>" in rendered
     assert len(rendered.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.test/reset/UNREGISTERED_URL_CREDENTIAL",
+        "https://UNREGISTERED_URL_CREDENTIAL.example.test/reset",
+    ],
+)
+def test_diagnostic_text_redacts_entire_untrusted_urls(url: str) -> None:
+    logger, stream = structured_test_logger("test.redaction.untrusted_url")
+    log_event(
+        logger,
+        logging.DEBUG,
+        "provider_response_diagnostic",
+        upstream_message=f"request failed at {url} please retry",
+    )
+    rendered = stream.getvalue()
+    assert "UNREGISTERED_URL_CREDENTIAL" not in rendered
+    assert "example.test" not in rendered
+    assert "<redacted-url>" in rendered
+    assert "request failed at" in rendered
+    assert "please retry" in rendered
 
 
 def test_redacted_url_credentials_do_not_hide_the_remaining_signed_query() -> None:
@@ -116,5 +139,5 @@ def test_redacted_url_credentials_do_not_hide_the_remaining_signed_query() -> No
     assert secret.reveal() not in rendered
     assert "QUERY_PRIVATE_DATA" not in rendered
     assert "FRAGMENT_PRIVATE_DATA" not in rendered
-    assert "https://example.test/a" in rendered
+    assert "<redacted-url>" in rendered
     assert "upstream_message_truncated=false" in rendered

@@ -13,7 +13,7 @@ from ...models import LLMInvocation, RetryPolicy
 from ...observability import SecretValue, log_event
 from ...retry import retry_async
 from ..contracts import ChatMessage
-from ..diagnostics import best_effort_diagnostics
+from ..diagnostics import best_effort_diagnostics, diagnostic_fields_from_failure
 from ..http import HttpJsonExecutor
 
 _RESERVED_EXTRA_BODY_KEYS = frozenset({"model", "messages"})
@@ -118,9 +118,23 @@ class OpenAIChatCompletionsClient:
             try:
                 decoded = json.loads(content)
             except json.JSONDecodeError as exc:
-                raise self._protocol_failure("content was not valid JSON") from exc
+                raise self._protocol_failure(
+                    "content was not valid JSON",
+                    diagnostics={
+                        "category": "invalid_json",
+                        "semantic_result": "unknown",
+                        "response_kind": "object",
+                    },
+                ) from exc
             if not isinstance(decoded, dict):
-                raise self._protocol_failure("JSON content must be an object")
+                raise self._protocol_failure(
+                    "JSON content must be an object",
+                    diagnostics={
+                        "category": "invalid_envelope",
+                        "semantic_result": "unknown",
+                        "response_kind": "object",
+                    },
+                )
             return decoded
 
         async with self._quota.lease():
@@ -191,6 +205,8 @@ class OpenAIChatCompletionsClient:
             reason="protocol_retry",
             next_attempt=attempt + 1,
             retry_scope="protocol",
+            exc_info=False,
+            **diagnostic_fields_from_failure(exc),
         )
 
     def _log_protocol_completed(

@@ -63,7 +63,7 @@ def test_upstream_text_removes_sensitive_material_and_control_characters() -> No
     )
     rendered = stream.getvalue()
     assert credential not in rendered
-    assert "https://example.test/a" in rendered
+    assert "<redacted-url>" in rendered
     assert "\\u0000" not in rendered
     assert "\\u001b" not in rendered
     assert len(rendered.splitlines()) == 1
@@ -131,7 +131,7 @@ def test_upstream_type_is_sanitized_bounded_and_ignores_nested_values() -> None:
     log_event(logger, logging.DEBUG, "provider_response_diagnostic", exc_info=False, **fields)
     rendered = stream.getvalue()
     assert "private" not in rendered and "PRIVATE" not in rendered
-    assert "https://example.test/type" in rendered
+    assert "<redacted-url>" in rendered
     assert "t" * 128 not in rendered and "…" in rendered
     assert safe_diagnostic_fields({"upstream_type": {"message": "PRIVATE"}}) == {}
 

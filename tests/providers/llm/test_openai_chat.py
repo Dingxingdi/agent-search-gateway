@@ -34,6 +34,12 @@ async def test_openai_chat_builds_request_retries_invalid_shape_and_parses_text_
                 json={"choices": [{"message": {"content": "answer"}}]},
                 request=request,
             )
+        if attempts == 3:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "invalid JSON"}}]},
+                request=request,
+            )
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": '{"ok": true}'}}]},
@@ -67,7 +73,7 @@ async def test_openai_chat_builds_request_retries_invalid_shape_and_parses_text_
         assert await client.complete_text(invocation, messages) == "answer"
         assert await client.complete_json(invocation, messages) == {"ok": True}
 
-    assert attempts == 3
+    assert attempts == 4
     first = requests[0]
     assert str(first.url) == "https://llm.example.test/base/v1/chat/completions"
     assert first.headers["authorization"] == "Bearer x"
@@ -293,18 +299,18 @@ async def test_openai_root_api_error_diagnostics_survive_protocol_failure() -> N
 
 
 @pytest.mark.parametrize(
-    ("stage", "content", "attempts", "category"),
+    ("stage", "content", "attempts", "category", "diagnostic_category"),
     [
-        ("judge", "ANSWER_SENTINEL invalid JSON", 2, "protocol"),
-        ("judge", '["ANSWER_SENTINEL"]', 2, "protocol"),
-        ("judge", '{"ok": "yes", "reason": "ANSWER_SENTINEL"}', 1, "execution_failure"),
-        ("safety", '{"ok": true, "reason": ["ANSWER_SENTINEL"]}', 1, "execution_failure"),
-        ("content_clean", "   ", 2, "protocol"),
-        ("focus_summary", "", 2, "protocol"),
+        ("judge", "ANSWER_SENTINEL invalid JSON", 2, "protocol", "invalid_json"),
+        ("judge", '["ANSWER_SENTINEL"]', 2, "protocol", "invalid_envelope"),
+        ("judge", '{"ok": "yes", "reason": "ANSWER_SENTINEL"}', 1, "execution_failure", None),
+        ("safety", '{"ok": true, "reason": ["ANSWER_SENTINEL"]}', 1, "execution_failure", None),
+        ("content_clean", "   ", 2, "protocol", None),
+        ("focus_summary", "", 2, "protocol", None),
     ],
 )
 async def test_openai_stage_failures_keep_safe_stage_and_category(
-    stage: str, content: str, attempts: int, category: str
+    stage: str, content: str, attempts: int, category: str, diagnostic_category: str | None
 ) -> None:
     logger, stream = structured_test_logger("tests.openai.stage-failures")
     calls = 0
@@ -337,7 +343,7 @@ async def test_openai_stage_failures_keep_safe_stage_and_category(
             focus_summary=invocation,
             logger=logger,
         )
-        with pytest.raises(ExecutionFailure):
+        with pytest.raises(ExecutionFailure) as caught:
             if stage == "focus_summary":
                 await stages.focus_summary("PROMPT_SENTINEL", "FOCUS_SENTINEL")
             else:
@@ -349,7 +355,18 @@ async def test_openai_stage_failures_keep_safe_stage_and_category(
     assert len(failed) == 1
     assert f"stage={stage}" in failed[0] and f"category={category}" in failed[0]
     assert "provider=openai" in failed[0] and "model=model" in failed[0]
-    assert logged.count("event=provider_retrying") == attempts - 1
+    retries = [line for line in logged.splitlines() if "event=provider_retrying" in line]
+    assert len(retries) == attempts - 1
+    if diagnostic_category is not None:
+        assert caught.value.diagnostics == {
+            "category": diagnostic_category,
+            "semantic_result": "unknown",
+            "response_kind": "object",
+        }
+        assert all(
+            "semantic_result=unknown" in line and "response_kind=object" in line
+            for line in [*retries, *failed]
+        )
     assert "event=provider_completed" not in logged and "event=provider_failed" not in logged
     for sentinel in ("ANSWER_SENTINEL", "PROMPT_SENTINEL", "FOCUS_SENTINEL"):
         assert sentinel not in logged
