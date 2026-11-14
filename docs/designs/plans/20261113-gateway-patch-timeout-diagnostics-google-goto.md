@@ -1453,3 +1453,83 @@ uv run --offline python scripts/build_docs.py
 - [x] 计划只描述实现与验收，未实施代码、未运行付费调用、未把计划中的预期结果写成实际测试结果。
 
 实施者按 Task 1–21 顺序执行。发生与 spec 冲突的实际新证据时记录具体差异，先做不受影响部分；不要静默放宽安全规则或重试策略。完成各步骤后记录真实验证结果，再进入用户后续指定的实现审查流程。
+
+## 8. 实施检查点（2026-11-14）
+
+本节记录实施阶段的实际结果，与上文计划编写阶段的历史自审分开。Task 1–20 已按顺序完成、自审并提交；Task 21 部分完成，因 LocalHost 内容检查阻断而保留待续，整份计划尚未完成最终验收。
+
+实施工作树为原 `gateway-patch-timeout-logs-google-goto`，实施前基线测试为 **1329 passed, 4 skipped**。每项完成记录如下；相关组的数字为该项最后确认的相关测试结果，全量列均为该项最终实际完成的离线测试结果。
+
+| Task | 范围 | 状态 | 提交 | 相关测试 | 全量测试 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Agent timeout 配置 | DONE | `79f70e3` | 94 passed | 1339 passed, 4 skipped |
+| 2 | Agent 工作流固定 deadline | DONE | `6beff92` | 76 passed | 1340 passed, 4 skipped |
+| 3 | Agent socket 默认等待 | DONE | `b42a9ea` | 170 passed | 1345 passed, 4 skipped |
+| 4 | 安全诊断基础 | DONE | `d41d436` | 170 passed | 1387 passed, 4 skipped |
+| 5 | HTTP 响应与重试诊断 | DONE | `30808ce` | 220 passed | 1411 passed, 4 skipped |
+| 6 | ScraperAPI | DONE | `b028d0a` | 77 passed | 1428 passed, 4 skipped |
+| 7 | Bright Data | DONE | `080e2fc` | 203 passed | 1443 passed, 4 skipped |
+| 8 | Scrape.do / Scrapingdog / SerpAPI | DONE | `ab7f7ca` | 69 passed | 1473 passed, 4 skipped |
+| 9 | AnySearch / Brave / Linkup / ScrapeGraphAI | DONE | `ee4d91f` | 104 passed | 1512 passed, 4 skipped |
+| 10 | Tavily / Exa / Firecrawl | DONE | `9605a0e` | 105 passed | 1530 passed, 4 skipped |
+| 11 | Parallel / TinyFish / Decodo | DONE | `9f35f80` | 264 passed | 1576 passed, 4 skipped |
+| 12 | 15 个 Fetch 后端 | DONE | `99f7749` | 535 passed | 1627 passed, 4 skipped |
+| 13 | JSON 学术提供商 | DONE | `658d3f9` | 108 passed | 1662 passed, 4 skipped |
+| 14 | XML 学术提供商 | DONE | `b267b2f` | 97 passed | 1678 passed, 4 skipped |
+| 15 | Unpaywall / OA enrichment | DONE | `f78821e` | 31 passed | 1690 passed, 4 skipped |
+| 16 | LLM 协议诊断与事件归属 | DONE | `5512760` | 29 passed | 1703 passed, 4 skipped |
+| 17 | Agent 进程诊断与生命周期 | DONE | `d9c3042 + 5f5ac8c` | 110 passed | 1724 passed, 4 skipped |
+| 18 | 流水线终态所有权 | DONE | `76b22ba` | 327 passed | 1746 passed, 4 skipped |
+| 19 | Google goto 纯 helper | DONE | `549bf75` | 81 passed | 1811 passed, 4 skipped |
+| 20 | 关键词 staging 与跨提供商 Fetch 验收 | DONE | `e014ad2` | 168 passed | 1834 passed, 4 skipped |
+| 21 | 当前文档与补丁说明 | BLOCKED / 部分完成 | 未提交 | docs/doctor: 28 passed, 1 failed | 未运行；当前存在已确认的文档 RED |
+
+### 8.1 已完成实现的关键验收事实
+
+- Agent 配置接受可表示的有限正数，不再有 Gateway 固定最大值；默认仍为 300。固定的 540 / 1140 / 1200 三层限制已移除，非 Agent socket 仍为 600，显式数值 override 保持原语义。每次进程的 agy deadline、Python +5、quota 与清理边界都有离线受控时钟/子进程/真实 socket 回归。
+- HTTP 每个真实响应只产生一组 attempt-completed/response-diagnostic；失败携带最后一次尝试的安全诊断。各适配器只选择自己理解的错误字段，HTTP 状态与厂商内层状态分开。公开异常和协议契约、HTTP 重试/退避与 Fetch 策略保持既定边界。
+- 提供商终态由对应搜索、Fetch 或 OA 所有者记录；协议重试与中间层诊断不重复宣告同一调用最终失败。已核对 HTTP 429→502→200、最后失败、LLM 协议恢复、Agent ERROR/timeout/cleanup、OA 404、Fetch 执行/语义/Judge 失败的代表性序列。
+- 受控计数字典、先脱敏后截断的上游短错误、完整 stderr/rotating-file 日志隐私扫描、DEBUG 关闭、并发 request 与重复 invocation/scope 已覆盖。adapter 与 staging 的分母独立；提前终止明确 processed/unprocessed。
+- Google goto helper 只在关键词结果入口运行，严格单次解码已确认的直接 HTTP(S) 目标。已识别无效 wrapper 仅拒绝该候选；未知形状继续原流程。Bright Data 与 ScraperAPI 的真实 adapter + MockTransport 验证目标去重、既有摘要/body 合并、URLStore 准入与后续真实 FetchScheduler；请求计数证明没有额外重定向网络请求。
+- Task 17 的追加提交 `5f5ac8c` 修复普通 spawn 异常漏记进程诊断：使用真实 NUL argv 导致 ValueError 的 RED，保留异常身份与 cleanup，安全诊断在 cleanup 后记录，没有扩大异常转换范围。
+- Task 20 的 `record_rewrite()` 在 URL 改写后立即计数，后续空摘要拒绝、Judge 失败或取消不会丢失 rewrite。两个旧日志断言改为分别校验 adapter/staging。原强制七文件组 **119 passed**，扩展相关组 **168 passed**，最后全量 **1834 passed, 4 skipped**；八文件 Ruff check/format 与全量 mypy（199 files）通过。
+- 以上验证全部离线，未调用付费 provider，未实等 7200 秒。外部 agy 对极端时长的解析支持仍由其自身决定；没有声称能解码 opaque goto token、跟随网络跳转、迁移历史 URLStore，或已有 Bright Data 的真实在线 goto 样本。
+
+### 8.2 Task 21 的已完成内容和阻断
+
+已保存、尚未提交的三个文件：
+
+- `tests/docs/test_documented_config.py`：新增 timeout 文档契约，实际 resolver 接受示例默认 300 及覆盖值 7200，并对当前 README 约束及非 Agent 600 秒说明做检查。
+- `docs/public-interface.md`：更新超时、诊断事件归属、安全边界和关键词 goto 规则。
+- `CHANGELOG.md`：Unreleased 下分别记录三项修复；版本和历史发布条目不变。
+
+README/config 尚未修改。真实 RED 已观察：实际 resolver 接受 7200 后，README 当前 timeout 行仍有数字集合 `{'300', '540'}`，预期只有 `{'300'}`。该测试命令 exit 1，**1 failed / 11 deselected**。
+
+对 README 单行 timeout 表格及 config timeout 注释进行 SHA 保护最小编辑，LocalHost 均返回：
+
+```text
+error_code: INVALID_ARGUMENT
+Secret-looking content is blocked from edit. Use placeholders such as [REDACTED_SECRET] in handoff files.
+```
+
+这两份文件含 `api_key_env` 环境变量名称引用，reader 会脱敏其中多数示例值；只读检查未找到可确认的真实字面凭据。没有将环境变量引用改成破坏示例语义的占位值，也没有省略 SHA、使用替代写入路径或改变共享工具策略来绕过检查。需要先解除这两个合法文档编辑的工具阻断，再继续本 Task。
+
+最后一次针对当前部分文档修改的验证：
+
+| 命令 | Exit | 实际结果 |
+| --- | --- | --- |
+| `uv run --offline pytest tests/docs tests/doctor/test_config.py -v` | 1 | 28 passed, 1 failed；唯一失败是未修改 README 的已知文档契约 |
+| `uv run --offline python scripts/build_docs.py` | 0 | 成功；无新增 tracked 构建输出 |
+| `uv run --offline ruff check tests/docs/test_documented_config.py` | 0 | 通过 |
+| `uv run --offline ruff format --check --diff tests/docs/test_documented_config.py` | 0 | 1 file already formatted |
+| `uv run --offline mypy src tests scripts` | 0 | 199 source files 通过 |
+
+当前文档修改后的完整测试尚未执行，不能把 Task 20 的绿色全量结果表述为当前未提交文档状态的全量通过。
+
+### 8.3 继续执行的顺序
+
+1. 重新读取 README/config 获取当前 SHA，完成 Task 21 已准备的精确说明修改；不改变环境变量引用和配置默认值。
+2. 运行 docs/doctor GREEN、文档构建、全量测试及 Task 21 自审；精确文件提交 Task 21。
+3. 执行第 5 节列出的全部最终门禁，记录真实 exit code/结果；通过后回填逐 Step 复选框和最终完成记录。
+4. 保持原工作树、公开协议/schema、发布版本和已约定范围。尚未执行发布、推送或合并。
+
