@@ -22,7 +22,7 @@
 - No refactor of LLMStages, provider registry, RetryPolicy, academic aggregation or output schema.
 
 #### Assumptions
-- Issue #74 evidences only Google /goto with a URL-bearing query argument (ScraperAPI and Scrape.do); Bright Data can pass links through but no specific live wrapper shape was confirmed.
+- Issue #74 confirms Google /goto wrappers from ScraperAPI and Scrape.do, but its redacted query values do not establish direct versus opaque destinations. The [SerpApi primary report](https://serpapi.com/blog/googles-new-goto-redirect-urls-resolution-in-progress/) confirms the opaque `CAES...` form; the 2026-11-14 review correction preserves well-formed URL-safe CAES wrappers without decoding them. No specific live Bright Data wrapper shape was confirmed.
 - The user chose unlimited *configuration range*, not an infinite process runtime: timeout_seconds must remain finite and positive, default 300.
 - DEBUG should contain actionable response metadata and provider code/message snippets, not complete raw payloads. Default CLI stdout/stderr remain unchanged.
 - The actual agy CLI parser is an external dependency; removal of Gateway's cap does not guarantee every extreme floating-point duration is accepted upstream.
@@ -74,7 +74,7 @@ Retain CLI → Unix socket → Daemon → orchestrators → providers and existi
 - **Rejected alternatives:** Dump all response bodies; force every vendor through one JSON error schema; build a new provider logging framework.
 
 ##### URL unwrapping is provider-independent and deliberately narrow
-- **Description:** Add unwrap_search_result_url() for exact allowed Google hostname + /goto path and one unambiguous url parameter; validate the extracted HTTP(S) target. Unknown URL shapes pass unchanged; recognized but invalid wrappers are rejected as individual candidates. Call it from SearchOrchestrator._stage_keyword_hit before normalize_url().
+- **Description:** Add unwrap_search_result_url() for exact allowed Google hostname + /goto path and one unambiguous url parameter; validate the extracted HTTP(S) target. Unknown URL shapes and well-formed opaque URL-safe `CAES...` wrappers pass unchanged; other recognized but invalid wrappers are rejected as individual candidates. Call it from SearchOrchestrator._stage_keyword_hit before normalize_url().
 - **Rationale:** Keyword Web adapters share KeywordSearchHit; the rule belongs before URL identity and works for all such adapters.
 - **Trade-offs:** It does not unwrap opaque links, other forms, LLM/Agent markdown URLs or paper URLs.
 - **Rejected alternatives:** Per-provider code, modification of global normalize_url(), speculative rule tables, or network redirect following.
@@ -179,7 +179,8 @@ SearchOrchestrator.keyword_search:
             parse items; count/log invalid items without changing filtering
         for each KeywordSearchHit:
             if verified Google /goto: extract target
-                if invalid target: candidate_rejected; continue
+                if well-formed opaque CAES token: retain wrapper identity
+                elif invalid target: candidate_rejected; continue
             normalize URL; keep existing other invalid URL handling
             if abstract empty: candidate_rejected; continue
             if body provided: existing LLM Judge; reject/fail as before
@@ -311,6 +312,7 @@ All fields beyond provider/stage/event are optional when unknown. This object il
 unwrap_search_result_url(raw: str):
     if host/path does not match known Google /goto: return unchanged
     extract exactly one unambiguous url query value
+    if target matches CAES[A-Za-z0-9_-]+={0,2}: return original wrapper unchanged
     if not a valid HTTP(S) target: report recognized-invalid
     else: return target for existing normalize_url and URLStore
 ~~~

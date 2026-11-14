@@ -141,6 +141,44 @@ async def test_runner_spawns_one_fresh_process_and_returns_markdown(tmp_path: Pa
     assert quota.in_use == 0
 
 
+@pytest.mark.parametrize(
+    ("timeout_seconds", "expected_argument"),
+    [
+        (1_000_000.0, "1000000s"),
+        (123456.7, "123456.7s"),
+        (1e-7, "0.0000001s"),
+        (300.0, "300s"),
+        (0.5, "0.5s"),
+    ],
+)
+async def test_runner_preserves_timeout_value_in_plain_seconds_argument(
+    tmp_path: Path,
+    timeout_seconds: float,
+    expected_argument: str,
+) -> None:
+    from agent_search_gateway.providers.agent.antigravity_cli import run_antigravity
+
+    command = write_fake_cli(
+        tmp_path,
+        """
+        timeout = sys.argv[sys.argv.index("--print-timeout") + 1]
+        print(json.dumps({"status": "SUCCESS", "response": timeout}))
+    """,
+    )
+    assert (
+        await run_antigravity(
+            None,
+            [],
+            provider_name="agy",
+            command=str(command),
+            timeout_seconds=timeout_seconds,
+            pass_env=(),
+            quota=CapacityGate(1),
+        )
+        == expected_argument
+    )
+
+
 async def test_runner_omits_model_flag_when_model_is_none(tmp_path: Path) -> None:
     from agent_search_gateway.providers.agent import antigravity_cli as adapter
 

@@ -9,6 +9,7 @@ import signal
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+from decimal import Decimal
 from tempfile import TemporaryDirectory
 
 from ...concurrency import CapacityGate
@@ -260,6 +261,9 @@ async def run_antigravity(
     prompt = "\n\n".join(
         f"[{message['role'].upper()}]\n{message['content']}" for message in messages
     )
+    timeout_argument = format(Decimal(str(timeout_seconds)), "f")
+    if "." in timeout_argument:
+        timeout_argument = timeout_argument.rstrip("0").rstrip(".")
     argv = [
         command,
         "-p",
@@ -267,7 +271,7 @@ async def run_antigravity(
         "--output-format",
         "json",
         "--print-timeout",
-        f"{timeout_seconds:g}s",
+        f"{timeout_argument}s",
     ]
     if model is not None:
         argv.extend(["--model", model])

@@ -146,15 +146,16 @@ No design here promises tolerance of arbitrary dead daemon/socket hangs: removal
 
 ### 7. Google goto error semantics
 
-Recognize only an absolute Google `/goto` URL with **exact** trusted hostname/path and exactly one unambiguous `url` parameter. Decode the query value using normal URL parsing and require a well-formed HTTP(S) destination. Support the verified `google.com` and `www.google.com` host spellings; reject spoofed or userinfo hosts.
+Recognize only an absolute Google `/goto` URL with **exact** trusted hostname/path and exactly one unambiguous `url` parameter. Decode the query value using normal URL parsing and require a well-formed HTTP(S) destination for unwrapping. A structurally valid wrapper containing an opaque URL-safe `CAES...` token instead retains its original wrapper identity; it is not locally decoded or resolved. Support the verified `google.com` and `www.google.com` host spellings; reject spoofed or userinfo hosts.
 
 | Input case | Result | Logging |
 | --- | --- | --- |
 | `https://www.google.com/goto?url=https%3A%2F%2Fexample.org%2Fa` | Use `https://example.org/a` before existing URL normalization/storage | Aggregate rewritten count in DEBUG |
+| Well-formed Google wrapper with token matching `CAES[A-Za-z0-9_-]+={0,2}` | Preserve wrapper identity and candidate; do not infer its destination | Not a rewrite; never log the token |
 | Already direct ordinary URL | Leave unchanged | No per-URL noise |
 | Other redirect style (not observed) | Leave unchanged for future rule | No invented rejection |
 | Matching `/goto` with missing, duplicate, empty, malformed or unsafe destination | Reject that single result | Increment `recognized_invalid_redirect` reason count |
-| `google.com.evil.test/goto`, another path/host, non-HTTP(S) target | Spoofed hosts unchanged then existing URL validity rules; for recognized Google /goto unsafe target reject | No full link or token dump |
+| `google.com.evil.test/goto`, another path/host, other non-HTTP(S) target | Spoofed hosts unchanged then existing URL validity rules; for recognized Google /goto unsafe target reject | No full link or token dump |
 
 Do not resolve redirects on the network, dereference arbitrary targets, change global `normalize_url`, or alter `url-fetch`. Another observed redirect format later requires only an isolated helper branch and table-driven tests.
 

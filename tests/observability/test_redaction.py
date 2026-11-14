@@ -77,6 +77,33 @@ def test_diagnostic_text_uses_active_redactor_before_cleanup_and_truncation(
         assert len(output.splitlines()) == 3
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        r"https:\/\/example.test/a?session_id=PRIVATE_QUERY#PRIVATE_FRAGMENT",
+        "https%3A%2F%2Fexample.test%2Fa%3Fsession_id%3DPRIVATE_QUERY%23PRIVATE_FRAGMENT",
+        "https:%2F%2Fexample.test/a?customer_id=PRIVATE_QUERY#PRIVATE_FRAGMENT",
+        r"https:\/\/user:CONFIGURED_CREDENTIAL@example.test/a?session_id=PRIVATE_QUERY",
+    ],
+)
+def test_diagnostic_text_redacts_disguised_urls_without_decoding(url: str) -> None:
+    secret = SecretValue("CONFIGURED_CREDENTIAL")
+    logger, stream = structured_test_logger("test.redaction.disguised_url", secrets=[secret])
+    log_event(
+        logger,
+        logging.DEBUG,
+        "provider_response_diagnostic",
+        upstream_message=f"provider failed at {url}",
+    )
+    rendered = stream.getvalue()
+    assert "PRIVATE_QUERY" not in rendered
+    assert "PRIVATE_FRAGMENT" not in rendered
+    assert secret.reveal() not in rendered
+    assert "provider failed at" in rendered
+    assert "<invalid-url>" in rendered
+    assert len(rendered.splitlines()) == 1
+
+
 def test_redacted_url_credentials_do_not_hide_the_remaining_signed_query() -> None:
     secret = SecretValue("CONFIGURED_CREDENTIAL")
     logger, stream = structured_test_logger("test.redaction.url_placeholder", secrets=[secret])

@@ -79,9 +79,11 @@ admission, the gateway unwraps absolute HTTP(S) links with hostname exactly
 `google.com` or `www.google.com`, path exactly `/goto`, and exactly one `url` query
 parameter containing a valid HTTP(S) destination. That value is decoded once, and
 the target becomes the identity used for deduplication, cached-body merging, and
-subsequent `url-fetch`. A recognized wrapper with an invalid destination is discarded
-as one candidate; unknown URL shapes, including unsupported opaque formats outside
-this rule, pass through existing URL rules.
+subsequent `url-fetch`. Well-formed wrappers carrying opaque URL-safe `CAES...`
+tokens remain unchanged, so their search results retain the wrapper URL identity.
+Their underlying destination is not resolved or deduplicated with direct links.
+Other recognized wrappers with an invalid destination are discarded as individual
+candidates; unknown URL shapes outside this rule pass through existing URL rules.
 There is no network redirect following, recursive decoding, or migration of old
 admitted links. The rule applies to every keyword provider, independently of its
 adapter, and does not rewrite LLM, Agent, or paper-search URLs.

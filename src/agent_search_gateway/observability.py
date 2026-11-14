@@ -206,7 +206,9 @@ def _url_for_log(value: str, *, keep_query: bool, keep_fragment: bool) -> str:
     )
 
 
-_DIAGNOSTIC_URL = re.compile(r"https?://(?:<redacted>|[^\s<>\"'])+", re.IGNORECASE)
+_DIAGNOSTIC_URL = re.compile(
+    r"https?(?::|%3a)(?:/|\\+/|%2f){2}(?:<redacted>|[^\s<>\"'])+", re.IGNORECASE
+)
 _DIAGNOSTIC_AUTH = re.compile(
     r"\b(?:authorization|proxy-authorization|cookie|set-cookie)[\"']?\s*[:=][^\r\n]*"
     r"|\b(?:bearer|basic)\s+[^\s,;]+"

@@ -146,6 +146,8 @@ All helper tests are pure local parsing; no network requests. Table-drive input,
 | GU-13 | Control chars/newline in extracted destination | Reject safely; never log raw URL |
 | GU-14 | Malformed/ambiguous percent encoding | Reject if recognized-invalid; do not guess |
 | GU-15 | Signed destination URL with query token | No query leak in log; normalizer maintains existing semantics |
+| GU-16 | Well-formed URL-safe `CAES...` token, with optional base64 padding | Preserve the wrapper and admitted keyword hit; no rewrite or token logging |
+| GU-17 | CAES-prefixed value containing a scheme separator, slash, whitespace, control, or invalid padding | Reject; opaque-token handling must not bypass existing validation |
 
 Integration check: unwrapping occurs inside `SearchOrchestrator._stage_keyword_hit` **before** existing `normalize_url` and `URLStore`, independent of Bright Data, ScraperAPI or Scrape.do adapter. No rewrites in global `normalize_url` or `url-fetch`. A mocked network resolver must show **zero** requests during unwrapping.
 

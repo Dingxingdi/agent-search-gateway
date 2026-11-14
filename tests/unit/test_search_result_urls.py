@@ -22,6 +22,22 @@ def test_google_goto_destination(raw: str, expected: str) -> None:
     assert unwrap_search_result_url(raw) == expected
 
 
+@pytest.mark.parametrize("token", ["CAESAA_bb-12", "CAESAA_bb-12=", "CAESAA_bb-12=="])
+def test_opaque_google_goto_tokens_preserve_wrapper_identity(token: str) -> None:
+    raw = f"https://www.google.com/goto?url={quote(token, safe='')}&sa=U"
+    assert unwrap_search_result_url(raw) == raw
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["CAES", "CAESabc:path", "CAESabc/path", "CAESabc value", "CAESabc\n", "CAESabc==="],
+)
+def test_malformed_opaque_google_goto_tokens_are_rejected(token: str) -> None:
+    raw = f"https://google.com/goto?url={quote(token, safe='')}"
+    with pytest.raises(InvalidSearchResultRedirect, match="^recognized_invalid_redirect$"):
+        unwrap_search_result_url(raw)
+
+
 @pytest.mark.parametrize(
     "raw",
     [

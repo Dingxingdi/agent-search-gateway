@@ -63,6 +63,30 @@ async def test_keyword_hit_uses_google_goto_destination(tmp_path: Path) -> None:
     )
 
 
+async def test_opaque_google_goto_hit_keeps_wrapper_identity(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    wrapper = "https://google.com/goto?url=CAESAA_bb-12"
+    provider = FakeKeywordSearchProvider("web", [KeywordSearchHit(wrapper, snippet="Paper")])
+    path = Path(
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000021")
+    )
+    assert path.read_text(encoding="utf-8") == (
+        '{"url":"https://google.com/goto?url=CAESAA_bb-12","abstract":"Paper"}\n'
+    )
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert len(summaries) == 1
+    assert summaries[0]["accepted"] == 1
+    assert summaries[0]["rejected"] == 0
+    assert summaries[0]["rewritten"] == 0
+    assert "CAESAA_bb-12" not in repr([vars(record) for record in caplog.records])
+
+
 @pytest.mark.parametrize("snippet", ["Paper", ""])
 async def test_invalid_google_goto_is_rejected_before_abstract(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, snippet: str

@@ -5,14 +5,14 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 class InvalidSearchResultRedirect(ValueError):
-    """A recognized wrapper has no trustworthy destination."""
+    """A recognized wrapper is malformed or has an unsafe destination."""
 
     def __init__(self) -> None:
         super().__init__("recognized_invalid_redirect")
 
 
 def unwrap_search_result_url(raw: str) -> str:
-    """Unwrap one recognized Google goto destination."""
+    """Unwrap direct Google goto targets and preserve recognized opaque tokens."""
     raw_has_controls = bool(re.search(r"[\x00-\x1f\x7f-\x9f]", raw))
     try:
         parsed = urlsplit(raw)
@@ -42,6 +42,9 @@ def unwrap_search_result_url(raw: str) -> str:
     target = destinations[0]
     if re.search(r"[\x00-\x1f\x7f-\x9f]|%(?![0-9a-fA-F]{2})", target):
         raise InvalidSearchResultRedirect()
+    if re.fullmatch(r"CAES[A-Za-z0-9_-]+={0,2}", target):
+        # Opaque Google tokens keep their existing identity without local decoding.
+        return raw
     try:
         destination = urlsplit(target)
         if destination.scheme not in {"http", "https"} or not destination.hostname:
