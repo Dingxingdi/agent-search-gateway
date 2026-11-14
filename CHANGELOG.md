@@ -8,6 +8,8 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-14
+
 ### Fixed
 
 - Remove fixed Gateway limits on Agent timeout configuration, the whole Agent workflow, and the default Agent socket response wait. `timeout_seconds` still defaults to 300 and requires a representable finite positive number; each agy call retains its configured timeout, Python protection at timeout plus 5 seconds, cancellation, and process cleanup. Quota waits, separate scope calls, and OA enrichment may extend total time. The CLI timeout argument preserves the configured value without six-digit rounding or exponent notation. External agy duration limits still apply; non-Agent socket waits remain 600 seconds.
