@@ -1,6 +1,7 @@
 import asyncio
+import json
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 
 import pytest
 
@@ -67,6 +68,26 @@ def test_upstream_text_removes_sensitive_material_and_control_characters() -> No
     assert "\\u001b" not in rendered
     assert len(rendered.splitlines()) == 1
     assert "upstream_message_truncated=false" in rendered
+
+
+@pytest.mark.parametrize("serialize", [json.dumps, repr], ids=["json", "python"])
+@pytest.mark.parametrize("field", ["cookie", "access_token", "password", "authorization"])
+def test_upstream_text_redacts_quoted_sensitive_fields(
+    serialize: Callable[[dict[str, str]], str], field: str
+) -> None:
+    logger, stream = structured_test_logger("test.provider_diagnostics.quoted_fields")
+    credential = "PRIVATE_PART_A'\";PRIVATE_PART_B"
+    fields = safe_diagnostic_fields(
+        {"upstream_message": f"request rejected: {serialize({field: credential})}"}
+    )
+    log_event(logger, logging.DEBUG, "provider_response_diagnostic", exc_info=False, **fields)
+
+    rendered = stream.getvalue()
+    assert "PRIVATE_PART_A" not in rendered
+    assert "PRIVATE_PART_B" not in rendered
+    assert "request rejected:" in rendered
+    assert "<redacted>" in rendered
+    assert len(rendered.splitlines()) == 1
 
 
 def test_log_event_snapshots_rejection_counts_before_later_mutation() -> None:
