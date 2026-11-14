@@ -51,15 +51,69 @@ no result file. Paper landing admission and PDF metadata rules are shared.
 `fetch_llm` remains mandatory through existing stage inheritance, while
 `search_llm` and `search_agent` are independently optional. Agent execution is a
 fresh noninteractive process per invocation, without gateway retries. The
-documented process, workflow, socket, and output limits apply. The gateway does
-not promise tool execution or source access based solely on terminal success.
-These additions do not turn Python imports or the socket protocol into a stable SDK.
+configured single-process deadline and output limits apply. `timeout_seconds` defaults
+to 300 and accepts representable finite positive numbers without a Gateway-imposed
+upper bound. Each agy invocation still receives that timeout and has Python protection
+at the configured timeout plus 5 seconds, starting after quota acquisition. Quota
+waiting, separate scope calls, and paper OA enrichment can make total workflow time
+longer than one process budget; there is no fixed Gateway deadline for the whole
+Agent workflow.
+
+The Agent socket response wait has no fixed default deadline. Cancellation and
+disconnection still end the wait and trigger active process cleanup as applicable;
+an unresponsive but connected daemon can leave the client waiting until interrupted.
+Internal callers' explicit numeric socket timeouts remain honored. Non-Agent socket
+response waits retain their 600-second default. External agy duration parsing may
+reject extreme values; accepting a configuration does not guarantee that agy supports
+every representable duration. Process-group cleanup retains its OS-blocked-spawn and
+escaped-descendant limitations.
+
+The gateway does not promise tool execution or source access based solely on terminal
+success. These additions do not turn Python imports or the socket protocol into a
+stable SDK.
+
+### Keyword result URL identity
+
+At the shared keyword-result entry point, before normal URL normalization and
+admission, the gateway unwraps absolute HTTP(S) links with hostname exactly
+`google.com` or `www.google.com`, path exactly `/goto`, and exactly one `url` query
+parameter containing a valid HTTP(S) destination. That value is decoded once, and
+the target becomes the identity used for deduplication, cached-body merging, and
+subsequent `url-fetch`. A recognized wrapper with an invalid destination is discarded
+as one candidate; unknown URL shapes, including unsupported opaque formats outside
+this rule, pass through existing URL rules.
+There is no network redirect following, recursive decoding, or migration of old
+admitted links. The rule applies to every keyword provider, independently of its
+adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 ## Diagnostic interfaces
 
 `doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve during the `0.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
-Debug output is not a safe telemetry export by default. It can contain target URL components and operational metadata. Review and redact it before sharing.
+DEBUG diagnostics cover Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations.
+HTTP attempts, received responses, scheduled retries, and terminal HTTP failures are
+distinct events. Actual HTTP status is separate from an upstream status carried inside
+the response; byte counts describe content actually read. LLM protocol retries and
+stage events are separate from the owning pipeline's provider terminal outcome.
+Search, Fetch, and OA owners record one terminal outcome for each invocation and
+scope; the daemon records the whole workflow outcome. An individual provider failure
+need not fail a partially successful workflow. Unpaywall 404 remains a completed
+lookup with no match.
+
+Success diagnostics retain metadata and counts. Failure diagnostics add allowlisted
+upstream code/status/type and short messages when safely extractable. Adapter and
+keyword staging candidate counts have separate phases, grouped rejection reasons,
+and processed/unprocessed counts when processing stops early. Agent diagnostics
+include classifications, exit status, and output byte counts after cleanup.
+
+Upstream diagnostic text is redacted before sanitizing and truncating; code/status/type
+fields are limited to 128 characters and messages to 512. Logged URLs omit userinfo,
+query, and fragment. Full payloads, prompts, page/model-response bodies, Agent stdout
+or stderr content, and authentication values are not intentionally logged. Normal
+CLI stdout/stderr contracts and public result/error schemas are unchanged.
+
+Debug output is not a safe telemetry export by default. URL paths and operational
+metadata can still be sensitive. Review and redact it before sharing.
 
 ## Internal interfaces
 

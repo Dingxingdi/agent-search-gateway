@@ -8,6 +8,12 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Remove fixed Gateway limits on Agent timeout configuration, the whole Agent workflow, and the default Agent socket response wait. `timeout_seconds` still defaults to 300 and requires a representable finite positive number; each agy call retains its configured timeout, Python protection at timeout plus 5 seconds, cancellation, and process cleanup. Quota waits, separate scope calls, and OA enrichment may extend total time. External agy duration limits still apply; non-Agent socket waits remain 600 seconds.
+- Add bounded, redacted DEBUG diagnostics for successful and failed Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations. Separate HTTP attempts/responses/retries, LLM protocol/stage work, per-invocation provider terminal outcomes, and whole workflows; retain safe upstream error details, actual status/byte metadata, and independent adapter/staging candidate counts without logging full content. Unpaywall 404 remains a completed lookup with no match; normal CLI output and result/error schemas are unchanged.
+- Unwrap supported Google `/goto?url=...` links once at the shared keyword-result entry point before URL normalization, deduplication, admission, and cached-body merging, so later `url-fetch` uses the destination identity. Only HTTP(S) links on exact `google.com` or `www.google.com` hosts with exact `/goto` paths and one valid HTTP(S) destination are supported. Discard recognized invalid wrappers individually; preserve unknown URL shapes, including unsupported opaque formats, without network redirects, recursive decoding, historical migration, or changes to LLM/Agent/paper URLs (#74).
+
 ## [0.2.1] - 2026-11-10
 
 ### Added

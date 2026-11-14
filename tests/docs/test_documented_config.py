@@ -64,6 +64,44 @@ def test_agent_example_config_matches_documented_command() -> None:
             assert token in text
 
 
+def test_documented_agent_timeout_policy_matches_runtime() -> None:
+    from agent_search_gateway import protocol
+
+    raw = load_toml(_ROOT / "config.example.toml")
+    resolved = resolve_config(raw, build_default_registry(), _stub_environment(raw))
+    [default_provider] = resolved.agent.providers
+    assert default_provider.timeout_seconds == 300.0
+    providers = raw["agent_providers"]
+    assert isinstance(providers, dict)
+    provider = providers["antigravity_main"]
+    assert isinstance(provider, dict)
+    provider["timeout_seconds"] = 7200
+    extended = resolve_config(raw, build_default_registry(), _stub_environment(raw))
+    assert extended.agent.providers[0].timeout_seconds == 7200.0
+
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme.split("## Agent search", 1)[1].split("\n## ", 1)[0]
+    rows = {
+        cells[0].strip().strip("`"): cells[1:]
+        for line in section.splitlines()
+        if line.startswith("|")
+        for cells in [[cell.strip() for cell in line.strip("|").split("|")]]
+    }
+    timeout_row = " ".join(rows["timeout_seconds"])
+    assert set(re.findall(r"\b\d+\b", timeout_row)) == {
+        str(int(default_provider.timeout_seconds))
+    }, "Current Agent configuration must not document a numeric timeout cap"
+    for constraint in ("positive", "finite"):
+        assert re.search(rf"\b{constraint}\b", timeout_row, re.IGNORECASE)
+    assert not re.search(r"\b(?:540|1140|1200)\b", section), (
+        "Current Agent documentation must not retain the old fixed budgets"
+    )
+    other_socket_row = " ".join(rows["Other socket response wait"])
+    assert re.findall(r"\b\d+\b", other_socket_row) == [
+        str(int(protocol._RESPONSE_TIMEOUT_SECONDS))
+    ]
+
+
 def test_readme_documents_request_scoped_provider_and_model_filters() -> None:
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     heading = "### Request-scoped provider and model filters"

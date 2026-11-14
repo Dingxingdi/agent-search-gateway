@@ -185,7 +185,12 @@ extra_body = {}
 harness = "antigravity"
 command = "agy"           # One executable name/path, not a shell command with flags.
 max_concurrency = 1       # Positive integer, shared by this alias's invocations.
-timeout_seconds = 300     # Positive finite number, at most 540.
+# Representable finite positive seconds; default 300, no Gateway-imposed maximum.
+# Each agy call keeps its configured timeout and Python +5-second protection after quota.
+# Quota waits, both scopes, and OA enrichment can add to total workflow duration.
+# Agent socket wait has no fixed default deadline; cancellation/disconnect still ends it.
+# Other socket waits remain 600 seconds. External agy may reject extreme durations.
+timeout_seconds = 300
 pass_env = []             # Additional environment-variable names only.
 
 # Omit this search_agent section, or replace it with [search_agent] providers = [],
