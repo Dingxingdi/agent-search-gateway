@@ -177,13 +177,13 @@ InvalidSearchResultRedirect(ValueError)
 - Test: `tests/unit/test_config_agent.py`。
 - Docs: `README.md`、`config.example.toml`（Task 21 统一更新）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在现有 `test_agent_valid_numeric_boundaries` 中逐次加入 540.1、3600、7200；新增明确命名的 `test_agent_timeout_has_no_gateway_upper_bound`，断言解析结果等于原值。把 540.1 从“非法 provider fields”表移出。保留/补齐 0、-1、负小数、bool、字符串、NaN、±inf 拒绝用例及默认 300 用例。
 
 Setup 使用已有 _agent_data / _environment / ProviderRegistry，不启动进程。首个 RED 是 3600 被现有 >540 分支拒绝。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_config_agent.py -k agent_timeout_has_no_gateway_upper_bound -v
@@ -191,7 +191,7 @@ uv run --offline pytest tests/unit/test_config_agent.py -k agent_timeout_has_no_
 
 Expected: FAIL，当前 ConfigFailure 表明 must not exceed 540；不是 fixture/导入错误。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 resolve_agent_config:
@@ -203,7 +203,7 @@ resolve_agent_config:
 
 不将 inf/None/0 解释为永久运行，也不更改 HTTP retry.request_timeout_seconds。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_config_agent.py tests/runtime/test_agent_runtime_assembly.py tests/doctor/test_config.py -v
@@ -211,7 +211,7 @@ uv run --offline pytest tests/unit/test_config_agent.py tests/runtime/test_agent
 
 Expected: 所有有效大值通过、原非法值仍失败，原默认值和配置装配通过；再按 `0.1 执行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只去除失效的“最大值”测试说明，复用 _positive_float，不新增通用超时策略。若有重构，重跑本 Task 的完整命令及全量测试。
 
@@ -224,7 +224,7 @@ Expected: 所有有效大值通过、原非法值仍失败，原默认值和配�
 - Test: `tests/orchestrators/test_agent_search.py`、`tests/daemon/test_agent_shutdown.py`。
 - Reference: `tests/acceptance/test_gateway_workflows.py:test_cli_waits_for_example_http_retry_budget`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 把原先断言 1140 秒会中止的三组测试替换为相反的业务契约：
 
@@ -236,7 +236,7 @@ Expected: 所有有效大值通过、原非法值仍失败，原默认值和配�
 
 保留外部 cancellation、两分支部分成功、全部失败和 LLM 不受影响的回归；移除回归对已删除常量的依赖。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/orchestrators/test_agent_search_deadline.py -k can_complete_after_old_deadline -v
@@ -244,7 +244,7 @@ uv run --offline pytest tests/orchestrators/test_agent_search_deadline.py -k can
 
 Expected: FAIL，旧工作流 deadline 取消请求，无法得到预期结果；无 1140 秒真实等待。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 agent_search:
@@ -257,7 +257,7 @@ agent_search:
 不移动 runner 内部 timeout / quota / cleanup
 ~~~
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/orchestrators/test_agent_search_deadline.py tests/orchestrators/test_agent_search.py tests/orchestrators/test_agent_provider_model_filtering.py tests/daemon/test_agent_shutdown.py -v
@@ -265,7 +265,7 @@ uv run --offline pytest tests/orchestrators/test_agent_search_deadline.py tests/
 
 Expected: 虚拟旧上限之后仍成功；外部取消等待清理；单次 Agent timeout 的成功兄弟分支仍保留；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 删除无用 deadline 分支与误导测试名。虚拟时间辅助仅在确有第二处复用时移入 tests/support，不给生产类加测试专用方法。重构后重跑上述组及全量测试。
 
@@ -279,7 +279,7 @@ Expected: 虚拟旧上限之后仍成功；外部取消等待清理；单次 Age
 - Test: `tests/acceptance/test_gateway_workflows.py`。
 - Reference: `tests/support/acceptance.py`、`tests/support/agent_search.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 更新 `test_socket_timeout_depends_on_request_type_and_honors_override` 的期望矩阵：默认 Agent 为 None，其他五类仍为 600；0.01/42 等显式覆盖继续优先。
 
@@ -287,7 +287,7 @@ Expected: 虚拟旧上限之后仍成功；外部取消等待清理；单次 Age
 
 补回归：Agent 显式短数值 timeout 仍失败；daemon 断连/EOF 立即给原 ProtocolFailure；任务取消后 writer 关闭、无忙循环；现有非 Agent 三次 180 秒重试验收保持有效。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_socket_client.py -k socket_timeout_depends_on_request_type_and_honors_override -v
@@ -296,7 +296,7 @@ uv run --offline pytest tests/acceptance/test_agent_search_workflows.py -k recei
 
 Expected: Agent 默认值仍为 1200 导致断言失败；端到端请求在旧 socket deadline 失败。其他 request 类型的矩阵通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 send_request:
@@ -311,7 +311,7 @@ send_request:
 
 不加 sentinel 参数、不读取 daemon TOML、不新增 NDJSON deadline 字段。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_socket_client.py tests/unit/test_protocol_codec.py tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_gateway_workflows.py -v
@@ -319,7 +319,7 @@ uv run --offline pytest tests/unit/test_socket_client.py tests/unit/test_protoco
 
 Expected: 新默认与显式覆盖正确，1201 秒虚拟响应到达，原 600 秒 HTTP 验收和协议 framing 通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将测试 monkeypatch 的范围限制到自身，恢复 loop.time；测试不能把 waiter 本身换成“永远成功”而绕过真实 deadline。重构后复跑上述组及全量测试。
 
@@ -334,7 +334,7 @@ Expected: 新默认与显式覆盖正确，1201 秒虚拟响应到达，原 600 
 - Test: `tests/observability/test_redaction.py`、`tests/unit/test_observability_logging.py`、`tests/unit/test_errors.py`。
 - Reference: `tests/support/logging.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先通过现有 log_event + KeyValueFormatter 写一个受控 rejection_counts，验证实际序列化结果含准确计数而不是 <dict>，命名 `test_candidate_counts_render_as_bounded_structured_values`。
 
@@ -351,7 +351,7 @@ Expected: 新默认与显式覆盖正确，1201 秒虚拟响应到达，原 600 
 
 新 helper 的测试在现有入口首个 RED 已证实缺陷后逐步建立；不要提交 import 错误充当 RED。诊断文本边界测试可直接走现有 log_event/formatter 的相应字段，新实现把选中的外部字段包装为 DiagnosticText。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/observability/test_provider_diagnostics.py -k candidate_counts_render_as_bounded_structured_values -v
@@ -359,7 +359,7 @@ uv run --offline pytest tests/observability/test_provider_diagnostics.py -k cand
 
 Expected: FAIL，现有 formatter 将字典输出为 <dict>。后续各 RED 必须分别由缺少边界保护、诊断携带或长度约束触发。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 observability:
@@ -381,7 +381,7 @@ providers/diagnostics:
 
 不将完整 payload 交给通用 serializer；不引入 logger 注册中心或新的配置项。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/observability/test_provider_diagnostics.py tests/observability/test_redaction.py tests/unit/test_observability_logging.py tests/unit/test_errors.py tests/unit/test_protocol_codec.py -v
@@ -389,7 +389,7 @@ uv run --offline pytest tests/observability/test_provider_diagnostics.py tests/o
 
 Expected: 对整条序列化日志做 sentinel 检查全部通过，轮转/DEBUG 开关/公共异常与协议旧测试保持通过；再运行全量测试。只更新确因日志 URL 去 query 的旧断言，不更改实际结果 URL 断言。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 合并重复 sanitizer/计数渲染；通用模块不导入具体 adapter、HTTP、orchestrator 或 runtime。检查错误模块只依赖标准库类型，避免 errors → observability → errors 循环。复跑上述组及全量测试。
 
@@ -404,7 +404,7 @@ Expected: 对整条序列化日志做 sentinel 检查全部通过，轮转/DEBUG
 - Test: `tests/providers/test_http_executor.py`。
 - Test: `tests/observability/test_provider_diagnostics.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 增加 `test_every_received_response_has_bounded_diagnostics`：真实 HttpJsonExecutor + MockTransport，脚本返回 429 → 502 → 200，断言三条 response diagnostic、三条 completed、两条 http_retrying、没有 http_failed，记录正确 status/type/bytes 和 attempt。
 
@@ -412,7 +412,7 @@ Expected: 对整条序列化日志做 sentinel 检查全部通过，轮转/DEBUG
 
 同时断言 sleep 延迟、请求次数、返回 payload 和异常类别等原行为。诊断 callback 不可借此改变重试；若 ResponseInspector 仍判定失败，诊断 helper 故障不能把它变成功。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/test_http_executor.py -k every_received_response_has_bounded_diagnostics -v
@@ -420,7 +420,7 @@ uv run --offline pytest tests/providers/test_http_executor.py -k every_received_
 
 Expected: FAIL，目前缺少 provider_response_diagnostic 和 byte/type 字段；不能只测试 mock 的调用次数。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每次真实 response 到达:
@@ -439,7 +439,7 @@ Expected: FAIL，目前缺少 provider_response_diagnostic 和 byte/type 字段�
 
 request_json/request_text 及 Protocol/double 同步 `response_diagnostics` 关键字。旧 status 保留且 http_status 同值。诊断不能用 executor 实例字段缓存 last_response；不把上次响应错误地附到后来无响应的 transport 失败。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/test_http_executor.py tests/unit/test_retry.py tests/observability/test_provider_diagnostics.py tests/providers/web/test_brightdata.py -v
@@ -448,7 +448,7 @@ uv run --offline mypy src tests scripts
 
 Expected: attempts、原 backoff/jitter、异常语义不变；每个收到的响应有一条诊断，缺失元信息不伪造；Protocol 和 fake 签名通过 mypy；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 _provider_failure_details 和已有失败类型；若增加 _RetryableStatus 的 diagnostics 参数，所有构造点同步。删除可重复的元信息拼装，不改 retry_async 的策略。重构后跑完整 HTTP/Retry 组和全量测试。
 
@@ -464,13 +464,13 @@ Expected: attempts、原 backoff/jitter、异常语义不变；每个收到的�
 - Test: `tests/providers/web/test_search_result_tolerance.py`。
 - Test: `tests/observability/test_provider_diagnostics.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_scraperapi_reports_partial_candidate_rejections`：输入 10 条 organic_results，其中 5 条有效、3 条缺 link、2 条不是 object。断言输出仍为 5 个正确 KeywordSearchHit，并且只有一条 phase=adapter summary，received=10、accepted=5、rejected=5、原因计数准确。
 
 逐次扩展：空列表、全坏列表、错误 presentation 字段、顶层 error、顶层 envelope 损坏。通过真实 executor + MockTransport 的错误响应测试，确认已知 error 标量在 DEBUG 可见而公共异常 message 不出现上游文本。新诊断用例的 factory 参数使用 JsonRequester/HttpRequester 这些结构协议，使真实 executor 与 Recording* fake 都可用；不在 fake 内重现诊断事件来让断言通过。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_scraperapi.py -k reports_partial_candidate_rejections -v
@@ -478,7 +478,7 @@ uv run --offline pytest tests/providers/web/test_scraperapi.py -k reports_partia
 
 Expected: 有效 hit 断言通过，但缺少摘要事件导致 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 Web common:
@@ -499,7 +499,7 @@ ScraperAPI.search:
 
 HTTP diagnostic 由 executor 发；adapter 不重复发第二条 response diagnostic。不得因 added diagnostics 把原可接受 payload 改成失败。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_scraperapi.py tests/providers/web/test_search_result_tolerance.py tests/observability/test_provider_diagnostics.py -v
@@ -507,7 +507,7 @@ uv run --offline pytest tests/providers/web/test_scraperapi.py tests/providers/w
 
 Expected: 正常/空/全坏摘要准确，原结果容错与公共失败断言通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只抽取已重复出现的字段选择和计数输出，不抽象 provider 的响应 envelope 或 parser。保持 RecordingHttpExecutor 测结果、真实 HttpJsonExecutor 测诊断的分工。重构后跑上述组及全量测试。
 
@@ -520,13 +520,13 @@ Expected: 正常/空/全坏摘要准确，原结果容错与公共失败断言�
 - Test: `tests/providers/web/test_brightdata.py`。
 - Test: `tests/providers/test_http_executor.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_brightdata_response_diagnostic_preserves_outer_and_upstream_status`：HTTP 200、x-brd-status-code=502、x-brd-error-code=captcha、x-brd-error=redirect location was rejected、空 body。断言 HTTP 200 与上游 502/captcha/短消息同时可见，response_bytes=0，分类为 header/provider 错误而非 decode；重试次数/延迟仍按旧行为。
 
 再逐次覆盖成功 organic、混合/全坏 organic 的计数、HTTP 200 JSON error、未知错误 code、畸形/重复 header、秘密与超长 header。保留 401/403 不重试、未知 code 原策略、普通 HTTP 重试及既有 jitter 测试。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_brightdata.py -k response_diagnostic_preserves_outer_and_upstream_status -v
@@ -534,7 +534,7 @@ uv run --offline pytest tests/providers/web/test_brightdata.py -k response_diagn
 
 Expected: 旧 Bright Data 专用字段虽存在，但缺少统一 upstream 字段/响应摘要，目标断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 复用 _bounded_header / _inspect_search_response:
@@ -553,7 +553,7 @@ organic 解析沿用 Task 6 局部计数模式
 
 保留现有搜索请求体和 Fetch 请求参数。body 为空时绝不调用 JSON 解码掩盖头部失败。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_brightdata.py tests/providers/test_http_executor.py tests/unit/test_retry.py -v
@@ -561,7 +561,7 @@ uv run --offline pytest tests/providers/web/test_brightdata.py tests/providers/t
 
 Expected: 原重试分类、jitter、鉴权与请求快照不变，统一诊断和计数通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 诊断与控制流共用已有 header 解析，不增加第二套 retryability 规则。保留只有安全字段可越过边界的 reserved-key 防护。重构后重跑上述组及全量测试。
 
@@ -575,13 +575,13 @@ Expected: 原重试分类、jitter、鉴权与请求快照不变，统一诊断�
 - Test: `tests/providers/web/test_scrape_do.py`、`tests/providers/web/test_scrapingdog.py`、`tests/providers/web/test_serpapi.py`。
 - Test: `tests/providers/web/test_search_result_tolerance.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在现有 parameterized factory/payload 表扩展 `test_serp_adapters_report_rejected_candidate_counts`，按 scrape_do → scrapingdog → serpapi 逐一执行 RED/GREEN。各自输入仍使用 organic_results/link；验证 mixed、empty、all-invalid 三种摘要，以及顶层 error 的安全诊断。
 
 此时不在 adapter 解包 Google URL；结果 URL 原样返回的单元契约仍成立，真正解包由 Task 19–20 实现。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k serp_adapters_report_rejected_candidate_counts -v
@@ -589,7 +589,7 @@ uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k s
 
 Expected: 尚未接入的各 adapter 缺 summary；原有效结果本身仍正确。一次只推进一个 adapter 的实现。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个 search 方法:
@@ -602,7 +602,7 @@ Expected: 尚未接入的各 adapter 缺 summary；原有效结果本身仍正�
 不增加 if provider_name == ... 的共享调度器
 ~~~
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_scrape_do.py tests/providers/web/test_scrapingdog.py tests/providers/web/test_serpapi.py tests/providers/web/test_search_result_tolerance.py -v
@@ -610,7 +610,7 @@ uv run --offline pytest tests/providers/web/test_scrape_do.py tests/providers/we
 
 Expected: 每种 provider 的三种候选数量场景和当前请求/错误语义通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 删除复制的安全文本截断/计数序列化，使用公共 helper；保留不同厂商请求代码。重构后复跑上述组及全量测试。
 
@@ -625,7 +625,7 @@ Expected: 每种 provider 的三种候选数量场景和当前请求/错误语�
 - Test: `tests/providers/web/test_anysearch.py`、`tests/providers/web/test_brave.py`、`tests/providers/web/test_linkup.py`、`tests/providers/web/test_scrapegraphai.py`。
 - Test: `tests/providers/web/test_search_result_tolerance.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 增加参数化 `test_json_search_adapters_report_response_and_candidate_diagnostics`，逐个 provider 实施。用当前 fixture 的真实 envelope：
 
@@ -638,7 +638,7 @@ Expected: 每种 provider 的三种候选数量场景和当前请求/错误语�
 
 缺少已验证上游错误 shape 的场景只断言安全 metadata/category，不凭空编造错误 code。每家都有 mixed/empty/all-invalid 计数。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k json_search_adapters_report_response_and_candidate_diagnostics -v
@@ -646,7 +646,7 @@ uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k j
 
 Expected: 新摘要/已知 vendor 字段尚不存在，目标断言 FAIL；现有结果测试不应被 fixture 差异打坏。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 分别保留原 code / web / results / error-detail 判断
@@ -658,7 +658,7 @@ Expected: 新摘要/已知 vendor 字段尚不存在，目标断言 FAIL；现�
 
 诊断选择器不递归搜索 content 中的 error/message，也不扩大原业务失败条件。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_anysearch.py tests/providers/web/test_brave.py tests/providers/web/test_linkup.py tests/providers/web/test_scrapegraphai.py tests/providers/web/test_search_result_tolerance.py -v
@@ -666,7 +666,7 @@ uv run --offline pytest tests/providers/web/test_anysearch.py tests/providers/we
 
 Expected: 当前 provider 自身解析/请求契约及新日志行为通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只复用已知的字段类型检查，避免一个“任何 JSON 都认得”的错误解释器。重构后跑上述完整组和全量测试。
 
@@ -680,13 +680,13 @@ Expected: 当前 provider 自身解析/请求契约及新日志行为通过；�
 - Test: `tests/providers/web/test_tavily.py`、`tests/providers/web/test_exa.py`、`tests/providers/web/test_firecrawl.py`。
 - Test: `tests/providers/web/test_search_result_tolerance.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_content_search_adapters_report_counts_without_logging_bodies` 按 provider 参数化，使用现有 search fixture，在 content/raw_content/text/markdown/rawHtml/highlights 中加入唯一正文 sentinel，并加入 missing URL、错误字段类型候选。
 
 断言：返回 hit 内容仍完整；只增加响应大小、结果数量和拒绝原因；序列化日志无正文 sentinel。Firecrawl success=false 的短错误消息可诊断；其他 adapter 只观察已有可识别错误字段，不把正文内 error 当 API 错误。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k content_search_adapters_report_counts_without_logging_bodies -v
@@ -694,7 +694,7 @@ uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k c
 
 Expected: 缺少 candidate summary 的断言 FAIL。现有正文不泄漏的回归可能已经通过，应保留而不是声称其 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 保留三个现有结果映射、snippet fallback 和 body 优先级
@@ -704,7 +704,7 @@ Firecrawl _successful_root 的业务失败附安全 diagnostics
 只从实际业务列表计算数量，不对整个 JSON repr 或截取正文
 ~~~
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_tavily.py tests/providers/web/test_exa.py tests/providers/web/test_firecrawl.py tests/providers/web/test_search_result_tolerance.py tests/orchestrators/test_keyword_search_pipeline.py -v
@@ -712,7 +712,7 @@ uv run --offline pytest tests/providers/web/test_tavily.py tests/providers/web/t
 
 Expected: snippets/body 语义、容错、Judge 入口不变；元信息/计数准确；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 CandidateCounts 和 safe fields；保留 Firecrawl v2、Exa highlights 和 Tavily raw content 的各自语义。重构后复跑上述组及全量测试。
 
@@ -726,7 +726,7 @@ Expected: snippets/body 语义、容错、Judge 入口不变；元信息/计数�
 - Test: `tests/providers/web/test_parallel.py`、`tests/providers/web/test_tinyfish.py`、`tests/providers/web/test_decodo.py`。
 - Test: `tests/providers/web/test_search_result_tolerance.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_nested_search_adapters_report_candidate_diagnostics` 逐个覆盖：
 
@@ -736,7 +736,7 @@ Expected: snippets/body 语义、容错、Judge 入口不变；元信息/计数�
 
 Decodo 原解析只使用第一页，诊断不得把其余页改成新搜索结果，也不把状态 12000 等其他模式误判为本接口成功。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k nested_search_adapters_report_candidate_diagnostics -v
@@ -744,7 +744,7 @@ uv run --offline pytest tests/providers/web/test_search_result_tolerance.py -k n
 
 Expected: 每家未接入的摘要/特殊内层状态断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 保持原 results / excerpts / organic 解析
@@ -754,7 +754,7 @@ Decodo errors 列表只提取有界个数的已知标量错误字段/数量
 为实际结果列表建立局部计数，输出一次 summary
 ~~~
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web/test_parallel.py tests/providers/web/test_tinyfish.py tests/providers/web/test_decodo.py tests/providers/web/test_search_result_tolerance.py -v
@@ -762,7 +762,7 @@ uv run --offline pytest tests/providers/web/test_parallel.py tests/providers/web
 
 Expected: 三家专有配置、请求快照和原失败策略不变；15 家关键词 adapter 均有计数覆盖；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将通用诊断安全逻辑收回 helper，保留专有 envelope 路径在 adapter。完整 Web tolerance 表应显式列出 15 家，避免仅测试类名集合而不执行请求。重构后跑上述组及全量测试。
 
@@ -779,7 +779,7 @@ Expected: 三家专有配置、请求快照和原失败策略不变；15 家关�
 - Test: `tests/providers/web/test_tavily.py`、`tests/providers/web/test_exa.py`、`tests/providers/web/test_firecrawl.py`、`tests/providers/web/test_linkup.py`、`tests/providers/web/test_parallel.py`、`tests/providers/web/test_tinyfish.py`、`tests/providers/web/test_scrapegraphai.py`、`tests/providers/web/test_scrapingant.py`、`tests/providers/web/test_brightdata.py`、`tests/providers/web/test_decodo.py`、`tests/providers/web/test_scrape_do.py`、`tests/providers/web/test_scraperapi.py`、`tests/providers/web/test_scrapingdog.py`、`tests/providers/web/test_jina.py`、`tests/providers/web/test_zenrows.py`。
 - Test: `tests/scheduler/test_fetch_outcomes.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 按下表逐个新增 `test_fetch_reports_safe_response_diagnostics`（放在各自现有测试文件），每次只实施一个 adapter/独特错误路径，不能一口气改 15 家：
 
@@ -793,7 +793,7 @@ Expected: 三家专有配置、请求快照和原失败策略不变；15 家关�
 
 每种路径验证成功、失败及原有严格/容错顺序。正文、目标 URL query、鉴权 header 放 sentinel；日志不出现。若 Fetch parser 原本遇到首个畸形项就失败，不能为“统计完整”扫描并接受后续项。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/web -k fetch_reports_safe_response_diagnostics -v
@@ -801,7 +801,7 @@ uv run --offline pytest tests/providers/web -k fetch_reports_safe_response_diagn
 
 Expected: 新的 extraction/上游错误诊断缺失导致 FAIL；已由 Task 5 提供的普通传输元信息是回归项，不人为制造 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 分别在原 fetch 调用接入对应的纯 response_diagnostics
@@ -814,7 +814,7 @@ text 后端只记录类型、字节数、非空/空分类
 
 不把搜索用 Bright Data header retry 策略迁移到 Fetch；不改变任何 URL-fetch 请求参数。统计早返回的数组时明确 processed/unprocessed，不能伪称未检查项被拒绝。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/web tests/scheduler/test_fetch_outcomes.py tests/orchestrators/test_url_fetch_flow.py -v
@@ -822,7 +822,7 @@ uv run --offline pytest tests/providers/web tests/scheduler/test_fetch_outcomes.
 
 Expected: 全部 Fetch 映射、错误/空内容、fallback 和 Judge 策略保持，通过新响应诊断断言；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 把 text 后端重复元信息留给 shared executor；只在 adapter 保留自身语义字段选择。日志 endpoint 若嵌入目标 URL（例如 Jina 路径），清理嵌套的敏感 URL 或只记录服务端 host，不泄漏内层凭据/query。复跑完整 Web/Fetch 组及全量测试。
 
@@ -838,7 +838,7 @@ Expected: 全部 Fetch 映射、错误/空内容、fallback 和 Judge 策略保�
 - Test: `tests/providers/academic/test_crossref.py`、`tests/providers/academic/test_openalex.py`、`tests/providers/academic/test_semantic_scholar.py`、`tests/providers/academic/test_core.py`。
 - Test: `tests/orchestrators/test_paper_search_pipeline.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在各现有文件新增 `test_paper_response_reports_candidate_summary`，逐次使用各自 envelope：Crossref message.items、OpenAlex results、Semantic Scholar data、CORE results。
 
@@ -846,7 +846,7 @@ Expected: 全部 Fetch 映射、错误/空内容、fallback 和 Judge 策略保�
 
 不要把正常缺失的可选 authors/topics/abstract 当作“整条论文拒绝”；也不改变既有字段标准化/聚合策略。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/academic/test_crossref.py tests/providers/academic/test_openalex.py tests/providers/academic/test_semantic_scholar.py tests/providers/academic/test_core.py -k paper_response_reports_candidate_summary -v
@@ -854,7 +854,7 @@ uv run --offline pytest tests/providers/academic/test_crossref.py tests/provider
 
 Expected: 原拒绝事件可能存在，但没有准确 aggregate summary，导致 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个 search:
@@ -869,7 +869,7 @@ Expected: 原拒绝事件可能存在，但没有准确 aggregate summary，导�
 
 如为说明更精确原因需要调整私有映射 helper，只改变内部调用，search 返回类型仍为 list[PaperSearchHit]；不要把 paper aggregation 移入 provider。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/academic tests/orchestrators/test_paper_search_pipeline.py tests/academic -v
@@ -877,7 +877,7 @@ uv run --offline pytest tests/providers/academic tests/orchestrators/test_paper_
 
 Expected: 学术字段映射、身份去重、元数据优先级、OA 调用顺序均保持；响应/计数诊断准确；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 公共 helper 仅负责安全字段与计数，不持有 response/paper 内容；rejection reason 来自实际已有校验分支，不复制一套新的验证策略。重构后跑上述组及全量测试。
 
@@ -891,13 +891,13 @@ Expected: 学术字段映射、身份去重、元数据优先级、OA 调用顺�
 - Test: `tests/providers/academic/test_arxiv.py`、`tests/providers/academic/test_dblp.py`。
 - Reference: `tests/fixtures/providers/academic/arxiv/`、`tests/fixtures/providers/academic/dblp/`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_xml_provider_reports_response_and_candidate_diagnostics`：使用已有 XML fixtures，覆盖有效 feed/结果、一个缺必填字段、全坏、空、malformed XML 和错误根元素。断言 type/bytes、decode 或 envelope 分类、准确 entry/hit 数量；XML/HTML 正文 sentinel 不进日志。
 
 DBLP 返回验证页面时只根据已有解析边界记录 invalid XML/envelope 或 transport status，不根据 HTML 文本猜测机器人状态。现有 README 低频也可能触发验证的说明保留。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/academic/test_arxiv.py tests/providers/academic/test_dblp.py -k xml_provider_reports_response_and_candidate_diagnostics -v
@@ -905,7 +905,7 @@ uv run --offline pytest tests/providers/academic/test_arxiv.py tests/providers/a
 
 Expected: 缺少响应分类/计数摘要导致 FAIL，原 ProtocolFailure 本身不应改变。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 request_text 继续走 shared transport diagnostics
@@ -917,7 +917,7 @@ request_text 继续走 shared transport diagnostics
 
 如果响应钩子为了提前分类需要解析 XML，使用同一纯分类逻辑并保持诊断异常隔离；不要为日志增加网络调用或接受旧代码不接受的 XML 错误格式。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/academic/test_arxiv.py tests/providers/academic/test_dblp.py tests/providers/test_http_executor.py tests/orchestrators/test_paper_search_pipeline.py -v
@@ -925,7 +925,7 @@ uv run --offline pytest tests/providers/academic/test_arxiv.py tests/providers/a
 
 Expected: XML 映射及严格失败语义不变，错误和正常响应都可诊断；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 不要保留为日志而重复读取/格式化整段 XML 的代码。复用现有 namespace、mapper 和安全事件。重构后复跑上述组及全量测试。
 
@@ -939,13 +939,13 @@ Expected: XML 映射及严格失败语义不变，错误和正常响应都可诊
 - Test: `tests/academic/test_oa_enrichment.py`。
 - Test: `tests/orchestrators/test_paper_search_pipeline.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_oa_no_match_and_outage_have_distinct_terminal_diagnostics`：分别脚本返回 404、200 有效 OA、500 重试耗尽和 200 错误 envelope。验证 404 返回 None，业务终态是 completed/no_match，只有 500/解析失败有该 resolver 调用的 provider_failed，并保留 paper_enrichment_failed。论文全部保留。
 
 补回归：同 DOI 缓存仅调用一次、已缓存 None 不重新调用；畸形 location 的跳过只记录计数/原因，不泄漏 URL；email secret 不出现在任何日志或 endpoint。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/academic/test_oa_enrichment.py -k no_match_and_outage_have_distinct_terminal_diagnostics -v
@@ -953,7 +953,7 @@ uv run --offline pytest tests/academic/test_oa_enrichment.py -k no_match_and_out
 
 Expected: 当前 enrichment 只有部分失败事件，缺少对应 OA 调用终态/正常 no_match 分类，目标断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 Unpaywall:
@@ -971,7 +971,7 @@ enrich_paper_records:
 
 底层 HTTP 的 http_failed/status=404 可以保留，它与业务层正常无匹配不是同一层结果。resolver adapter 不再额外发一套 provider 终态。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/academic/test_unpaywall.py tests/academic/test_oa_enrichment.py tests/orchestrators/test_paper_search_pipeline.py tests/runtime/test_academic_runtime_assembly.py -v
@@ -979,7 +979,7 @@ uv run --offline pytest tests/providers/academic/test_unpaywall.py tests/academi
 
 Expected: 404、outage、缓存、论文保留和安全归属字段全部通过；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用失败字段 helper；不改变 OA cache key 或 aggregator，不把每个重复 DOI 的缓存命中当新 provider 调用。重构后复跑上述组及全量测试。
 
@@ -994,7 +994,7 @@ Expected: 404、outage、缓存、论文保留和安全归属字段全部通过�
 - Test: `tests/orchestrators/test_llm_search.py`、`tests/orchestrators/test_scoped_llm_search.py`。
 - Test: `tests/unit/test_llm_stages.py`、`tests/unit/test_llm_judge_stage.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 通过真实 OpenAIChatCompletionsClient、HTTP executor 和搜索 orchestrator，新增 `test_protocol_retry_has_one_provider_terminal_outcome`：
 
@@ -1006,7 +1006,7 @@ Expected: 404、outage、缓存、论文保留和安全归属字段全部通过�
 
 更新当前把 protocol_retry 认作 provider_failed 的测试，不能仅把旧字符串替换后不验证完整调用链。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/providers/llm/test_openai_chat.py tests/orchestrators/test_llm_search.py -k protocol_retry_has_one_provider_terminal_outcome -v
@@ -1014,7 +1014,7 @@ uv run --offline pytest tests/providers/llm/test_openai_chat.py tests/orchestrat
 
 Expected: 当前协议重试包含错误 provider_failed，成功还可能有底层与外层两条 provider_completed，因此 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 OpenAI client:
@@ -1034,7 +1034,7 @@ LLMStages:
 
 底层 protocol success 不代表严格 Markdown/Judge 校验通过；终态仍在原 pipeline 完整完成后发。此处不添加整次 Agent 重试。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/llm/test_openai_chat.py tests/orchestrators/test_llm_search.py tests/orchestrators/test_scoped_llm_search.py tests/unit/test_llm_stages.py tests/unit/test_llm_judge_stage.py tests/unit/test_llm_paper_stage.py -v
@@ -1042,7 +1042,7 @@ uv run --offline pytest tests/providers/llm/test_openai_chat.py tests/orchestrat
 
 Expected: 协议 retry 事件与终态数量正确，模型选择/extra_body/JSON/text/分支部分成功保持；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用两个 complete_* 的已有 metadata helper，不为此次补丁拆分 LLMStages 或改 LLMClient protocol。重构后跑上述组及全量测试。
 
@@ -1058,7 +1058,7 @@ Expected: 协议 retry 事件与终态数量正确，模型选择/extra_body/JSO
 - Test: `tests/runtime/test_agent_runtime_assembly.py`、`tests/daemon/test_agent_shutdown.py`。
 - Reference: `tests/support/agent_cli.py`、`tests/support/agent_search.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_agent_terminal_diagnostic_preserves_safe_status_and_byte_counts` 使用 write_fake_cli：
 
@@ -1070,7 +1070,7 @@ Expected: 协议 retry 事件与终态数量正确，模型选择/extra_body/JSO
 
 补回归而非假 RED：3600/7200 正确传为 --print-timeout，并由配置值+5 的 Python deadline 管理；用受控进程/虚拟 clock，不实际运行一小时。保留 descendant、pipe、重复 cancellation 和 quota 释放测试。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/observability/test_agent_event_logging.py -k terminal_diagnostic_preserves_safe_status_and_byte_counts -v
@@ -1078,7 +1078,7 @@ uv run --offline pytest tests/observability/test_agent_event_logging.py -k termi
 
 Expected: 当前只见外层安全 reason，缺终态 object/exit/字节诊断，目标断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 run_antigravity 新增必需的 keyword-only provider_name: str
@@ -1098,7 +1098,7 @@ AgentTextRunner 仍是 (model, messages) -> Awaitable[str]
 
 计数器不改变 cleanup task 的 bytes/int 返回类型。timeout/cancel/spawn 在没有某项事实时省略字段，不能伪造 returncode/terminal status。不得移动 quota 计时起点、去掉 +5、放宽输出上限、取消 start_new_session 或降低清理等待要求。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/providers/agent tests/observability/test_agent_event_logging.py tests/runtime/test_agent_runtime_assembly.py tests/daemon/test_agent_shutdown.py tests/orchestrators/test_agent_search_deadline.py -v
@@ -1107,7 +1107,7 @@ uv run --offline mypy src tests scripts
 
 Expected: 新诊断正确且无 payload；长配置预算、超时、双取消、pipe/descendant 清理和 quota 释放通过；别名参数与 partial 类型一致；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 不为日志保存 stderr 字节串；最多新增小型局部字节计数对象。终态分类和真实退出流程共用解析结果，避免二次解释/改变错误优先级。重构后重跑完整 Agent 生命周期组及全量测试。
 
@@ -1124,7 +1124,7 @@ Expected: 新诊断正确且无 payload；长配置预算、超时、双取消�
 - Test: `tests/acceptance/test_debug_and_doctor.py`。
 - Reference: `src/agent_search_gateway/daemon.py`（现有 workflow 所有权，不计划重写）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_provider_terminal_event_preserves_upstream_code_after_retries` 走真实 executor + 真实 adapter + orchestrator，设置：
 
@@ -1137,7 +1137,7 @@ Expected: 新诊断正确且无 payload；长配置预算、超时、双取消�
 
 新 RED 首先针对**外层 terminal 缺失 upstream_code**，已在前面任务通过的 retry/candidate 计数作为集成回归。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/observability/test_provider_event_logging.py -k terminal_event_preserves_upstream_code_after_retries -v
@@ -1145,7 +1145,7 @@ uv run --offline pytest tests/observability/test_provider_event_logging.py -k te
 
 Expected: 内层 diagnostics 已存在，但原 _log_provider_failure 仅含 error_type，terminal upstream code 断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 Search/Paper/Fetch 的终态日志:
@@ -1169,7 +1169,7 @@ Fetch:
 
 不要通过按 provider 名去重日志“修复”重复终态；改正每个调用栈的事件所有权。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/observability tests/orchestrators tests/scheduler tests/academic/test_oa_enrichment.py tests/acceptance/test_debug_and_doctor.py -v
@@ -1177,7 +1177,7 @@ uv run --offline pytest tests/observability tests/orchestrators tests/scheduler 
 
 Expected: 每个实际 provider branch 恰有一个终态，A/C 保留、B 不污染 workflow，fallback/Judge 策略不变，两个并发 request 各自准确；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只合并重复字段拼装；删除重复终态发射点，不重写调度。用 DEBUG on/off、文件轮转和 stdout/stderr 的现有验收确认变化局限于诊断。重构后复跑上述组及全量测试。
 
@@ -1192,7 +1192,7 @@ Expected: 每个实际 provider branch 恰有一个终态，A/C 保留、B 不�
 - Test: `tests/orchestrators/test_keyword_search_pipeline.py`。
 - Reference: `src/agent_search_gateway/url_normalization.py`（不修改 normalize_url）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 第一个 RED 通过现有真实关键词 pipeline 新增 `test_keyword_hit_uses_google_goto_destination`：provider 返回合法 goto URL，断言写出的 URL 是 example.org 的目标地址，而不是 Google wrapper。此用例不依赖尚不存在的新模块，失败直接表达业务缺陷。
 
@@ -1213,7 +1213,7 @@ Expected: 每个实际 provider branch 恰有一个终态，A/C 保留、B 不�
 
 普通未知 URL 的非法格式继续由现有 normalize_url 处理，本 helper 不重新定义所有 URL 的合法性。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/orchestrators/test_keyword_search_pipeline.py -k keyword_hit_uses_google_goto_destination -v
@@ -1221,7 +1221,7 @@ uv run --offline pytest tests/orchestrators/test_keyword_search_pipeline.py -k k
 
 Expected: FAIL，当前结果仍是 google.com/goto。纯 helper 后续用例需因对应解析规则缺失而失败，不以新文件 ImportError 充当首次 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 unwrap_search_result_url(raw):
@@ -1245,7 +1245,7 @@ _stage_keyword_hit:
 
 匹配只看精确 host/path，不用 endswith("google.com") 或字符串 contains。不要把新规则放入每个 adapter、normalize_url 或 url-fetch。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_search_result_urls.py tests/unit/test_url_normalization.py tests/orchestrators/test_keyword_search_pipeline.py tests/orchestrators/test_keyword_search_state.py -v
@@ -1253,7 +1253,7 @@ uv run --offline pytest tests/unit/test_search_result_urls.py tests/unit/test_ur
 
 Expected: GU-01–10、13–15 的纯解析边界通过，入口业务用例通过；原全局 normalize_url 行为完全保持；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只保留一个纯 helper 与一个本地异常。去掉重复 unquote 和任何规则表/网络 resolver；确认对未知 URL 不新增处理。复跑纯 URL、关键词组及全量测试。
 
@@ -1268,7 +1268,7 @@ Expected: GU-01–10、13–15 的纯解析边界通过，入口业务用例通�
 - Test: `tests/acceptance/test_gateway_workflows.py`、`tests/acceptance/test_debug_and_doctor.py`。
 - Reference: `src/agent_search_gateway/url_store.py`、`src/agent_search_gateway/result_writer.py`（不改变 schema）。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_keyword_staging_reports_redirect_rewrites_and_rejections`：同一 provider 返回两个有效 goto、一个已识别但无效 goto、一个直接链接，检查 phase=staging 的 received/accepted/rejected/rewritten 与 recognized_invalid_redirect 数量；不能把一个坏 wrapper 算作 provider_failed。
 
@@ -1280,7 +1280,7 @@ Expected: GU-01–10、13–15 的纯解析边界通过，入口业务用例通�
 - 未知 /url?q= 保持原样；LLM/Agent/paper 的 URL 不进入这个规则。
 - helper 无网络请求；HTTP MockTransport 只收到原 provider/Fetch 请求次数，没有额外解析重定向请求。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/orchestrators/test_keyword_search_pipeline.py -k keyword_staging_reports_redirect_rewrites_and_rejections -v
@@ -1288,7 +1288,7 @@ uv run --offline pytest tests/orchestrators/test_keyword_search_pipeline.py -k k
 
 Expected: 解包已由 Task 19 工作，但 staging 还缺 summary/rewritten 统计，因此 FAIL。已经通过的去重行为作为回归，不称作新的 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 _run_keyword_pipeline:
@@ -1307,7 +1307,7 @@ _stage_keyword_hit:
 
 新的 counts 参数只在该私有方法与唯一生产调用点之间传递；它不改变 _StagedKeyword、KeywordSearchHit、公开 provider interface 或结果类型。严格路径若途中终止，显式区分 processed/unprocessed。URLStore 的准入/跨 provider 去重逻辑继续使用现有实现。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/unit/test_search_result_urls.py tests/orchestrators/test_keyword_search_pipeline.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_admission.py tests/orchestrators/test_url_fetch_singleflight.py tests/acceptance/test_gateway_workflows.py tests/acceptance/test_debug_and_doctor.py -v
@@ -1315,7 +1315,7 @@ uv run --offline pytest tests/unit/test_search_result_urls.py tests/orchestrator
 
 Expected: 精确 rewrite/rejection 计数通过，两个 provider 的目标合并与 Fetch 准入正确，无新增网络或内容泄漏；再运行全量测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 删除重复 URL 解析和不必要的原 URL 日志变量；修正 empty_abstract 原分支先 normalize 的顺序。不要让 adapter_count 与 staging_count 共用实例或互相覆盖。重构后复跑上述组及全量测试。
 
@@ -1331,13 +1331,13 @@ Expected: 精确 rewrite/rejection 计数通过，两个 provider 的目标合�
 - Test: `tests/docs/test_open_source_contract.py`、`tests/doctor/test_config.py`。
 - Reference: `CONTRIBUTING.md`、`scripts/build_docs.py`。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 扩展现有文档契约测试 `test_documented_agent_timeout_policy_matches_runtime`：文档的当前 Agent timeout 表不能宣称 540 配置上限/1140 工作流/1200 socket；对应示例配置能用 7200 覆盖并通过真实 resolver。非 Agent socket 的说明与已存在的 600 秒实现一致。
 
 检查的是实际数字与约束，不逐字锁定整段中文/英文文案。历史 specs/plans 不是“当前用户说明”，不能全库粗暴禁止出现这些数字。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run --offline pytest tests/docs/test_documented_config.py -k documented_agent_timeout_policy_matches_runtime -v
@@ -1345,7 +1345,7 @@ uv run --offline pytest tests/docs/test_documented_config.py -k documented_agent
 
 Expected: README 当前仍包含过时 Agent 预算，且非 Agent 错写为 300，文档约束断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 README/config/public-interface:
@@ -1367,7 +1367,7 @@ CHANGELOG Unreleased:
 
 移除 README “whole-workflow timeout 会取消并不写部分结果”的过期句子，替换为配置的单次 deadline 与取消行为的准确说明。保留 OS 阻塞 spawn、escaped descendants 等现有生命周期限制。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 uv run --offline pytest tests/docs tests/doctor/test_config.py -v
@@ -1376,7 +1376,7 @@ uv run --offline python scripts/build_docs.py
 
 Expected: 文档/config 契约与生成文档检查通过；再运行全量测试。若 build_docs 产生跟踪文件，按脚本现有约定审阅输出，不把工具生成内容误当作无关手工改动。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 用当前公开说明集中解释政策，不修改历史设计记录来掩盖原行为。检查 README、config 和 public-interface 没有互相矛盾。重构/修订后复跑 docs/doctor 和全量测试。
 
@@ -1456,7 +1456,7 @@ uv run --offline python scripts/build_docs.py
 
 ## 8. 实施检查点（2026-11-14）
 
-本节记录实施阶段的实际结果，与上文计划编写阶段的历史自审分开。Task 1–20 已按顺序完成、自审并提交；Task 21 部分完成，因 LocalHost 内容检查阻断而保留待续，整份计划尚未完成最终验收。
+本节保留 2026-11-14 中途检查点的实际结果，与上文计划编写阶段的历史自审分开。当时 Task 1–20 已完成，Task 21 被 LocalHost 内容检查暂时阻断；这一状态随后已解除，最终完成记录见第 9 节。
 
 实施工作树为原 `gateway-patch-timeout-logs-google-goto`，实施前基线测试为 **1329 passed, 4 skipped**。每项完成记录如下；相关组的数字为该项最后确认的相关测试结果，全量列均为该项最终实际完成的离线测试结果。
 
@@ -1526,10 +1526,50 @@ Secret-looking content is blocked from edit. Use placeholders such as [REDACTED_
 
 当前文档修改后的完整测试尚未执行，不能把 Task 20 的绿色全量结果表述为当前未提交文档状态的全量通过。
 
-### 8.3 继续执行的顺序
+### 8.3 当时预定的继续执行顺序
 
 1. 重新读取 README/config 获取当前 SHA，完成 Task 21 已准备的精确说明修改；不改变环境变量引用和配置默认值。
 2. 运行 docs/doctor GREEN、文档构建、全量测试及 Task 21 自审；精确文件提交 Task 21。
 3. 执行第 5 节列出的全部最终门禁，记录真实 exit code/结果；通过后回填逐 Step 复选框和最终完成记录。
 4. 保持原工作树、公开协议/schema、发布版本和已约定范围。尚未执行发布、推送或合并。
+
+## 9. 实施完成与最终验收（2026-11-14）
+
+第 8 节保留中途检查点；本节是完成后的最新状态。Task 1–21 均已按计划实施、自审并提交；全部 **105 个 Step 复选框**已回填。实施分支仍为 `gateway-patch-timeout-logs-google-goto`。
+
+### 9.1 最后两项实施结果
+
+- Task 20：`e014ad2`。关键词 staging 与 adapter 分别计数；准确统计改写、拒绝、processed/unprocessed；真实 Bright Data 与 ScraperAPI adapter 的跨提供商目标去重/Fetch 验收。扩展相关组 **168 passed**，全量 **1834 passed, 4 skipped**。
+- Task 21：`2f3b780`。`README.md`、`config.example.toml`、`docs/public-interface.md`、`CHANGELOG.md`、`tests/docs/test_documented_config.py` 共五个计划内文件更新。实际文档契约 RED（7200 能由 resolver 接受、README 仍含 540）转为 GREEN；docs/doctor **29 passed**，全量 **1835 passed, 4 skipped**，文档构建、Ruff、mypy 通过。
+- 期间 LocalHost `edit` 对 README/config 的既有环境变量名称示例触发内容检查；用户明确授权本次使用 Bash 后，以标准 `git apply` 的精确上下文补丁完成合法文档修改。原 `api_key_env`、`pass_env` 引用及其值保留；未改变共享工具策略或环境。LocalHost 环境没有 `apply_patch` CLI，因此没有使用该命令。
+- 最终格式门禁发现 `tests/unit/test_observability_logging.py` 的两处纯格式差异，使用 SHA 保护的精确编辑修正，提交 `65808c3`。该变更未改变断言语义，之后全库格式检查和全量测试通过。
+
+### 9.2 第 5 节最终门禁的真实执行结果
+
+| 命令 | Exit | 结果 |
+| --- | ---: | --- |
+| `uv run --offline ruff format --check src tests scripts` | 0 | 修正一处既有格式差异后，**199 files already formatted**；此前第一次执行 exit 1，明确发现了该文件 |
+| `uv run --offline ruff check .` | 0 | All checks passed |
+| `uv run --offline mypy src tests scripts` | 0 | 199 source files 无问题 |
+| `uv run --offline pytest -v` | 143 | LocalHost 的 **120 KB stdout 上限**在约 49% 处截断并终止进程；不是测试断言失败，不能算作完成的一轮全量测试 |
+| `uv run --offline pytest -v -q` | 0 | 在同一完整测试集上减少输出量重跑，**1835 passed, 4 skipped**，无截断；这是满足工具输出限制的完整验收轮 |
+| `uv run --offline python scripts/build_docs.py` | 0 | 成功；无新增 tracked 构建输出 |
+
+### 9.3 代表性 DEBUG / 行为人工核对
+
+- `tests/observability/test_provider_event_logging.py`：HTTP 429→502→200 的两次重试、三个 response diagnostic、单次提供商成功终态；最终失败有各自一条 `http_failed` 与 `provider_failed`；10→5 的 adapter 拒绝原因与 staging 分母独立，整条 workflow 仍能成功。
+- `tests/providers/llm/test_openai_chat.py`：协议重试与 `llm_protocol_completed` 不重复生成 provider terminal；prompt、模型响应和凭据不进入诊断。
+- `tests/observability/test_agent_event_logging.py`：Agent ERROR、非零退出、timeout、output limit、spawn/cleanup failure，安全状态/原因/字节数在 cleanup 后记录；未知异常身份与取消/资源清理不被改写。
+- `tests/academic/test_oa_enrichment.py`：Unpaywall 404 是 completed/no_match；500 与坏 envelope 走失败终态，论文记录保留，HTTP 响应事件和真实读取字节数准确。
+- `tests/scheduler/test_fetch_outcomes.py`：执行失败保持失败对象与 fallback，语义拒绝保留 completed/semantic_failure，Judge 执行失败保留原公开异常语义且停止 fallback。
+- `tests/acceptance/test_gateway_workflows.py`：Bright Data/ScraperAPI 的 goto 或直接目标跨提供商合并，旧 wrapper 无 URLStore 准入，后续 Fetch 只接受目标身份；签名 query 在实际结果中保留且不进入日志；MockTransport 无额外重定向请求。
+- `tests/acceptance/test_debug_and_doctor.py` 与 `tests/observability/test_provider_event_logging.py`：完整 stderr/rotating-file sentinel 扫描，DEBUG off 无新增诊断，两个并发 request 与重复 invocation/scope 各自有准确终态和关联。
+
+### 9.4 实施边界和交接
+
+- “无 Agent 最大值”仅指 Gateway 接受任意可表示的有限正数；默认 300、单次进程 deadline、Python +5、quota 与进程清理保持生效。外部 agy 的极端时长解析不由 Gateway 保证。
+- Google goto 仅在关键词入口按精确规则单次解包直接 HTTP(S) `url` 目标；不推断 opaque token、其他搜索引擎或网络重定向，不迁移历史 store。此规则对所有关键词 provider 的相同形状生效，但没有声称 Bright Data 的在线 goto 样本已验证。
+- 全部最终验证为离线 MockTransport、受控时钟、真实本地 socket/子进程回归；没有调用付费 provider、没有实等 7200 秒。不存在需通过付费 smoke 才能消除的已知协议疑点。
+- 公共 CLI/协议/结果 schema、RetryPolicy、registry、package version、tag 与发布资产保持计划约定范围。未执行推送、PR、合并或发布；用户可在这份已提交工作树的基础上另行安排代码审查。
+
 
