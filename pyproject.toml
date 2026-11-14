@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-search-gateway"
-version = "0.2.1"
+version = "0.2.2"
 description = "Local daemon and CLI for aggregated web and academic search plus admitted-URL fetching."
 readme = "README.md"
 requires-python = ">=3.11"
