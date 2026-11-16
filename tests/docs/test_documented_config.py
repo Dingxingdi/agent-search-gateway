@@ -266,6 +266,8 @@ def test_example_provider_selection_omits_only_requested_templates() -> None:
         "scrapingant",
         "serpapi",
         "jina",
+        "yuanbao",
+        "zhihu",
     }
     assert {name for name, table in web.items() if isinstance(table, dict)} == expected
     resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
@@ -290,6 +292,8 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "scrapingant",
         "serpapi",
         "jina",
+        "yuanbao",
+        "zhihu",
     }
     example_names = registered_names - {"zenrows", "decodo", "scrapingdog", "scrapegraphai"}
     assert example_names <= set(web)
@@ -304,6 +308,13 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
     }
     assert dict(by_name["scrape_do"].options) == {"api_url": "https://api.scrape.do"}
 
+    for name, api_url, expected_env_name in (
+        ("yuanbao", "https://api.wsa.cloud.tencent.com", "YUANBAO_API_KEY"),
+        ("zhihu", "https://developer.zhihu.com", "ZHIHU_ACCESS_SECRET"),
+    ):
+        assert dict(by_name[name].options) == {"api_url": api_url}
+        assert by_name[name].api_key_env == expected_env_name
+
     expected_capabilities = {
         "brightdata": (True, True),
         "scrape_do": (True, True),
@@ -315,6 +326,8 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "scrapingant": (False, True),
         "serpapi": (True, False),
         "jina": (False, True),
+        "yuanbao": (True, False),
+        "zhihu": (True, False),
     }
     for name, (search, fetch) in expected_capabilities.items():
         if name in example_names:
@@ -364,6 +377,8 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "ScrapingAnt": ("no", "yes"),
         "SerpApi": ("yes", "no"),
         "Jina Reader": ("no", "yes"),
+        "Yuanbao": ("yes", "no"),
+        "Zhihu": ("yes", "no"),
     }
     for display_name, (search_label, fetch_label) in expected_rows.items():
         assert f"| {display_name} | {search_label} | {fetch_label} |" in readme

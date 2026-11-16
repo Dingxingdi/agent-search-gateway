@@ -78,12 +78,45 @@ The results directory is created by the daemon as needed. The debug log is creat
 | ScrapingAnt | no | yes |
 | SerpApi | yes | no |
 | Jina Reader | no | yes |
+| Yuanbao | yes | no |
+| Zhihu | yes | no |
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
 Jina Reader is a credential-free, fetch-only provider, so its configuration must omit `api_key_env`. Each actual Jina Reader request sends `X-No-Cache: true` to refresh Reader-side content. This does not bypass content already prepared by the gateway: an admitted URL whose body is already prepared still short-circuits before provider dispatch, and the gateway exposes no force-refresh option. Configuration order remains fetch-provider priority, so place Jina earlier when free-first behavior is desired.
 
 Web search and fetch stages for the same provider share one concurrency quota. LLM provider transports have their own independent quotas.
+
+#### Enabling Zhihu and Yuanbao
+
+Existing user configurations are not automatically updated when the package or template changes. To enable the new search providers, add the following blocks to `~/.config/agent-search-gateway-cli/config.toml` if they are absent, or edit their existing blocks:
+
+```toml
+[web_providers.yuanbao]
+enable_search = true
+enable_fetch = false
+api_url = "https://api.wsa.cloud.tencent.com"
+api_key_env = "YUANBAO_API_KEY"
+
+[web_providers.zhihu]
+enable_search = true
+enable_fetch = false
+api_url = "https://developer.zhihu.com"
+api_key_env = "ZHIHU_ACCESS_SECRET"
+```
+
+`api_key_env` names the environment variable holding each credential in the daemon environment. `YUANBAO_API_KEY` and `ZHIHU_ACCESS_SECRET` are example names selected by this configuration; the adapters do not hardcode them. Export the named variables and restart the daemon after updating the configuration. Restarting clears in-memory URL admission and cached content, so search again before fetching URLs.
+
+Zhihu is one logical provider that concurrently calls the site-search and global-search APIs at `/api/v1/content/zhihu_search` and `/api/v1/content/global_search`. One logical search may consume two API quotas; retries can add physical requests. An ordinary failure in either branch preserves the successful sibling's results, including a successful empty result. Both branches failing makes the logical provider fail.
+
+Yuanbao sends a direct `POST /SearchPro` request authenticated with a Tencent service API key; it does not use a Tencent SDK or request signing. Its `content` and `passage` fields supply search summaries, not fetched page bodies. URLs admitted from these results remain eligible for a later `url-fetch` through an enabled Fetch provider. Keep both `api_url` values as base URLs; the adapters append the API paths.
+
+After enabling the providers, select either one for an individual request:
+
+```bash
+agent-search-gateway keyword-search "query" --provider zhihu
+agent-search-gateway keyword-search "query" --provider yuanbao
+```
 
 #### TinyFish endpoint migration
 
@@ -98,6 +131,8 @@ fetch_api_url = "https://api.fetch.tinyfish.ai"
 Edit these two keys in the existing provider block; keep its credential reference and enable flags unchanged. Upgrading the package or changing `config.example.toml` does not update an existing user configuration. Restart the daemon after updating its configuration; restarting clears in-memory URL admission and cached content, so search again before using `url-fetch`. Deliberately configured custom endpoints remain supported and are not automatically rewritten.
 
 #### Known provider limitations
+
+Bright Data SERP Search has also occasionally returned HTTP 200 responses followed by JSON parsing failures. The cause remains unconfirmed. If this occurs, retry the search or choose another provider. This release documents the observation without fixing it or adding JSON-parse retries. This is a separate known limitation from the response-header checks described under DEBUG tracing.
 
 ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in organic search results; [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) documents the observed limitation. At the shared keyword-result entry point, the gateway unwraps absolute HTTP(S) URLs whose hostname is exactly `google.com` or `www.google.com`, path is exactly `/goto`, and query contains exactly one `url` parameter with a valid HTTP(S) destination. It decodes that query value once, before normal URL normalization, deduplication, admission, and cached-body merging, so later `url-fetch` uses the destination identity.
 
@@ -411,6 +446,12 @@ Successful search files use `keyword-<request_id>.jsonl`, `llm-<request_id>.json
 A URL must first be admitted by keyword, LLM, Agent, or academic paper search before `url-fetch` can use it. Admission, cached body content, and unavailable state are in memory only. A daemon restart therefore requires searching again before fetching the same URL.
 
 Business command stdout is final-output-only: successful search commands print only the absolute result path, and successful fetch commands print only their final text. DEBUG events are emitted by the daemon process to its stderr and debug log, not into a requesting business CLI's stdout.
+
+## HTTP retry waits
+
+For retryable HTTP statuses, a valid `Retry-After` header takes precedence over the local backoff. The gateway accepts a nonnegative integer number of seconds or an HTTP-date; zero is honored, and a past date means no wait. The server-directed wait can exceed `[retry].max_delay_seconds`, which caps only the locally calculated exponential backoff. A missing or invalid header falls back to that local backoff.
+
+`max_attempts` remains the total attempt budget, including the first request; honoring `Retry-After` does not add attempts or guarantee that every HTTP 429 will recover. The existing retry configuration needs no additional keys.
 
 ## DEBUG tracing
 
