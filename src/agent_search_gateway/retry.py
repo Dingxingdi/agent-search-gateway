@@ -43,7 +43,7 @@ async def retry_async(
                 with suppress(Exception):
                     adjusted = adjust_delay(exc, delay)
                     if math.isfinite(adjusted):
-                        delay = min(max(0.0, adjusted), policy.max_delay_seconds)
+                        delay = max(0.0, adjusted)
             if on_retry is not None:
                 with suppress(Exception):
                     on_retry(attempt, exc, delay)

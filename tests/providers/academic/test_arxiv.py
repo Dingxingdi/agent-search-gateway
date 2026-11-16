@@ -16,6 +16,43 @@ from tests.support.http import RecordingJsonExecutor
 FIXTURES = Path(__file__).parents[2] / "fixtures" / "providers" / "academic" / "arxiv"
 
 
+async def test_arxiv_honors_shared_retry_after() -> None:
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    requests: list[httpx.Request] = []
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"}, request=request)
+        return httpx.Response(200, text=(FIXTURES / "search.xml").read_text(), request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="arxiv",
+            sleep=sleep,
+        )
+        hits = await ArxivProvider(executor).search("graph transformers")
+
+    assert len(requests) == 2
+    assert requests[0].url == requests[1].url
+    assert requests[0].url.params["search_query"] == "all:graph transformers"
+    assert delays == [5.0]
+    assert len(hits) == 1
+    assert hits[0].arxiv_id == "2401.12345"
+    assert hits[0].title == "Example arXiv Paper"
+    assert hits[0].authors == ("Alice Example", "Bob Example")
+
+
 async def test_arxiv_maps_atom_feed_and_isolates_malformed_entry() -> None:
     executor = RecordingJsonExecutor([(FIXTURES / "search.xml").read_text()])
     provider = ArxivProvider(executor)

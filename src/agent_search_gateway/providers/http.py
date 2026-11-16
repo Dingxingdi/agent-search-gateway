@@ -2,9 +2,14 @@
 
 import asyncio
 import logging
+import math
 import random
+import re
+import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -25,11 +30,47 @@ def is_retryable_http_status(status_code: int) -> bool:
     return status_code in {408, 429} or status_code >= 500
 
 
+_HTTP_DATE_PATTERN = re.compile(
+    r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} [A-Za-z]{3} [0-9]{4} "
+    r"|(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), "
+    r"[0-9]{2}-[A-Za-z]{3}-[0-9]{2} )"
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2} (?:GMT|UTC|[+-][0-9]{4})"
+    r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) [A-Za-z]{3} (?: [0-9]|[0-9]{2}) "
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}"
+)
+
+
+def _parse_retry_after(value: str | None, *, now: float) -> float | None:
+    if value is None:
+        return None
+    value = value.strip(" \t")
+    if value.isascii() and value.isdecimal():
+        seconds = float(value)
+    else:
+        # email.utils also accepts incomplete dates and ignores trailing tokens.
+        if _HTTP_DATE_PATTERN.fullmatch(value) is None:
+            return None
+        try:
+            date = parsedate_to_datetime(value)
+            if date.tzinfo is None:
+                date = date.replace(tzinfo=UTC)
+            seconds = date.timestamp() - now
+        except (TypeError, ValueError, OverflowError, OSError):
+            return None
+    return max(0.0, seconds) if math.isfinite(seconds) else None
+
+
 class _RetryableStatus(Exception):
-    def __init__(self, status_code: int, diagnostics: Mapping[str, object]) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        diagnostics: Mapping[str, object],
+        retry_after_seconds: float | None = None,
+    ) -> None:
         super().__init__(str(status_code))
         self.status_code = status_code
         self.diagnostics = dict(diagnostics)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class HttpStatusFailure(ExecutionFailure):
@@ -206,7 +247,11 @@ class HttpJsonExecutor:
             )
 
         def on_retry(current_attempt: int, exc: BaseException, delay: float) -> None:
-            delay_ms = max(0, int(delay * 1000))
+            # At this magnitude floats have no fractional seconds; scale as an integer.
+            delay_ms = max(
+                0,
+                int(delay) * 1000 if delay >= sys.float_info.max / 1000 else int(delay * 1000),
+            )
             attempt_elapsed_ms = elapsed_ms(self._monotonic, attempt_started)
             if isinstance(exc, ProviderResponseFailure):
                 details = dict(response_fields)
@@ -221,6 +266,7 @@ class HttpJsonExecutor:
                     endpoint=log_endpoint,
                     attempt=current_attempt,
                     delay_ms=delay_ms,
+                    delay_source="backoff",
                     elapsed_ms=attempt_elapsed_ms,
                     category="provider_header",
                     retry_scheduled=True,
@@ -240,6 +286,9 @@ class HttpJsonExecutor:
                     endpoint=log_endpoint,
                     attempt=current_attempt,
                     delay_ms=delay_ms,
+                    delay_source=(
+                        "retry_after" if exc.retry_after_seconds is not None else "backoff"
+                    ),
                     elapsed_ms=attempt_elapsed_ms,
                     category="status",
                     exc_info=False,
@@ -255,6 +304,7 @@ class HttpJsonExecutor:
                 endpoint=log_endpoint,
                 attempt=current_attempt,
                 delay_ms=delay_ms,
+                delay_source="backoff",
                 elapsed_ms=attempt_elapsed_ms,
                 category="transport",
                 transport_type=type(exc).__name__,
@@ -326,7 +376,11 @@ class HttpJsonExecutor:
             if failure is not None:
                 raise failure
             if is_retryable_http_status(response.status_code):
-                raise _RetryableStatus(response.status_code, response_fields)
+                raise _RetryableStatus(
+                    response.status_code,
+                    response_fields,
+                    _parse_retry_after(response.headers.get("Retry-After"), now=time.time()),
+                )
             return response
 
         try:
@@ -337,7 +391,7 @@ class HttpJsonExecutor:
                 sleep=self._sleep,
                 before_attempt=before_attempt,
                 on_retry=on_retry,
-                adjust_delay=self._adjust_retry_delay if response_inspector is not None else None,
+                adjust_delay=self._adjust_retry_delay,
             )
         except ProviderResponseFailure as exc:
             terminal = ProviderResponseFailure(
@@ -468,6 +522,8 @@ class HttpJsonExecutor:
 
     @staticmethod
     def _adjust_retry_delay(exc: BaseException, delay: float) -> float:
+        if isinstance(exc, _RetryableStatus) and exc.retry_after_seconds is not None:
+            return exc.retry_after_seconds
         if isinstance(exc, ProviderResponseFailure) and exc.retryable:
             return delay * random.uniform(0.8, 1.0)
         return delay

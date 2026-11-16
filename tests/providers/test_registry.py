@@ -1,3 +1,5 @@
+import pytest
+
 from agent_search_gateway.providers.contracts import (
     KeywordSearchHit,
     ProviderCapabilities,
@@ -14,7 +16,9 @@ from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
 from agent_search_gateway.providers.web.scrapingant import ScrapingAntAdapter
 from agent_search_gateway.providers.web.scrapingdog import ScrapingDogAdapter
 from agent_search_gateway.providers.web.serpapi import SerpApiAdapter
+from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
 from agent_search_gateway.providers.web.zenrows import ZenRowsAdapter
+from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from tests.support.fakes import FakeKeywordSearchProvider, FakeURLFetchProvider
 
 
@@ -81,7 +85,7 @@ def test_registry_exposes_exact_capabilities_and_contract_types() -> None:
 
 def test_default_registry_appends_new_providers_with_exact_contracts() -> None:
     registry = build_default_registry()
-    registrations = registry.list_in_registration_order()[-10:]
+    registrations = registry.list_in_registration_order()[-12:]
 
     expected = [
         (
@@ -114,12 +118,30 @@ def test_default_registry_appends_new_providers_with_exact_contracts() -> None:
         ),
         ("serpapi", ProviderCapabilities(True, False), SerpApiAdapter, frozenset({"api_url"})),
         ("jina", ProviderCapabilities(False, True), JinaReaderAdapter, frozenset({"api_url"})),
+        ("yuanbao", ProviderCapabilities(True, False), YuanbaoAdapter, frozenset({"api_url"})),
+        ("zhihu", ProviderCapabilities(True, False), ZhihuAdapter, frozenset({"api_url"})),
     ]
 
     assert [
         (item.name, item.capabilities, item.factory, item.allowed_config_keys)
         for item in registrations
     ] == expected
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "adapter_type"),
+    [("yuanbao", YuanbaoAdapter), ("zhihu", ZhihuAdapter)],
+)
+def test_service_key_search_registration_contract(
+    provider_name: str,
+    adapter_type: type[YuanbaoAdapter] | type[ZhihuAdapter],
+) -> None:
+    registration = build_default_registry().require(provider_name)
+
+    assert registration.factory is adapter_type
+    assert registration.capabilities == ProviderCapabilities(search=True, fetch=False)
+    assert registration.requires_api_key is True
+    assert registration.allowed_config_keys == frozenset({"api_url"})
 
 
 def test_default_registry_marks_only_jina_credentialless() -> None:

@@ -1,0 +1,29 @@
+{
+  "Code": 0,
+  "Message": "success",
+  "Data": {
+    "HasMore": false,
+    "Items": [
+      {
+        "Title": "全网示例标题",
+        "ContentType": "Article",
+        "ContentID": "fixture-content",
+        "ContentText": "包含 <em>关键词</em> 的摘要",
+        "Url": "https://example.org/global-result?utm_medium=openapi_platform&utm_source=fixture",
+        "CommentCount": 1,
+        "VoteUpCount": 2,
+        "AuthorName": "示例作者",
+        "AuthorAvatar": "https://example.com/avatar.png",
+        "AuthorBadge": "",
+        "AuthorBadgeText": "",
+        "EditTime": 1767225600,
+        "CommentInfoList": [
+          {
+            "Content": "示例评论"
+          }
+        ],
+        "AuthorityLevel": "2"
+      }
+    ]
+  }
+}

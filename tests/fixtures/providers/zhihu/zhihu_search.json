@@ -1,0 +1,28 @@
+{
+  "Code": 0,
+  "Message": "success",
+  "Data": {
+    "HasMore": false,
+    "SearchHashId": "fixture-search",
+    "Items": [
+      {
+        "Title": "示例标题",
+        "ContentType": "Article",
+        "ContentID": "fixture-content",
+        "ContentText": "简短示例摘要",
+        "Url": "https://example.com/zhihu-result?utm_medium=openapi_platform&utm_source=fixture",
+        "CommentCount": 1,
+        "VoteUpCount": 2,
+        "AuthorName": "示例作者",
+        "AuthorAvatar": "https://example.com/avatar.png",
+        "AuthorBadge": "",
+        "AuthorBadgeText": "",
+        "EditTime": 1767225600,
+        "CommentInfoList": [],
+        "AuthorityLevel": "2",
+        "CreateTime": 1767225600,
+        "RankingScore": 0.98
+      }
+    ]
+  }
+}

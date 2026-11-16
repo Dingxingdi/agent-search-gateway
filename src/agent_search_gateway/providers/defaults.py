@@ -19,7 +19,9 @@ from .web.scrapingdog import ScrapingDogAdapter
 from .web.serpapi import SerpApiAdapter
 from .web.tavily import TavilyAdapter
 from .web.tinyfish import TinyFishAdapter
+from .web.yuanbao import YuanbaoAdapter
 from .web.zenrows import ZenRowsAdapter
+from .web.zhihu import ZhihuAdapter
 
 
 def build_default_registry() -> ProviderRegistry:
@@ -133,6 +135,18 @@ def build_default_registry() -> ProviderRegistry:
             JinaReaderAdapter,
             frozenset({"api_url"}),
             requires_api_key=False,
+        ),
+        WebProviderRegistration(
+            "yuanbao",
+            ProviderCapabilities(search=True, fetch=False),
+            YuanbaoAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "zhihu",
+            ProviderCapabilities(search=True, fetch=False),
+            ZhihuAdapter,
+            frozenset({"api_url"}),
         ),
     )
     for registration in registrations:
