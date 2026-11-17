@@ -1,0 +1,21 @@
+{
+  "results": {
+    "web": [
+      {
+        "url": "https://EXAMPLE.com/one#section",
+        "title": "First page",
+        "snippets": [
+          "first",
+          "second"
+        ]
+      },
+      {
+        "url": "https://example.com/two",
+        "title": "Second page",
+        "snippets": [
+          "third"
+        ]
+      }
+    ]
+  }
+}

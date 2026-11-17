@@ -1,0 +1,10 @@
+[
+  {
+    "url": "https://example.com/other",
+    "markdown": "Other body."
+  },
+  {
+    "url": "https://example.com/page",
+    "markdown": "  # Page\n\nSelected body.\n"
+  }
+]

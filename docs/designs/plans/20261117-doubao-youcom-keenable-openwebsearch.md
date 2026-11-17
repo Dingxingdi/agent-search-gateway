@@ -247,13 +247,13 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/youcom/invalid_json.txt`
 - Read: `src/agent_search_gateway/providers/web/parallel.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_search_joins_top_level_result_snippets`：results.web 有两条，snippets=["first", "second"]，contents 无摘要；期望 snippet 为 `"first\n\nsecond"`，不能为列表字面量。然后逐次覆盖最小请求、空数组、snippets缺失/null/[]、snippets存在但非列表或成员非字符串、无效URL、坏条目与顶层结构错误。错误形状的合成200用例用官方 `detail` 或 `error` 结构，但明确标注为防御性 fixture。
 
 `test_search_omits_optional_extraction` 必须精确断言 json_body == {"query": query, "count": 10}；使用官方 host、X-API-Key，禁止附加 extraction/livecrawl。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_youcom.py -k search -v
@@ -261,7 +261,7 @@ uv run pytest tests/providers/web/test_youcom.py -k search -v
 
 预期：映射/最小协议断言 FAIL，不得用旧的 contents.snippets fixture 制造假通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 YouComAdapter(*, name, api_url=官方根地址, secret, http_executor: JsonRequester)
@@ -278,7 +278,7 @@ inspector
 
 不自动使用 `contents.html/markdown/highlights`，不新增描述回退或提取开关。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_youcom.py -v
@@ -287,7 +287,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：目标/相关回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅将 You.com 已知错误形状检查复用给 Fetch。清理测试重复 setup，保留单行为断言。重跑 Step 4。
 
@@ -302,7 +302,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/youcom/fetch_error.json`
 - Read: `src/agent_search_gateway/providers/web/tavily.py`、`src/agent_search_gateway/providers/web/common.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_fetch_selects_matching_markdown_from_root_array`：响应前一条是不匹配URL，后一条匹配目标；必须选择后者正文，不能直接拿数组第一项。请求只含单个 urls 和 formats=["markdown"]。逐次覆盖：
 
@@ -312,7 +312,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - 根对象/字符串等非法容器失败；200错误形状终态。
 - 正常Fetch diagnostics的 response_kind=array；空白匹配标记empty，无匹配标记no_match。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_youcom.py -k fetch -v
@@ -320,7 +320,7 @@ uv run pytest tests/providers/web/test_youcom.py -k fetch -v
 
 预期：目标匹配、正文或 array 诊断断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 fetch(target)
@@ -338,7 +338,7 @@ diagnostics
 
 不臆造重定向字段匹配；当前规范化匹配是 Gateway 的保守合同，真实重定向差异必须在 live 记录中说明。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_youcom.py -v
@@ -347,7 +347,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：新Search/Fetch与旧web回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Fetch成功解析与diagnostics使用同一判定，避免一处array一处object。重跑 Step 4。
 
