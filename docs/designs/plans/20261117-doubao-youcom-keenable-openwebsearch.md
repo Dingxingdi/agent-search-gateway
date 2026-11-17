@@ -14,7 +14,7 @@
 
 - 工作目录：`/home/agent/agent-search-gateway/.worktrees/add-doubao-youcom-keenable-openwebsearch-20261117`；沿用此工作树，不另建、不切换其他分支。
 - 计划基线：`4f606d2`（设计文档提交），代码基线为 `eeeff82`（v0.2.2）。以下位置以该基线为准，实施时按符号定位，不能依赖行号永远不变。
-- 本文是待实施计划，所有实施复选框保持未勾选；本文编写期间未运行供应商 API，也未把合成 fixture 当作真实请求记录。
+- 本轮执行状态：Tasks 1–12 已实施并完成独立复查；Task 13 的 live 入口已完成，CHANGELOG 与文档合同测试已准备；README 与示例配置因 LocalHost 写入检查阻断而待落地。四家真实 Search/Fetch 均已 PASS，完整离线门仍有 9 项文档合同失败；具体证据见 4.3–4.4。合成 fixture 未被当作真实响应记录。
 - 2026-11-17 修订：用户确认方案 A，允许在 Gateway 的 open_websearch Provider 配置中声明 `engines`；原先一律省略 engines 的要求由本版替代。三份 spec 已同步，其他三家范围不变。
 - 只新增 `doubao`、`youcom`、`keenable`、`open_websearch` 四个名称，均为 `ProviderCapabilities(search=True, fetch=True)`。前三家 vendor option 仅 `api_url` 且需要 Key；open_websearch 允许 `api_url`、可选 `engines`，不需要 Key。
 - CLI、领域对象、通用配置 schema、Runtime、FetchScheduler、URLStore 和全局重试策略沿用已有实现。engines 走现有 `options` → factory kwargs 通道，值在新 adapter 构造时验证；不在通用层增加 provider 特判。新适配器不建立自己的 client、配额、缓存、retry loop 或进程管理。
@@ -50,7 +50,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 - [Doubao Search 官方接口](https://docs.volcengine.com/docs/networked-search/networked-search?lang=zh) 与 [Fetch 官方接口](https://docs.volcengine.com/docs/networked-search/doubao-search-web-analysis-fetch?lang=zh)：请求、字段、Key 权限、错误码。
 - [You.com Search](https://you.com/docs/api-reference/search/v1-search.md)、[Contents](https://you.com/docs/api-reference/contents.md)、[错误参考](https://you.com/docs/using-the-api/error-code-reference)。
 - [Keenable Search](https://docs.keenable.ai/api-reference/search)、[Fetch](https://docs.keenable.ai/api-reference/fetch.md)、[错误参考](https://docs.keenable.ai/errors)。
-- [open-webSearch HTTP API](https://github.com/Aas-ee/open-webSearch/blob/main/docs/http-api.md) 与 [CLI/Daemon machine contract](https://github.com/Aas-ee/open-webSearch/blob/main/docs/architecture/cli-json-protocol.md) 定义 data.results/engines/partialFailures。本轮另核对上游提交 `2562c9233a945c18fa9d08b7e450ca218a8853b6` 的 [HTTP handler](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/adapters/http/localDaemon.ts)、[引擎选择与总预算](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchEngines.ts)、[多引擎搜索服务](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchService.ts)。源码证实 limit 为总预算（默认 10、上限 50），白名单会过滤引擎且全被过滤时回退默认，普通子引擎错误进入 partialFailures。未调用用户 daemon；Task 13 live 必须另外记录运行版本，不能把源码核对当作部署已验证。
+- [open-webSearch HTTP API](https://github.com/Aas-ee/open-webSearch/blob/main/docs/http-api.md) 与 [CLI/Daemon machine contract](https://github.com/Aas-ee/open-webSearch/blob/main/docs/architecture/cli-json-protocol.md) 定义 data.results/engines/partialFailures。本轮另核对上游提交 `2562c9233a945c18fa9d08b7e450ca218a8853b6` 的 [HTTP handler](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/adapters/http/localDaemon.ts)、[引擎选择与总预算](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchEngines.ts)、[多引擎搜索服务](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchService.ts)。源码证实 limit 为总预算（默认 10、上限 50），白名单会过滤引擎且全被过滤时回退默认，普通子引擎错误进入 partialFailures。设计核对时未调用用户 daemon；实施时另外通过 `/status` 观测版本 `2.2.0`，真实请求记录见 4.3。上游源码提交与本机部署版本分别记录。
 - Context7 工具未提供，公开 resolution 未取得可用 library ID；此次使用上述官方文档核对，未声称执行了 Context7 query-docs。
 
 ### 0.3 错误、诊断与类型约定
@@ -82,7 +82,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 | `tests/fixtures/providers/doubao/`、`youcom/`、`keenable/`、`open_websearch/`（均位于同一目录） | 新建中性合成 fixture；具体文件见 Tasks 1–8。 |
 | `tests/providers/test_registry.py` | 扩展能力、Key 策略与旧提供商保留断言。 |
 | `tests/unit/test_config_web_providers.py` | 扩展配置、密钥解析、vendor option、独立能力开关。 |
-| `tests/runtime/test_runtime_assembly.py` | 扩展同实例、quota、client/executor 关闭及装配。 |
+| `tests/runtime/test_runtime_assembly.py`、`tests/runtime/test_new_web_runtime_assembly.py` | 原文件扩展 provider 名单；新文件验证同实例、quota、client/executor 关闭及装配，保留原计划覆盖范围。 |
 | `tests/observability/test_provider_diagnostics.py` | 扩展真实 executor/adapter 日志、重试、脱敏矩阵。 |
 | `tests/acceptance/test_gateway_workflows.py` | 扩展搜索收录、单家失败隔离、Fetch 回退及 URLStore 安全。 |
 | `tests/docs/test_documented_config.py` | 扩展默认关闭的四家示例与文档合同。 |
@@ -933,7 +933,7 @@ uv run pytest tests/acceptance tests/orchestrators tests/scheduler -q
 - Read: `tests/integration/test_live_parallel.py`、`tests/integration/test_live_tavily_and_openai.py`
 - Read: `CONTRIBUTING.md`、`scripts/build_docs.py`、`docs/public-interface.md`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_new_web_provider_examples_are_disabled_and_complete`：解析真实config.example.toml，四家表齐全、两个enable均false、根地址正确。前三家原始TOML有下面的api_key_env，open_websearch无该键。新表未存在时assertion FAIL。
 
@@ -964,7 +964,7 @@ pytestmark = pytest.mark.skipif(
 
 `test_live_search_returns_valid_urls` 和 `test_live_fetch_returns_nonempty_content` 分开；默认关闭时八个case均SKIP，不执行网络fixture。open_websearch 的 live Search 构造时使用 engines=["bing","duckduckgo"] 的两引擎小样本来覆盖新分支；这不是生产默认列表，也不对示例中全部11个引擎执行额外请求。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/docs/test_documented_config.py -v
@@ -1040,12 +1040,14 @@ uv run python scripts/build_docs.py
 - [ ] **Step 5: Refactor (keep tests green)**
 
 文档用一个配置说明表避免重复；测试fixture只封装构造/关闭，不重写provider逻辑。重跑 Step 4，保留live gate和默认关闭行为。
+**本轮执行记录：** live 入口已完成，CHANGELOG 与文档合同测试已准备；默认 8 项 SKIP，真实 Search/Fetch 已逐家执行并全部 PASS。README 与 config.example.toml 的 SHA 保护窄编辑被 LocalHost 的 Secret-looking content 检查拒绝；新建待审补丁文件也被同一检查拒绝，未生成该补丁文件。两份文档尚未落地，文档合同当前 11 PASS / 9 FAIL；Step 3–5 保留未完成。已按锁文件同步 docs 依赖，文档构建 PASS；未绕过内容检查或改用缺少 expected_sha256 的写入工具。
+
 
 ## 4. 执行顺序与最终验收
 
 ### 4.1 依赖和提交边界
 
-Tasks 1→2、3→4、5→6、7→8各是一家完整适配；四家可在各自新文件内并行实现，但 `defaults.py`、共享测试、README/config/changelog由一个执行者串行整合。Task9依赖四家adapter；Task10–12验证已整合链路；Task13完成用户入口说明与可选live。
+Tasks 1→2、3→4、5→6、7→8各是一家完整适配；Task9依赖四家adapter，Task10–12验证整合链路，Task13完成用户入口说明与可选live。本轮按用户指定的 subagent-driven-development 严格串行派发，每项使用 fresh implementer，独立只读审查可并行。审查发现的去重测试假阳性和 live 已知码包装读取问题均已修复并复查关闭。
 
 每次只暂存当前任务明确涉及的文件，提交前检查差异。建议按“四家适配、注册/配置、链路诊断、文档/live”形成可审查提交；不要把别人的改动、真实响应或 `site/` 带入。实现完成后报告而不自行开PR、合并或发布版本。
 
@@ -1085,16 +1087,35 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 
 验收只要求Search有可解析HTTP(S) URL、Fetch正文非空，记录实际response结构是否与fixture一致，不检查固定排名/数量或LLM措辞。若有差异，保存脱敏的最小字段/类型证据，修正本家fixture与parser并重跑定向测试，不能用宽泛fallback掩盖。不要为获得PASS持续重复付费请求。
 
-**实施者必须填的结果记录（当前均未执行）：**
+**真实请求执行结果：**
 
-| Provider | Search | Fetch | 安全失败类别/已知码 | 实际重试情况 | 外部前提 |
+| Provider | Search | Fetch | 安全失败类别/已知码 | 实际重试情况 | 外部前提与观测 |
 | --- | --- | --- | --- | --- | --- |
-| doubao | NOT RUN | NOT RUN | — | — | Key存在；Fetch按量权限 |
-| youcom | NOT RUN | NOT RUN | — | — | Search/Contents scope与额度 |
-| keenable | NOT RUN | NOT RUN | — | — | keyed Key/credits |
-| open_websearch | NOT RUN | NOT RUN | — | — | daemon版本/URL；两引擎是否实际生效、局部失败数量（未知则注明未验证） |
+| doubao | PASS；10 条；2662 ms | PASS；2060 字符；2512 ms | 两阶段 HTTP 200；无失败码 | 两阶段各 1 次；无重试 | 预置 Key 可用，本次 Fetch 权限验证通过 |
+| youcom | PASS；10 条；1623 ms | PASS；1193 字符；1204 ms | 两阶段 HTTP 200；无失败码 | 两阶段各 1 次；无重试 | 预置 Key 的 Search/Contents 本次调用均通过 |
+| keenable | PASS；10 条；1181 ms | PASS；2663 字符；1004 ms | 两阶段 HTTP 200；无失败码 | 两阶段各 1 次；无重试 | keyed API 本次调用均通过 |
+| open_websearch | PASS；25 条；1412 ms | PASS；2548 字符；771 ms | 两阶段 HTTP 200；partialFailures=0 | 两阶段各 1 次；无重试 | 本机 3210、版本 2.2.0；解析名单与 bing/duckduckgo 匹配，仅观察到 bing 命中；duckduckgo 有效命中贡献未验证 |
+
+每个阶段仅执行一次逻辑调用，未进行额外外层重试或更换引擎；Search 与 Fetch 的结构合同均通过。计数字符长度使用 Python `len(str)`，不代表字节长度。运行时仅对当次命令恢复代理设置，本机回环显式 bypass，未更改共享代理或 daemon。
 
 执行后分别填PASS/FAIL/SKIP和原因；不把SKIP写作已验证。只记录安全元数据；正文与完整请求/响应不进Git、PR或计划附录。
+
+### 4.4 本轮全仓结果与剩余阻断
+
+| 门 | 实际结果 |
+| --- | --- |
+| `uv run ruff format --check src tests scripts` | PASS；211 files already formatted |
+| `uv run ruff check .` | PASS |
+| `uv run mypy src tests scripts` | PASS；211 source files |
+| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -v` | 2545 PASS / 12 SKIP / 9 FAIL，13.85 s；为限制终端输出使用 pipefail 和 tail 保留完整退出码 |
+| `uv run python scripts/build_docs.py` | PASS；已安装锁定的 docs 组依赖，无依赖文件变更 |
+| 四家 opt-in Search/Fetch | 8 PASS；全部首次请求成功，结果见 4.3 |
+
+9 项失败全部位于 `tests/docs/test_documented_config.py`：四家示例表完整性、逐家启用/禁用配置、README 合同、open-webSearch 示例 engines/默认分支和既有示例 provider 集合。它们等待 README/config 修改落地，未被跳过或改弱。
+
+LocalHost 的 `edit` 在已有文件 SHA 校验存在时仍拒绝内容；最小 README 提供商名称插入也被拒绝。已检查相关内容是环境变量引用及省略号占位示例，未要求写入真实 Key。可用 `apply_patch` 没有 `expected_sha256` 参数，因此未擅自替换用户要求的并发保护；待审补丁文件的 `write(overwrite=False)` 同样被拒绝，没有保存成功。README/config 保持原状；Task13 的 live 入口已完成，CHANGELOG 草稿与文档合同测试留待示例和说明落地后一并完成，未将草稿中的示例声明作为已交付事实。
+
+本地实施提交：`6e82899`、`264c957`、`9ac135f`、`3a8fdb4`、`6ca8737`、`ab664a2`、`ce6303c`。未开 PR、合并、发布或更改版本。实际生产修改限于四个新 adapter 和默认 registry 注册；公共 Runtime、编排、重试、quota 与存储未修改。
 
 ## 5. 规格覆盖与类型一致性自检
 
@@ -1130,4 +1151,4 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 - `default_max_concurrency` 为group字段，`max_concurrency`为单家覆盖；env字符串是变量名称而非凭据。
 - engines 只属于 open_websearch；TOML/options 为 list，constructor 参数 list[str] | None，内部 tuple[str, ...] | None，HTTP body 为每次新建的 list。未配时无engines/limit，已配时limit固定50；Fetch仍仅url。
 - 无效engines直接构造TypeError、Runtime包装ConfigFailure；完全禁用时不构造。partialFailures仅有既有success语义+固定code/count摘要，不新增partial枚举、候选拒绝计数或原文日志。
-- 本计划的目标测试/命令是待执行要求；编写/修订计划时未声称它们已PASS，也未启动daemon或执行live。
+- 复选框与 4.3–4.4 按实际执行结果更新；Task13 的文档落地及全仓全绿仍未完成，不将写入阻断、SKIP 或尚未观察到的引擎命中视为已验证。
