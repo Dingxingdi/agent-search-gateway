@@ -1,6 +1,6 @@
 # Doubao、You.com、Keenable 与 open-webSearch Implementation Plan
 
-**Goal:** 以四个独立 Web Provider 接入豆包、You.com、Keenable 和已有 open-webSearch HTTP 服务，使其各自支持关键词搜索和 URL 抓取，并复用现有配置、重试、配额、诊断与编排流程。
+**Goal:** 以四个独立 Web Provider 接入豆包、You.com、Keenable 和已有 open-webSearch HTTP 服务，使其各自支持关键词搜索和 URL 抓取；为 open-webSearch 增加可配置多引擎请求以扩大覆盖率，复用现有配置、重试、配额、诊断与编排流程。
 
 **Architecture:** [docs/designs/architectures/20261117-doubao-youcom-keenable-openwebsearch.md](../architectures/20261117-doubao-youcom-keenable-openwebsearch.md)
 
@@ -15,9 +15,10 @@
 - 工作目录：`/home/agent/agent-search-gateway/.worktrees/add-doubao-youcom-keenable-openwebsearch-20261117`；沿用此工作树，不另建、不切换其他分支。
 - 计划基线：`4f606d2`（设计文档提交），代码基线为 `eeeff82`（v0.2.2）。以下位置以该基线为准，实施时按符号定位，不能依赖行号永远不变。
 - 本文是待实施计划，所有实施复选框保持未勾选；本文编写期间未运行供应商 API，也未把合成 fixture 当作真实请求记录。
-- 只新增 `doubao`、`youcom`、`keenable`、`open_websearch` 四个名称。能力都是 `ProviderCapabilities(search=True, fetch=True)`，新增 vendor option 只有 `api_url`；前三家需要 Key，最后一家不需要。
-- CLI、领域对象、配置 schema、Runtime、FetchScheduler、URLStore 和全局重试策略沿用已有实现。新适配器不建立自己的 client、配额、缓存、retry loop 或进程管理。
-- `open_websearch` 只请求已有 daemon；不发送 `engines`、`searchMode` 或抓取渲染策略，不安装或启动 Node.js、Playwright、daemon。
+- 2026-11-17 修订：用户确认方案 A，允许在 Gateway 的 open_websearch Provider 配置中声明 `engines`；原先一律省略 engines 的要求由本版替代。三份 spec 已同步，其他三家范围不变。
+- 只新增 `doubao`、`youcom`、`keenable`、`open_websearch` 四个名称，均为 `ProviderCapabilities(search=True, fetch=True)`。前三家 vendor option 仅 `api_url` 且需要 Key；open_websearch 允许 `api_url`、可选 `engines`，不需要 Key。
+- CLI、领域对象、通用配置 schema、Runtime、FetchScheduler、URLStore 和全局重试策略沿用已有实现。engines 走现有 `options` → factory kwargs 通道，值在新 adapter 构造时验证；不在通用层增加 provider 特判。新适配器不建立自己的 client、配额、缓存、retry loop 或进程管理。
+- `open_websearch` 只请求已有 daemon；配置 engines 时发送列表及固定总预算 `limit=50`，省略时保持 query-only。Fetch 始终 url-only。仍不发送 searchMode 或抓取渲染策略，不枚举/发现/逐个调度引擎，不安装或启动 Node.js、Playwright、daemon。
 - 本工作树不含其他工作树中的元宝、知乎及 Retry-After 改动。不得为本计划合并、重置或修改那些分支。
 - 规划依据：`writing-plans`、`test-driven-development` 及其测试反模式参考。每次只增加一个行为测试，完成 RED → GREEN → REFACTOR，再处理下面表格的下一行。
 
@@ -37,7 +38,7 @@
 | `youcom` Fetch | `POST /v1/contents`；`{"urls": [str(url)], "formats": ["markdown"]}` | 根为数组；用 `normalized_match(record["url"], target, ...)` 选择目标，`markdown` 非空才成功。不使用未文档化的 `final_url` 或 HTML 替代正文。 |
 | `keenable` Search | 根 `https://api.keenable.ai`；`POST /v1/search`；`X-API-Key`；`{"query": query, "max_results": 10}` | 根对象 `results[]`；`url`、`title`、`snippet`。不读取已废弃的 `description` 作为主摘要，也不猜 `summary`。 |
 | `keenable` Fetch | `GET /v1/fetch?url=<编码后的目标>`；同一 Key；无 JSON body、无 `live` | 根对象 `content` 非空字符串。返回 `url` 是可能重定向后的地址，不套用 You.com 的匹配数组规则。 |
-| `open_websearch` Search | 根 `http://127.0.0.1:3210`；`POST /search`；`{"query": query}`；无认证头 | `status == "ok"`、`data.results[]`；`url`、`title`、`description` → snippet。 |
+| `open_websearch` Search | 根 `http://127.0.0.1:3210`；`POST /search`；未配时 `{"query": query}`；显式列表时 `{"query": query, "engines": [...], "limit": 50}`；无认证头 | `status == "ok"`、`data.results[]`；`url`、`title`、`description` → snippet；非空 `data.partialFailures` 只生成安全局部失败诊断。 |
 | `open_websearch` Fetch | `POST /fetch-web`；`{"url": str(url)}` | `status == "ok"`、`data.content` 为非空字符串。其他 metadata 不充当正文。 |
 
 You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保守值，不新增配置项。You.com 不发送 `extraction`、`livecrawl`、`knowledge`，Keenable 不发送 `mode`、`live`、`prompt`。
@@ -49,7 +50,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 - [Doubao Search 官方接口](https://docs.volcengine.com/docs/networked-search/networked-search?lang=zh) 与 [Fetch 官方接口](https://docs.volcengine.com/docs/networked-search/doubao-search-web-analysis-fetch?lang=zh)：请求、字段、Key 权限、错误码。
 - [You.com Search](https://you.com/docs/api-reference/search/v1-search.md)、[Contents](https://you.com/docs/api-reference/contents.md)、[错误参考](https://you.com/docs/using-the-api/error-code-reference)。
 - [Keenable Search](https://docs.keenable.ai/api-reference/search)、[Fetch](https://docs.keenable.ai/api-reference/fetch.md)、[错误参考](https://docs.keenable.ai/errors)。
-- [open-webSearch HTTP API](https://github.com/Aas-ee/open-webSearch/blob/main/docs/http-api.md) 与 [CLI/Daemon machine contract](https://github.com/Aas-ee/open-webSearch/blob/main/docs/architecture/cli-json-protocol.md)。`data.results` 来自官方 machine contract；本次未成功读取 HTTP handler 源码、未调用用户 daemon。Task 7 的契约核对与 Task 13 的可选 live 必须记录运行版本和是否与此形状相符，不能预设还有字符串包 JSON、`searchResults` 等兼容格式。
+- [open-webSearch HTTP API](https://github.com/Aas-ee/open-webSearch/blob/main/docs/http-api.md) 与 [CLI/Daemon machine contract](https://github.com/Aas-ee/open-webSearch/blob/main/docs/architecture/cli-json-protocol.md) 定义 data.results/engines/partialFailures。本轮另核对上游提交 `2562c9233a945c18fa9d08b7e450ca218a8853b6` 的 [HTTP handler](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/adapters/http/localDaemon.ts)、[引擎选择与总预算](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchEngines.ts)、[多引擎搜索服务](https://github.com/Aas-ee/open-webSearch/blob/2562c9233a945c18fa9d08b7e450ca218a8853b6/src/core/search/searchService.ts)。源码证实 limit 为总预算（默认 10、上限 50），白名单会过滤引擎且全被过滤时回退默认，普通子引擎错误进入 partialFailures。未调用用户 daemon；Task 13 live 必须另外记录运行版本，不能把源码核对当作部署已验证。
 - Context7 工具未提供，公开 resolution 未取得可用 library ID；此次使用上述官方文档核对，未声称执行了 Context7 query-docs。
 
 ### 0.3 错误、诊断与类型约定
@@ -64,6 +65,9 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 8. Fetch 解析使用 `parse_fetch_with_diagnostics`；空白正文显式标记 `semantic_result="empty"`，未知 envelope 为 `category="invalid_envelope"`；You.com 根数组的 `response_kind` 应为 `array`。`fetch_response_diagnostics` 默认 object，You.com 应本地薄封装覆盖为 array，避免为此改全局 helper。
 9. `safe_diagnostic_fields` 只是允许字段与脱敏边界，不保证任意上游 prose 不含查询。新适配器只记录固定分类、已知错误码、计数、HTTP 状态；未识别的 code 用固定 `unknown`，不原样记录任意 `message/detail/error/hint/fix`。已知错误可用本地固定安全说明。记录的异常 message 不插入原始 JSON、URL、查询或正文。
 10. executor 拥有 `http_*` 事件，adapter 不重复发 `http_failed`。基线对 ProviderResponseFailure 的 retry/final 事件 category 仍叫 `provider_header`，诊断事件为 `provider_response`；本轮不顺带改名。取消直接传播，清理由 Runtime/executor 完成。
+11. open-webSearch 构造参数 `engines: list[str] | None = None`；只验证非空 list/非空且非纯空白字符串元素，保存为私有 `tuple[str, ...] | None`，保留名称、顺序及重复项。每次 Search 新建 JSON list。无本地枚举/别名/去重；错误值抛 `TypeError`，由现有 Runtime 转 `ConfigFailure`。禁用项不构造、不做值校验，未知键仍拒绝。
+12. 显式 engines 同时发送固定 `limit=50`，只新增 engines 一个专属可调字段；limit 是所有引擎的总预算，不是逐引擎数量，也不是无限返回保证。未配置时完全省略 engines 和 limit，保留默认行为。
+13. `status=ok` 且合法 results 下，非空 partialFailures 只通过现有 response_diagnostics 添加固定 `upstream_code="partial_engine_failures"`、本地生成 `upstream_message="partial_engine_failures count=N"`；semantic_result 仍为 envelope 级 success。不新增不被白名单支持的 partial 枚举或 count 字段，不借用候选 rejected 计数，不转发 inner engine/code/message。保留合法命中/空列表，不触发子引擎或整次补偿重试。
 
 ## 1. 文件结构与职责
 
@@ -72,8 +76,8 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 | `src/agent_search_gateway/providers/web/doubao.py` | 新建；Doubao 请求、严格解析、业务 inspector、局部计数。 |
 | `src/agent_search_gateway/providers/web/youcom.py` | 新建；You.com Search 与 Contents、目标 URL 对齐。 |
 | `src/agent_search_gateway/providers/web/keenable.py` | 新建；Keyed Search、编码 GET Fetch。 |
-| `src/agent_search_gateway/providers/web/open_websearch.py` | 新建；daemon HTTP 信封、搜索/正文映射，无生命周期托管。 |
-| `src/agent_search_gateway/providers/defaults.py` | 修改 `build_default_registry`；末尾追加四家注册，保留旧顺序。 |
+| `src/agent_search_gateway/providers/web/open_websearch.py` | 新建；engines 构造校验/不可变快照、单次多引擎 Search、URL-only Fetch、成功信封及安全局部失败诊断；无生命周期托管。 |
+| `src/agent_search_gateway/providers/defaults.py` | 修改 `build_default_registry`；末尾追加四家注册，保留旧顺序；仅 open_websearch 放行 api_url + engines。 |
 | `tests/providers/web/test_doubao.py`、`test_youcom.py`、`test_keenable.py`、`test_open_websearch.py`（均位于同一目录） | 新建；真实 adapter 行为与请求合同。每个任务下给出完整路径。 |
 | `tests/fixtures/providers/doubao/`、`youcom/`、`keenable/`、`open_websearch/`（均位于同一目录） | 新建中性合成 fixture；具体文件见 Tasks 1–8。 |
 | `tests/providers/test_registry.py` | 扩展能力、Key 策略与旧提供商保留断言。 |
@@ -471,7 +475,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 只抽本供应商的解析小函数；保持 JsonRequester/HttpRequester 类型不变。重跑 Step 4。
 
-### Task 7: open-webSearch HTTP Search 与 daemon 边界
+### Task 7: open-webSearch engines 配置、HTTP Search 与 daemon 边界
 
 **Files:**
 
@@ -480,42 +484,75 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/open_websearch/search_success.json`
 - Create: `tests/fixtures/providers/open_websearch/search_empty.json`
 - Create: `tests/fixtures/providers/open_websearch/search_partial.json`
+- Create: `tests/fixtures/providers/open_websearch/search_partial_engines.json`
+- Create: `tests/fixtures/providers/open_websearch/search_all_engines_failed.json`
 - Create: `tests/fixtures/providers/open_websearch/search_error.json`
 - Create: `tests/fixtures/providers/open_websearch/search_malformed.json`
 - Create: `tests/fixtures/providers/open_websearch/invalid_json.txt`
-- Docs/Read: 官方 `docs/http-api.md`、`docs/architecture/cli-json-protocol.md`（URL见0.2）
+- Docs/Read: 官方 `docs/http-api.md`、`docs/architecture/cli-json-protocol.md` 及本次固定提交的 handler/searchService/searchEngines（URL见0.2）
+- Read: `src/agent_search_gateway/providers/web/parallel.py`（构造 TypeError、可选参数与 Search/Fetch 隔离）
+- Read: `src/agent_search_gateway/providers/diagnostics.py`、`tests/support/web_diagnostics.py`
 
 - [ ] **Step 1: Write the failing test**
 
-编写 fixture 前再次核对所支持 daemon 版本的 HTTP 文档；能读取 handler 或已有 daemon 的脱敏最小响应时交叉验证 `data.results`。证据不同则先更新合同/fixture并记录差异，不做“多个猜测字段中取一个”的解析。没有daemon时可基于文档先实施，明确 live 尚未验证。
+编写 fixture 前核对所支持 daemon 版本与 0.2 的文档/固定源码；data.results、partialFailures、engines 和总预算语义以这些证据为准。证据不同先更新合同/fixture并记录差异，不做“多个猜测字段中取一个”的解析。没有 daemon 时可先离线实施，明确 live 未验证；不把源码支持的引擎名单固化为 Gateway 枚举。
 
-首个 `test_search_uses_daemon_default_engines`：RecordingJsonExecutor 返回 status=ok,data.results 两项；断言 POST /search、body严格等于{"query":query}、无认证、无engines/searchMode/limit。然后逐项加入：
+首个 `test_search_omits_engines_when_not_configured`：RecordingJsonExecutor 返回 status=ok,data.results 两项；断言 POST /search、body严格等于 `{"query": query}`、无认证/engines/searchMode/limit。然后按下面每一行分别完成完整 TDD 循环：
 
-- `test_search_maps_result_description`：description→snippet，engine/source等不变成Gateway provider。
-- 合法空数组、坏URL/坏条目计数、data.results非法容器各一例。
-- `test_search_rejects_error_status_even_with_results`：status=error且另带看似成功data → 错误优先。
-- `test_search_rejects_unknown_status`：status缺失或非ok/nonerror → invalid_envelope。
-- `test_search_does_not_retry_unknown_daemon_error`：error.code=未知或browser_unavailable，HTTP200一次终态。
+| 测试 | Setup / Action / 预期 |
+| --- | --- |
+| `test_search_sends_configured_engines_with_max_total_limit` | 构造 engines=["bing","duckduckgo"] 后 Search；body 严格为 query + 相同 list + limit=50，恰好一个请求。 |
+| `test_engines_rejects_invalid_structure` | 参数化 []、"bing,duckduckgo"、{}、1、True、["" ]、["   "]、["bing",1]；构造时 TypeError，无 HTTP；省略/None 合法。每项分别验证，不把缺模块错误当作行为 RED。 |
+| `test_search_preserves_opaque_engine_names_order_and_duplicates` | 用 ["custom_z","custom_a","custom_z"]；顺序、重复、名字不变，不要求本地注册，不自动展开 all。 |
+| `test_engines_snapshot_ignores_later_input_mutation` | 构造后 append/修改原 list；Search 仍使用构造时快照。 |
+| `test_search_builds_a_fresh_engines_list_each_time` | 改动第一次 fake 记录到的请求 list；第二次请求不受影响，内部 tuple 不外泄。 |
+| `test_search_maps_result_description` | 多引擎 fixture 的 description → snippet；engine/source 不变成 Gateway Provider。 |
+| 独立的 empty / partial-record / invalid-container 用例 | 合法空数组、坏 URL/坏条目计数、data.results 非法容器仍按原合同；与局部引擎失败区别。 |
+| `test_search_keeps_results_when_some_engines_fail` | 真实 executor + MockTransport：status=ok、有效 results、非空 partialFailures；保留 hits，一次响应诊断带固定 partial_engine_failures 和本地 count 摘要，不重试。 |
+| `test_search_marks_engine_failures_even_when_results_are_empty` | 合法空 results + 非空 partialFailures；返回 []，仍有固定标记；不能声称所有引擎成功。 |
+| `test_search_omits_engine_failure_marker_without_failures` | partialFailures 省略或 []；无局部失败标记。 |
+| `test_search_redacts_engine_failure_details` | inner engine/code/message 与 query 注入 PRIVATE_*；只有固定 code/本地计数入日志，既有 candidate 统计不被挪用。 |
+| `test_search_rejects_error_status_even_with_results` | status=error 且另带看似成功 data；错误优先。 |
+| `test_search_rejects_unknown_status` | status 缺失或不合法；invalid_envelope。 |
+| `test_search_does_not_retry_unknown_daemon_error` | HTTP200 error.code 为未知或 browser_unavailable；一次终态。普通 HTTP5xx 保持共享策略，不以此用例覆盖。 |
+
+故意传错误类型的测试沿用 `test_parallel.py` 的写法保证 strict mypy 可检查；不要因此放宽生产构造签名或关闭整文件类型检查。
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ~~~bash
-uv run pytest tests/providers/web/test_open_websearch.py -k search -v
+uv run pytest tests/providers/web/test_open_websearch.py -k "search or engines" -v
 ~~~
 
-预期：新映射、零附加参数或错误优先断言 FAIL。
+预期：缺少显式列表/固定总预算、结构验证、快照或安全诊断时，相应行为断言 FAIL；不破坏已正确的省略分支制造 RED。
 
 - [ ] **Step 3: Describe the minimal implementation**
 
 ~~~text
-OpenWebSearchAdapter(*, name, api_url="http://127.0.0.1:3210", http_executor: JsonRequester)
+private validate_engines(value: object) -> tuple[str, ...] | None
+  if value is None: return None
+  if 不是非空list 或任一元素非str/空/纯空白: raise TypeError(固定字段说明)
+  return tuple(value)  # 不修改名称、顺序或重复项
+OpenWebSearchAdapter(*, name, api_url="http://127.0.0.1:3210",
+                     http_executor: JsonRequester, engines: list[str] | None = None)
+  self._engines = validate_engines(engines)
   constructor不接受secret、不探测daemon
 search(query)
-  POST /search，body只有query
+  body = {"query": query}  # 每次新对象
+  if self._engines is not None:
+    body["engines"] = list(self._engines)
+    body["limit"] = 50
+  POST /search，只有一个daemon请求；不按引擎创建任务/Provider/配额
   200 inspector: status=error → 不可重试ProviderResponseFailure
   parser: root对象、status严格ok、data对象、results列表
   url/title/description映射，逐条校验与CandidateCounts
-  忽略非消费metadata；不解析引擎配置、不处理CLI文本输出
+response_diagnostics(合法status=ok/搜索信封)
+  既有category=provider_response,response_kind=object,semantic_result=success
+  若data.partialFailures是非空list:
+    upstream_code = 固定partial_engine_failures
+    upstream_message = 本地生成的partial_engine_failures count=N
+  不取inner engine/code/message，不发第二条事件、不改变返回结果/重试
+  其余metadata忽略；不处理CLI文本输出
 ~~~
 
 `daemon_unavailable` 的CLI示例里有 retryable 标志，不等于HTTP服务的重试合同；HTTP连接失败仍由共享传输重试处理。不要从原始message/hint猜重试。
@@ -527,7 +564,7 @@ uv run pytest tests/providers/web/test_open_websearch.py -v
 uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 ~~~
 
-预期：默认引擎不受覆盖，目标/相关测试 PASS。
+预期：省略时默认行为不变，显式时名单与固定总预算准确发送；构造验证、快照、局部失败诊断及相关测试 PASS。
 
 - [ ] **Step 5: Refactor (keep tests green)**
 
@@ -546,7 +583,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 - [ ] **Step 1: Write the failing test**
 
-`test_fetch_maps_daemon_content`：status=ok,data.content非空 → URLFetchCandidate；请求仅url。逐次覆盖：
+`test_fetch_maps_daemon_content`：status=ok,data.content非空 → URLFetchCandidate；请求仅url。再用 `test_fetch_omits_search_options_when_engines_are_configured` 明确构造 engines=["bing","duckduckgo"] 后 Fetch，body 仍严格为 url-only、无 engines/limit/searchMode。逐次覆盖：
 
 - status=error、未知状态、data缺失/类型错误。
 - content缺失/null/空白/数字、只有title/finalUrl均不可返回成功候选。
@@ -573,6 +610,7 @@ uv run pytest tests/providers/web/test_open_websearch.py -k connection_refusal -
 ~~~text
 fetch(target)
   POST /fetch-web，body只有url；同一status inspector
+  不读取/发送self._engines，不复用Search的请求body或limit
   parse_fetch_with_diagnostics
   status必须ok，data必须对象，content必须非空string
   返回URLFetchCandidate(content, content)
@@ -617,8 +655,11 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 | open_websearch无Key启用 | 成功；不注入secret。 |
 | open_websearch启用却配置api_key_env | 沿用ConfigFailure，不静默忽略。 |
 | 四种开关组合 | Search/Fetch独立；双关闭不解析Key、不实例化、不联网。 |
-| api_url与max_concurrency=7 | options仅含api_url，max_concurrency走共享配置字段。 |
-| 未知vendor option，如engines/live/count | ConfigFailure；不通过新通用extra参数接入。 |
+| api_url与max_concurrency=7 | 前三家 options 只有 api_url；open_websearch 若配置 engines 则 options 原样保留该 list；max_concurrency 仍为共享字段。 |
+| open_websearch 显式 engines | 配置解析成功，options 原样传 list（MappingProxyType 不是深冻结）；不在 config.py 做值校验。 |
+| disabled open_websearch 的 engines=[] / api_url=" " | 允许键合法则配置解析成功并保留值；Runtime 不构造、不联网。启用后的错误值由 Task10 验证。 |
+| 其他三家或旧Provider使用 engines | 仍是未知键，ConfigFailure；不把它加入 shared keys。 |
+| 未知vendor option，如live/count/limit/searchMode | ConfigFailure，即使 Provider 禁用仍拒绝；不引入通用 extra 参数。 |
 | group default_max_concurrency / 非正整数override | 继承已有默认/按现有规则拒绝。 |
 
 修正旧断言的意图：旧18家顺序不变；不再用“新名单最后10个仍是旧名单”的 `[-10:]`；credentialless集合为 `{"jina","open_websearch"}`，相应测试重命名。
@@ -636,9 +677,11 @@ uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_provid
 ~~~text
 defaults.py imports四个真实adapter
 在现有registrations末尾按doubao,youcom,keenable,open_websearch顺序追加:
+  前三家的allowed_config_keys = frozenset({"api_url"})
+  open_websearch的allowed_config_keys = frozenset({"api_url", "engines"})
   WebProviderRegistration(name, ProviderCapabilities(True,True), Adapter,
-                          frozenset({"api_url"}), requires_api_key=对应值)
-复用registry/config已有校验；不在config.py加provider特判或默认URL字典
+                          allowed_config_keys, requires_api_key=对应值)
+复用registry/config已有允许键校验与options透传；不加provider特判/validator系统/默认URL字典
 同步旧名单测试，保留对旧18家与顺序的完整断言
 ~~~
 
@@ -686,6 +729,9 @@ assert runtime.quotas.get_web(provider_name).limit == 7
 - Search only / Fetch only / disabled 装配到正确列表，disabled不创建该家的client。
 - `test_new_web_provider_client_is_closed_once`：Runtime.aclose调用两次，每个client关闭恰好一次。
 - 共享quota沿用现有并发测试模式，由 SearchOrchestrator 与 FetchScheduler 发起调用，用Event断言同一家Search和Fetch使用同一额度；不直接并发调用adapter来测试quota，也不给adapter新增semaphore。
+- `test_new_web_provider_forwards_open_websearch_engines`：真实 resolve_config → Runtime.build → MockTransport，TOML engines list 到达 factory/adapter；Search 精确发送原列表+limit=50，Fetch 严格 url-only；两阶段仍同一实例，quota不乘引擎数。
+- `test_new_web_provider_wraps_invalid_engines_as_config_failure`：逐个错误列表值由启用 adapter 构造抛 TypeError，Runtime 转 ConfigFailure，未发网络；测试主动关闭失败构造过程中已创建的 clients，不为本任务重写 Runtime 生命周期。
+- `test_new_web_provider_skips_engines_validation_when_disabled`：双关闭配置 engines=[]/api_url=" "，不构造该 adapter/client；未知键仍在配置解析阶段失败。
 
 这些是新注册项的集成合同。如果现有通用层已使其首跑PASS，记录回归通过，不为制造RED修改正确的Runtime；只有缺失/错误注入才需修复生产代码。
 
@@ -701,7 +747,9 @@ uv run pytest tests/runtime/test_runtime_assembly.py -k new_web_provider -v
 
 ~~~text
 复用resolve_config与现有Runtime.build
-factory仅接收 name, http_executor, options；有Key才接收secret
+factory kwargs = name + http_executor + **provider_config.options；有Key才接收secret
+open_websearch的engines直接由options透传；值错误TypeError由现有Runtime包装ConfigFailure
+不修改config.py/runtime.py的生产路径；只在新adapter保存不可变快照
 通过http_client_factory注入AsyncClient(MockTransport(handler))
 每家一个adapter一个web executor，双能力共享同一实例
 max_concurrency由既有quotas处理；aclose保持幂等
@@ -762,8 +810,10 @@ uv run pytest tests/runtime -q
 | 空Fetch正文 | semantic_result=empty，不把title/摘要/错误消息作为正文。 |
 | Search一好一坏/全坏/合法空 | 每次一次adapter候选summary，分区计数准确；真正空结果不误判错误。 |
 | 任务取消 | CancelledError传播，不产生额外attempt或吞取消。 |
+| open_websearch 显式列表遇429后成功 | 共享尝试预算；每次请求 engines/limit=50 相同，不去字段回退默认，不生成子引擎重试。 |
+| open_websearch status=ok且partialFailures非空 | 保留结果/合法空数组；一次响应诊断带固定code和本地count摘要，无retry/额外终态事件；候选数仍只统计results。 |
 
-脱敏输入放入Key、中文查询、正文及URL query marker（例如 PRIVATE_QUERY、PRIVATE_BODY、PRIVATE_URL）；错误message/detail/hint/fix/code也注入marker。断言格式化后的日志和向上传播的异常message均不含marker或凭据；保留固定技术归因、阶段、状态与安全计数。日志中不出现任意原始响应字段。
+脱敏输入放入Key、中文查询、正文及URL query marker（例如 PRIVATE_QUERY、PRIVATE_BODY、PRIVATE_URL）；错误message/detail/hint/fix/code也注入marker。断言格式化后的日志和向上传播的异常message均不含marker或凭据；保留固定技术归因、阶段、状态与安全计数。日志中不出现任意原始响应字段。open-webSearch 额外给 partialFailures 的 engine/code/message 放 marker；只允许本地生成的固定 code/count 摘要，不新增 semantic_result=partial 或全局诊断字段。
 
 已有 `assert_json_fetch_diagnostics` 内含固定正文/错误文字假设，不要为了复用它改供应商语义。必要时用现有logger/caplog在本测试文件写小型参数化断言；不建立第二套HTTP fake。
 
@@ -833,6 +883,7 @@ Expected:
 - `test_new_provider_cannot_fetch_unadmitted_url`：未知URL在adapter前被拒绝，http调用计数不增加，ErrorCode.URL_NOT_ADMITTED。
 - `test_new_provider_reuses_prepared_content`：目标已有正文时复用，不触发provider抓取。
 - 新provider与旧provider返回相同URL，沿用现有去重；若用Google goto样本，仅验证共享staging，adapter保留原URL。
+- `test_new_provider_open_websearch_multi_engine_results_use_existing_staging`：显式 engines 的一次 daemon 请求返回不同 engine 标记的命中（含重复URL）；仍按现有 staging 收录/去重，provider身份始终 open_websearch，无子Provider/额外HTTP扇出。
 - 现有provider选择测试继续验证精确筛选、不回退到未选择者；无需新增CLI参数。
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -897,7 +948,8 @@ uv run pytest tests/acceptance tests/orchestrators tests/scheduler -q
 - disabled resolved provider 的secret和api_key_env均为None；不要误认为原始TOML写了名称就应解析凭据。
 - 单独复制并启用一家，测试环境提供对应Key时成功；不改用户正在用的配置。
 - 既有示例provider集合断言补四家，但旧默认开关保持不动；被特意移除的ZenRows/Decodo/ScrapingDog/ScrapeGraphAI示例不回填。
-- 必要README合同断言覆盖四个名称、API入口、Key/daemon前提；不为普通句式写脆弱逐字测试。
+- 必要README合同断言覆盖四个名称、API入口、Key/daemon前提和 engines 专属配置；不为普通句式写脆弱逐字测试。
+- `test_open_websearch_example_has_explicit_multi_engine_list`：原始示例有下面的非空/无重复名单，默认两个开关仍false；它是示例而非生产硬编码默认。仅启用 open_websearch 的临时配置经 Runtime 后，请求携带该列表和固定limit=50；也覆盖移除engines后的query-only兼容行为。
 
 在 `tests/integration/test_live_new_web_providers.py` 中实现live入口，先定义两个参数化验收行为（每家独立test id），并只在该文件设置下列模块门；docs测试文件不受live门控制：
 
@@ -908,7 +960,7 @@ pytestmark = pytest.mark.skipif(
 )
 ~~~
 
-`test_live_search_returns_valid_urls` 和 `test_live_fetch_returns_nonempty_content` 分开；默认关闭时八个case均SKIP，不执行网络fixture。
+`test_live_search_returns_valid_urls` 和 `test_live_fetch_returns_nonempty_content` 分开；默认关闭时八个case均SKIP，不执行网络fixture。open_websearch 的 live Search 构造时使用 engines=["bing","duckduckgo"] 的两引擎小样本来覆盖新分支；这不是生产默认列表，也不对示例中全部11个引擎执行额外请求。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -925,12 +977,17 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/integration/test_live_new_w
 config.example.toml新增四个表:
   enable_search=false, enable_fetch=false
   显式api_url；前三家api_key_env，open_websearch无Key
+  open_websearch另加下方显式engines示例；不新增limit/searchMode配置键
 README:
   能力表新增四家；解释如何分别启用两种能力
   Doubao Fetch需按量付费Key与Fetch权限
   You.com使用ydc-index.io，Contents为独立调用/计费且需要相应scope
   Keenable只用keyed API，不发送live不保证完全无实时费用
-  open_websearch由用户先运行HTTP daemon，Gateway不覆盖其引擎
+  open_websearch由用户先运行HTTP daemon；用户在该Provider配置engines，Gateway只透传
+  未配置时使用daemon单默认；显式时固定limit=50总预算，不保证所有引擎都有结果
+  daemon白名单须允许所选引擎；否则可能过滤甚至回退单默认，DEFAULT_SEARCH_ENGINE不是列表
+  Gateway不枚举/发现/执行子引擎；重复项会消耗预算，linuxdo暂不可用不纳入示例
+  partialFailures以安全marker/count记录，Provider级成功不代表全部引擎成功
   Search可用--provider，Fetch通过临时配置/adapter隔离
   api_url只为根地址；超时/重试/max_concurrency仍是已有字段
 CHANGELOG:
@@ -941,9 +998,30 @@ live tests:
   open_websearch缺显式OPEN_WEBSEARCH_API_URL则SKIP
   已提供daemon地址但连接失败则FAIL，不能广泛except后skip
   默认有限预算、每家一个Search/一个Fetch，无额外外层循环
+  open_websearch Search采用两引擎小样本+固定总预算50；底层两任务由daemon执行
+  可用测试本地response hook在不增加请求的前提核对data.engines与partialFailures
+  只存/报告版本、effective-list是否匹配和失败数量；不打印原始响应/上游错误文字
+  若观察到白名单过滤/默认回退，则多引擎覆盖未通过；不能据一条有效URL声称两个引擎均成功
 ~~~
 
-`OPEN_WEBSEARCH_API_URL` 仅是测试入口选择，不新增产品环境变量或TOML schema。live Fetch直接调用adapter读取固定公开页面（例如 `https://www.python.org/about/`），无需启动用户Gateway；若改用CLI验收，必须在隔离Runtime先Search收录，且不用不存在的Fetch --provider。
+`OPEN_WEBSEARCH_API_URL` 仅是测试入口选择；生产配置 engines 写入现有 Provider TOML 表，不新增产品环境变量/通用schema。示例的高覆盖率列表为：
+
+~~~toml
+[web_providers.open_websearch]
+enable_search = false
+enable_fetch = false
+api_url = "http://127.0.0.1:3210"
+engines = [
+  "bing", "duckduckgo", "brave", "startpage", "baidu", "sogou",
+  "exa", "keenable", "csdn", "juejin", "hackernews",
+]
+~~~
+
+名单只作为用户可改的示例，实际可用性取决于daemon版本/网络/白名单；不写进生产验证枚举或constructor默认值。预算50是总数，不是每家50；省略列表不发送limit。live小样本只选两项，避免默认一次冒烟扇出全部示例引擎；无需新增engines测试环境变量。
+
+`data.engines` 是 daemon 解析/过滤后的请求名单，不是逐引擎完成/成功清单；名单匹配且 partialFailures 为空也不能证明每项均成功。测试 hook 的名单比较只用于发现白名单过滤/默认回退；`results[*].engine` 只证明对应引擎提供了该条命中，缺少命中项的引擎保持未验证。
+
+live Fetch直接调用adapter读取固定公开页面（例如 `https://www.python.org/about/`），无需启动用户Gateway；若改用CLI验收，必须在隔离Runtime先Search收录，且不用不存在的Fetch --provider。
 
 Live失败报告只保留provider/stage、安全类别、HTTP状态/已知业务码与实际attempt计数；不打印secret、查询、URL敏感参数或正文。可输出命中数量、正文长度和耗时。无Key/无显式daemon是SKIP；实际执行后的权限、账户额度、网络、schema错误是FAIL并说明前提，不能伪装成功。
 
@@ -1001,7 +1079,7 @@ env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_new_w
 env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv run pytest tests/integration/test_live_new_web_providers.py -k open_websearch -v -rs
 ~~~
 
-最后一条仅在用户已启动该地址daemon时使用；若用户使用别处服务，替换为其明确提供地址，不扫描其他端口/进程、不启动服务。按需要只恢复本次网络命令的代理；本机回环应使用已有NO_PROXY配置，不更改共享代理环境。
+最后一条仅在用户已启动该地址daemon且允许测试中的 bing/duckduckgo 两项时使用；若白名单限制或引擎不可用，记录覆盖/部署问题，不能自动换成其他引擎掩盖。若用户使用别处服务，替换为其明确提供地址，不扫描其他端口/进程、不启动服务。按需要只恢复本次网络命令的代理；本机回环应使用已有NO_PROXY配置，不更改共享代理环境。
 
 验收只要求Search有可解析HTTP(S) URL、Fetch正文非空，记录实际response结构是否与fixture一致，不检查固定排名/数量或LLM措辞。若有差异，保存脱敏的最小字段/类型证据，修正本家fixture与parser并重跑定向测试，不能用宽泛fallback掩盖。不要为获得PASS持续重复付费请求。
 
@@ -1012,7 +1090,7 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 | doubao | NOT RUN | NOT RUN | — | — | Key存在；Fetch按量权限 |
 | youcom | NOT RUN | NOT RUN | — | — | Search/Contents scope与额度 |
 | keenable | NOT RUN | NOT RUN | — | — | keyed Key/credits |
-| open_websearch | NOT RUN | NOT RUN | — | — | 用户运行的daemon版本/URL配置 |
+| open_websearch | NOT RUN | NOT RUN | — | — | daemon版本/URL；两引擎是否实际生效、局部失败数量（未知则注明未验证） |
 
 执行后分别填PASS/FAIL/SKIP和原因；不把SKIP写作已验证。只记录安全元数据；正文与完整请求/响应不进Git、PR或计划附录。
 
@@ -1020,19 +1098,21 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 
 | 规格要求 | 落实位置 |
 | --- | --- |
-| 架构D1–D3：独立四家、双能力、最小请求与api_url | 0.2、Tasks1–9、Task13 |
+| 架构D1–D3：独立四家、双能力、api_url与open_websearch专属engines | 0.2–0.3、Tasks1–10、Task13 |
 | 架构D4：唯一executor/RetryPolicy与诊断 | 0.3、Tasks1–8、Task11 |
 | 架构D5：入口不变、Fetch无provider过滤参数 | 0.1、Tasks12–13 |
 | 架构D6：同实例/quota、统一关闭、无存储责任 | Task10、Task12 |
 | 架构D7：SecretValue和安全诊断 | 0.3、Tasks9、11、13 |
-| 架构D8：不托管daemon、不控制引擎 | Tasks7–8、13 |
+| 架构D8：只透传用户列表，不托管daemon/枚举/执行子引擎 | Tasks7–8、10、13 |
 | 错误矩阵：HTTP/业务200/decode/schema/empty/取消 | 0.3、各adapter任务、Task11 |
 | 坏条目保留好结果；空列表与错误区分 | Tasks1、3、5、7、11 |
 | Fetch下一家回退、URLStore拒绝、已有正文复用 | Task12 |
 | Doubao原站状态/Fetch付费Key/已知临时码 | Tasks1–2、13 |
 | You.com root数组、目标URL、snippets数组、无extraction | Tasks3–4、13 |
 | Keenable keyed-only、GET编码、无live、非空content | Tasks5–6、13 |
-| open-webSearch status/data与无engines、连接拒绝/browser错误 | Tasks7–8、11、13 |
+| open-webSearch 省略/显式engines、固定总预算、Fetch隔离、连接拒绝/browser错误 | Tasks7–8、10–11、13 |
+| engines构造TypeError→ConfigFailure、禁用项、不可变快照、名称原样透传 | 0.3、Tasks7、9–10 |
+| 多引擎partialFailures安全marker/count、共享去重、无新增重试/诊断字段 | Tasks7、11–13 |
 | Registry/config四开关组合、默认地址和关闭示例 | Tasks9–10、13 |
 | 测试分层、合成fixture、HTTP真实执行边界 | 第2节、Tasks1–13 |
 | 全量离线检查、每家live独立结果与前提 | 4.2–4.3 |
@@ -1046,4 +1126,6 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 - `KeywordSearchHit` 的Search正文保持空；Fetch两个content字段接收非空真实正文。You.com摘要是同层snippets；Keenable摘要是snippet。
 - `ResponseInspector` 返回失败对象或None，不直接返回payload；`response_diagnostics` 返回安全Mapping；CandidateCounts由 `providers.diagnostics` 复用。
 - `default_max_concurrency` 为group字段，`max_concurrency`为单家覆盖；env字符串是变量名称而非凭据。
-- 本计划的目标测试/命令是待执行要求；编写计划时未声称它们已PASS。
+- engines 只属于 open_websearch；TOML/options 为 list，constructor 参数 list[str] | None，内部 tuple[str, ...] | None，HTTP body 为每次新建的 list。未配时无engines/limit，已配时limit固定50；Fetch仍仅url。
+- 无效engines直接构造TypeError、Runtime包装ConfigFailure；完全禁用时不构造。partialFailures仅有既有success语义+固定code/count摘要，不新增partial枚举、候选拒绝计数或原文日志。
+- 本计划的目标测试/命令是待执行要求；编写/修订计划时未声称它们已PASS，也未启动daemon或执行live。

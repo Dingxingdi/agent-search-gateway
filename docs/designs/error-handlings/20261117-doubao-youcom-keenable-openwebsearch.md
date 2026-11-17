@@ -1,7 +1,7 @@
 # Error Handling: Doubao、You.com、Keenable 与 open-webSearch
 
 - 日期：2026-11-17
-- 状态：**设计待审阅，未实施**
+- 状态：**设计已确认；2026-11-17 按方案 A 补充 engines 校验与多引擎局部失败诊断，未实施**
 - 关联：[架构](../architectures/20261117-doubao-youcom-keenable-openwebsearch.md) / [测试](../testings/20261117-doubao-youcom-keenable-openwebsearch.md)
 
 ## 1. Goals & Non-goals
@@ -12,6 +12,7 @@
 2. 保持当前统一的重试、超时、错误事件、终态和 Fetch Provider 回退机制。
 3. 上游出错时保留足够的可定位信息（供应商、阶段、状态、短错误码、类别、重试尝试、候选条目统计），同时保护凭据、查询及网页内容。
 4. 不因为某一个 Provider 失败而改变其他 Provider 的调用路径。
+5. open-webSearch 的列表配置错误、服务整体失败与 `status=ok` 中的局部引擎失败分开处理；不把请求成功宣传为全部引擎成功，也不为子引擎建立重试系统。
 
 ### Non-goals
 
@@ -24,6 +25,7 @@
 
 | 场景 | 检测位置 | 默认重试 | 最终处理与诊断 |
 | --- | --- | --- | --- |
+| 启用的 open_websearch 配置了错误 engines 值 | 新 Adapter 构造函数，Runtime 装配 | 否；不发 HTTP | 构造抛 `TypeError`，由既有 Runtime 包装为 `ConfigFailure`；只说明字段/要求，不回显原始配置值 |
 | TCP/DNS/连接拒绝、连接断开、请求超时 | 共享 `HttpJsonExecutor` | 是，受全局 `RetryPolicy` 限制 | 终态 `ExecutionFailure`；`category=transport`、异常类型、尝试次数 |
 | HTTP 408、429、5xx | 共享 `HttpJsonExecutor` | 是，受全局配置限制 | 失败时保留 `http_status`，Scheduler 可继续其他 Provider |
 | HTTP 400/401/402/403/404/422 等 | 共享 `HttpJsonExecutor` | 否 | HTTP 失败；401/403 提示凭据/权限，402 可能是额度，422 可能是请求/提取问题，不重试 |
@@ -32,6 +34,7 @@
 | HTTP 200、顶层 envelope/必需列表类型错误 | 适配器 parser | 否 | `ExecutionFailure`；`category=invalid_envelope` |
 | 合法搜索 envelope，少数结果 URL 缺失/类型坏 | 适配器逐条解析 | 不适用 | 跳过坏条、保留好条；`provider_candidates_summary` 统计 |
 | 合法搜索 envelope，真实零结果 | 适配器 parser | 不适用 | 返回 `[]`，与错误信封区分 |
+| open-webSearch `status=ok`，`data.partialFailures` 为非空数组 | 本地 `response_diagnostics` | 否；不针对引擎重试 | 保留合法结果（包括空数组）；记录固定 `partial_engine_failures` 标记与本地计数，不能声称全部引擎成功 |
 | 成功响应内 Fetch 正文缺失或仅空白 | 适配器 Fetch parser | 否（没有证据表明重发可修复） | `ExecutionFailure`；`semantic_result=empty`；Scheduler 尝试下一家 |
 | Fetch 候选文本未通过 cheap_check 或 LLM judge | 现有 `FetchScheduler` | 不在 HTTP 层重试 | 既有候选拒绝和下一 Provider 逻辑 |
 | 任务取消或 Runtime 退出 | 既有异步边界 | 不自动重新发起 | 按现有取消/关闭路径传播，不吞掉取消 |
@@ -77,8 +80,12 @@
 - 只有文档支持且明确属于临时问题的状态/码允许走 `response_inspector` 的 retryable 路径；未知业务错误默认不可重试。
 - TCP 连接拒绝通常说明 daemon 没运行，HTTP executor 可能按全局短重试后终态失败；**Gateway 不负责启动、安装或重启 daemon**。
 - open-webSearch 可能因 Playwright/浏览器组件缺失而无法抓取某些站点；这属于上游部署环境问题，不能由 Gateway 静默安装依赖。
-- 若错误来自 daemon 内部选用的某搜索引擎，Gateway 只标记 `provider=open_websearch`，不把引擎拆成新的 Provider，也不自动切换/设置 `engines`。
-- `/fetch-web` 的 `data.content` 须为非空正文；其他信息如标题/最终 URL 只作适配器内部校验或安全元数据，不替代正文。
+- 若错误来自 daemon 内部选用的某搜索引擎，Gateway 仍只标记 `provider=open_websearch`；不把引擎拆成 Provider，不自动改换、删除、扩充已配置的 `engines`，不失败后去掉该字段重试。显式列表及固定 `limit=50` 在共享 HTTP 重试中保持一致。
+- `/fetch-web` 的 `data.content` 须为非空正文；其他信息如标题/最终 URL 只作适配器内部校验或安全元数据，不替代正文。Fetch 始终只发送 URL，即使该 adapter 配置了 `engines`。
+- 本地只验证 `engines` 的结构：`None`（省略）或非空 list，每项为非空、非纯空白字符串。空 list、标量、非字符串项等抛 `TypeError`；不做名称枚举/别名或去重。完全禁用时不构造 adapter，不验证未使用的值，仍拒绝未知顶层键。
+- 未知或被 daemon 禁用的引擎由上游处理；当前上游白名单可能静默过滤并回退到默认引擎，因此不能承诺 HTTP 成功代表请求列表全部生效。文档要求用户使 daemon 白名单包含所选引擎，或保持白名单为空。
+- 上游允许 `status=ok` 同时携带 `data.partialFailures`。在成功信封与合法 `data.results` 下，非空失败数组仅产生固定安全诊断，保留已返回的有效结果；上游即使全部引擎报错仍可能返回空数组，Gateway 保留该合法空结果，但必须保留失败标记。不得把这个分支交给 inspector 触发整次重试。
+- 局部失败诊断只检查数组形态及长度，不读取其中的 `engine`、`code`、`message`。省略/空数组不带失败标记；不根据原始文本推测可恢复性。
 
 ## 4. Shared Retry Contract
 
@@ -88,6 +95,7 @@
 4. Inspector 无法解析 JSON 时允许共享 `request_json` 的 JSON decode 处理报告 `ProtocolFailure`；不可把 decode 错误转成零结果。
 5. ProviderSearch/Fetch parser 在成功 HTTP 响应的字段验证期间抛出现有 `ExecutionFailure`，由调用方/调度器按现有失败分支处理。
 6. 不改变现有全局错误码映射；没有依据时优先**不可重试**，以免对付费 Fetch 或已被禁用的 API 重复扣费。
+7. open-webSearch 是一次 Gateway → daemon 的请求；HTTP 重试仍以整次请求为单位，不按引擎分配额外尝试预算。`status=ok` 中的局部引擎失败不主动重试，成功结果不得因此丢失。
 
 ## 5. Observability & Redaction
 
@@ -117,6 +125,8 @@
 
 若供应商错误文本可能包含用户查询或认证信息，应只输出安全归类/代码，而不是盲目信任并记录消息。测试要有专门的脱敏断言。
 
+open-webSearch 的局部引擎失败沿用已有 `provider_response_diagnostic`，由 executor 唯一发出。提取器输出 `category="provider_response"`、`response_kind="object"`、`semantic_result="success"`（仅表示成功信封）、固定 `upstream_code="partial_engine_failures"`，以及完全本地生成的 `upstream_message="partial_engine_failures count=N"`。不转发上游错误文字，也不增加全局白名单字段。现有 `semantic_result` 不支持 `partial`；`received/accepted/rejected` 与 `rejection_counts` 仍只描述候选条目，不能借用来统计引擎。
+
 ## 6. Edge Cases and Fallbacks
 
 1. **单条坏结果**：搜索 10 条中 2 条缺 URL 时保留 8 条，记 `accepted=8`、`rejected=2`，不让 2 条坏记录毁掉整个响应。
@@ -129,6 +139,9 @@
 8. **daemon 不可达**：仅 `open_websearch` 失败；其他适配器仍按配置运行。
 9. **超时/取消**：请求超时可按全局策略重试；任务取消不吞掉也不重试，避免请求停不下来。
 10. **上游响应结构改变**：有证据的解析失败应暴露安全诊断并加入回归 fixture，不能吞异常或返回虚构结果。
+11. **多引擎部分失败**：`status=ok`、部分合法结果与非空 `partialFailures` 共存时，保留结果并标记失败数量；不自行补发失败引擎、不复制完整请求或原始错误。
+12. **多引擎零结果且有失败记录**：保留上游成功信封的空列表语义，但日志必须有局部引擎失败标记，区别于无错误记录的真实零结果；不能据此填报“所有选定引擎已验证成功”。
+13. **结果预算**：显式列表固定使用 `limit=50` 的总预算；返回条数少、部分引擎没有命中或预算分配不均，不构成盲目重试的理由。
 
 ## 7. Acceptance Criteria
 
@@ -140,6 +153,9 @@
 - [ ] 日志包含阶段、Provider、错误类别、尝试；敏感值和网页正文不泄漏。
 - [ ] 单个 Fetch Provider 失败时下一 Provider 可以接手；不修改调用方协议。
 - [ ] 不假设 `Retry-After` 已被执行器支持，不擅自改写全局重试语义。
+- [ ] 已启用 open_websearch 的错误 engines 值沿用 `TypeError` → `ConfigFailure`；禁用项行为未被改变。
+- [ ] 局部引擎失败只使用既有安全标记/本地计数，保留有效命中；没有子引擎重试、假 `partial` 枚举或混用候选计数。
+- [ ] 多引擎 HTTP 重试保留原列表和固定预算；Fetch 不携带 Search 参数。
 
 ## 8. 参考
 
