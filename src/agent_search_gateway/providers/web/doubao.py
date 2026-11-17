@@ -70,7 +70,7 @@ def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, objec
     except ValueError:
         return {"category": "decode", "semantic_result": "unknown"}
     error = _metadata_error(payload)
-    if error:
+    if error is not None:
         return _error_diagnostics(error)
     if isinstance(payload, dict):
         metadata_valid = "ResponseMetadata" not in payload or isinstance(
@@ -138,7 +138,7 @@ class DoubaoAdapter:
         if "ResponseMetadata" in root:
             require_object(root["ResponseMetadata"], self.name, "search", "ResponseMetadata")
         error = _metadata_error(root)
-        if error:
+        if error is not None:
             raise failure(
                 self.name,
                 "search",
@@ -203,7 +203,7 @@ class DoubaoAdapter:
         if "ResponseMetadata" in root:
             require_object(root["ResponseMetadata"], self.name, "fetch", "ResponseMetadata")
         error = _metadata_error(root)
-        if error:
+        if error is not None:
             raise failure(
                 self.name,
                 "fetch",
@@ -245,7 +245,7 @@ class DoubaoAdapter:
         except ValueError:
             return None
         error = _metadata_error(payload)
-        if not error:
+        if error is None:
             return None
         return ProviderResponseFailure(
             self.name,

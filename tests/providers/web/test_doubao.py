@@ -26,6 +26,97 @@ def _fixture(name: str) -> object:
     return json.loads((_FIXTURES / name).read_text())
 
 
+@pytest.mark.parametrize("stage", ["search", "fetch"])
+@pytest.mark.parametrize("error", [{}, [], False, 0, ""])
+async def test_falsey_metadata_errors_override_valid_results(stage: str, error: object) -> None:
+    payload = _fixture(f"{stage}_success.json")
+    assert isinstance(payload, dict)
+    payload["ResponseMetadata"] = {"Error": error}
+    http = RecordingJsonExecutor([payload])
+    adapter = DoubaoAdapter(name="doubao", secret=SecretValue("synthetic-key"), http_executor=http)
+    with pytest.raises(ExecutionFailure) as caught:
+        if stage == "search":
+            await adapter.search("synthetic query")
+        else:
+            await adapter.fetch(normalize_url("https://example.com/article"))
+    assert caught.value.diagnostics["category"] == "provider_response"
+    assert caught.value.diagnostics["semantic_result"] == "error"
+
+
+@pytest.mark.parametrize("stage", ["search", "fetch"])
+@pytest.mark.parametrize("error", [{}, [], False, 0, ""])
+async def test_falsey_metadata_errors_are_terminal_with_safe_diagnostics(
+    stage: str, error: object
+) -> None:
+    payload = _fixture(f"{stage}_success.json")
+    assert isinstance(payload, dict)
+    payload["ResponseMetadata"] = {"Error": error}
+    requests: list[httpx.Request] = []
+    logger, stream = structured_test_logger("tests.doubao.falsey-error")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0, 0, 5), provider_name="doubao", logger=logger
+        )
+        adapter = DoubaoAdapter(
+            name="doubao", secret=SecretValue("PRIVATE_KEY"), http_executor=executor
+        )
+        with pytest.raises(ProviderResponseFailure) as caught:
+            if stage == "search":
+                await adapter.search("PRIVATE_QUERY")
+            else:
+                await adapter.fetch(normalize_url("https://example.com/PRIVATE_URL"))
+    assert len(requests) == 1
+    assert caught.value.retryable is False
+    diagnostics = [
+        dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "error"
+    assert diagnostics[0]["category"] == "provider_response"
+    assert diagnostics[0]["upstream_code"] == "unknown"
+    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+
+
+@pytest.mark.parametrize("stage", ["search", "fetch"])
+@pytest.mark.parametrize("metadata", [{}, {"Error": None}])
+async def test_absent_or_null_metadata_error_preserves_success(
+    stage: str, metadata: dict[str, object]
+) -> None:
+    payload = _fixture(f"{stage}_success.json")
+    assert isinstance(payload, dict)
+    payload["ResponseMetadata"] = metadata
+    logger, stream = structured_test_logger("tests.doubao.no-error")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=payload))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="doubao", logger=logger
+        )
+        adapter = DoubaoAdapter(
+            name="doubao", secret=SecretValue("synthetic-key"), http_executor=executor
+        )
+        if stage == "search":
+            assert len(await adapter.search("synthetic query")) == 2
+        else:
+            candidate = await adapter.fetch(normalize_url("https://example.com/article"))
+            assert candidate.raw_content.strip()
+            assert candidate.content == candidate.raw_content
+    diagnostics = [
+        dict(token.split("=", 1) for token in shlex.split(line)[1:])
+        for line in stream.getvalue().splitlines()
+        if "event=provider_response_diagnostic " in line
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["semantic_result"] == "success"
+
+
 async def test_search_maps_web_results() -> None:
     http = RecordingJsonExecutor([_fixture("search_success.json")])
     adapter = DoubaoAdapter(name="doubao", secret=SecretValue("synthetic-key"), http_executor=http)
