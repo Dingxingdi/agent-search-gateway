@@ -1,7 +1,7 @@
 # Architecture: Doubao、You.com、Keenable 与 open-webSearch 接入
 
 - 日期：2026-11-17
-- 状态：**设计已确认；2026-11-17 按方案 A 修订 open-webSearch 多引擎配置，未实施**
+- 状态：**已实施，最终离线门与四家 live 验收通过。** 结果见[实施计划](../plans/20261117-doubao-youcom-keenable-openwebsearch.md)的 4.3–4.4。
 - 基线：`eeeff82`
 - 同组文档：[错误处理](../error-handlings/20261117-doubao-youcom-keenable-openwebsearch.md) / [测试设计](../testings/20261117-doubao-youcom-keenable-openwebsearch.md)
 
@@ -15,7 +15,7 @@
 - `open-webSearch` 作为已运行的独立 HTTP 服务接入；允许在 Gateway 的该 Provider 配置中声明 `engines` 并透传给服务，以扩大搜索覆盖率。Gateway 不实现、发现或逐个调度底层引擎，不管理安装、进程或浏览器组件。
 - HTTP 200 内嵌错误、抓取空正文、部分坏搜索条目等情况沿用现有错误、日志框架处理。
 
-### Todo（设计通过后实施）
+### 已完成实施清单
 
 1. 新建四个 `providers/web/*.py` 适配器，并更新 `providers/defaults.py`。
 2. 为四者增加 README 配置、凭证/部署提醒、`config.example.toml` 示例。
@@ -222,7 +222,7 @@ class URLFetchProvider(Protocol):
 
 ### open-webSearch 高覆盖率示例与边界
 
-下面是实施后应加入 `config.example.toml` 的示例；保持默认关闭，只有用户显式启用才会调用服务。名单是文档示例，不是代码中的枚举或硬编码默认值。
+下面的示例已加入 `config.example.toml`；保持默认关闭，只有用户显式启用才会调用服务。名单是文档示例，不是代码中的枚举或硬编码默认值。
 
 ```toml
 [web_providers.open_websearch]
@@ -251,7 +251,7 @@ engines = [
 | Keenable | `query`、`max_results` | GET query `url` | 符合官方搜索 schema / `content` 非空 |
 | open-webSearch | `query`；显式配置时另加 `engines` 和固定 `limit=50` | 仅 `url` | `status=ok` / `data.content` 非空；`partialFailures` 仅作安全局部失败诊断 |
 
-**必须复核后再编码：** Keenable Search 实际列表结构、open-webSearch `data` 的搜索条目格式、Doubao Fetch 原站状态字段与计费 Key 使用条件；不使用宽泛、静默的字段兜底。
+**契约复核已完成：** 已核对 Keenable Search 实际列表结构、open-webSearch `data` 的搜索条目格式、Doubao Fetch 原站状态字段与计费 Key 使用条件，依据与真实验收结果见[实施计划](../plans/20261117-doubao-youcom-keenable-openwebsearch.md)的 0.2、4.3。实现不使用宽泛、静默的字段兜底。
 
 ## 7. 官方来源
 

@@ -1,7 +1,7 @@
 # Testing: Doubao、You.com、Keenable 与 open-webSearch
 
 - 日期：2026-11-17
-- 状态：**设计已确认；2026-11-17 按方案 A 修订多引擎用例，未实现任何新测试**
+- 状态：**计划测试已实施，最终离线门与 live 验收通过。** 实际计数和引擎证据边界见[实施计划](../plans/20261117-doubao-youcom-keenable-openwebsearch.md)的 4.3–4.4。
 - 关联：[架构](../architectures/20261117-doubao-youcom-keenable-openwebsearch.md) / [错误处理](../error-handlings/20261117-doubao-youcom-keenable-openwebsearch.md)
 
 ## 1. Testing Goals
@@ -27,10 +27,10 @@
 | Adapter unit | `tests/providers/web/test_open_websearch.py` | daemon 两端点、engines 省略/显式列表与固定总预算、构造校验/快照、局部失败诊断 | 否 |
 | Protocol fixtures | `tests/fixtures/providers/{doubao,youcom,keenable,open_websearch}/` | 供应商的成功、失败、空内容、异常 schema 样本 | 否 |
 | Registry/config | `tests/providers/test_registry.py`、`tests/unit/test_config_web_providers.py` | 名称、能力、Key、允许配置、独立开关 | 否 |
-| Runtime | `tests/runtime/test_runtime_assembly.py` | 构造注入、共享 quota、双能力、关闭 executor | 否 |
+| Runtime | `tests/runtime/test_runtime_assembly.py`、`tests/runtime/test_new_web_runtime_assembly.py` | 既有名单回归；构造注入、共享 quota、双能力、关闭 executor | 否 |
 | Errors/logging | `tests/observability/test_provider_diagnostics.py` 及 adapter 单测 | 分类、重试、脱敏、计数与终态 | 否 |
 | Workflow | `tests/acceptance/test_gateway_workflows.py` | Search → URLStore → Fetch 回退；旧流程未变化 | 否 |
-| Opt-in live | 项目现有 `tests/integration` 约定或专用可选脚本 | 四家 Search + Fetch 实际响应、部署与凭据说明 | 是（显式启用） |
+| Opt-in live | `tests/integration/test_live_new_web_providers.py` | 四家 Search + Fetch 实际响应、部署与凭据说明 | 是（显式启用） |
 
 优先使用项目已有 `RecordingJsonExecutor`、`httpx.MockTransport`、fixture、日志捕获工具，不建立第二套模拟 HTTP 库。
 
@@ -178,20 +178,20 @@
 
 ## 7. Exit Criteria
 
-- [ ] 四个 Provider 注册、配置和接口均通过离线验证。
-- [ ] 四个适配器对成功、合法空结果、局部坏条目、内嵌错误、非法 JSON、空白 Fetch 均有明确测试。
-- [ ] 全局重试分类、HTTP 200 业务错误重试、脱敏日志和回退符合错误设计。
-- [ ] Search → URLStore → Fetch 工作流不受影响，现有回归套件全部通过。
-- [ ] 各 Provider Search + Fetch 的 live 结果被明确记录为 PASS/FAIL/SKIP；无法连接/没有权限时不谎报 PASS。
-- [ ] open-webSearch 未配置时 query-only；显式配置时原样 engines + 固定 limit=50；Fetch 始终 url-only；Gateway 不托管 daemon 或执行子引擎。
-- [ ] engines 非法结构、禁用项、Runtime 透传、不可变快照、单 Provider/quota 身份、局部失败安全诊断均覆盖；不硬编码引擎枚举。
-- [ ] 示例配置提供高覆盖率名单并默认关闭，README 说明总结果预算、白名单过滤、重复项风险和局部失败，不承诺所有引擎都产生结果。
-- [ ] 文档解释 Doubao Fetch 付费 Key 要求、Keenable Keyed API、You.com Contents 费用/域名、open-webSearch 运行要求及 CLI Fetch 限制。
+- [x] 四个 Provider 注册、配置和接口均通过离线验证。
+- [x] 四个适配器对成功、合法空结果、局部坏条目、内嵌错误、非法 JSON、空白 Fetch 均有明确测试。
+- [x] 全局重试分类、HTTP 200 业务错误重试、脱敏日志和回退符合错误设计。
+- [x] Search → URLStore → Fetch 工作流不受影响，现有回归套件全部通过。
+- [x] 各 Provider Search + Fetch 的 live 结果被明确记录为 PASS/FAIL/SKIP；无法连接/没有权限时不谎报 PASS。
+- [x] open-webSearch 未配置时 query-only；显式配置时原样 engines + 固定 limit=50；Fetch 始终 url-only；Gateway 不托管 daemon 或执行子引擎。
+- [x] engines 非法结构、禁用项、Runtime 透传、不可变快照、单 Provider/quota 身份、局部失败安全诊断均覆盖；不硬编码引擎枚举。
+- [x] 示例配置提供高覆盖率名单并默认关闭，README 说明总结果预算、白名单过滤、重复项风险和局部失败，不承诺所有引擎都产生结果。
+- [x] 文档解释 Doubao Fetch 付费 Key 要求、Keenable Keyed API、You.com Contents 费用/域名、open-webSearch 运行要求及 CLI Fetch 限制。
 
 ## 8. 参考
 
 - `tests/providers/web/`、`tests/fixtures/providers/`、`tests/providers/test_registry.py`。
-- `tests/unit/test_config_web_providers.py`、`tests/runtime/test_runtime_assembly.py`。
+- `tests/unit/test_config_web_providers.py`、`tests/runtime/test_runtime_assembly.py`、`tests/runtime/test_new_web_runtime_assembly.py`。
 - `tests/observability/test_provider_diagnostics.py`、`tests/acceptance/test_gateway_workflows.py`。
 - Doubao：https://docs.volcengine.com/docs/networked-search/doubao-search-web-analysis-fetch?lang=zh
 - You.com：https://you.com/docs/api-reference/search/v1-search

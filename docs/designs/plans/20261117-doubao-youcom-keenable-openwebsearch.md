@@ -14,7 +14,7 @@
 
 - 工作目录：`/home/agent/agent-search-gateway/.worktrees/add-doubao-youcom-keenable-openwebsearch-20261117`；沿用此工作树，不另建、不切换其他分支。
 - 计划基线：`4f606d2`（设计文档提交），代码基线为 `eeeff82`（v0.2.2）。以下位置以该基线为准，实施时按符号定位，不能依赖行号永远不变。
-- 本轮执行状态：Tasks 1–12 已实施并完成独立复查；Task 13 的 live 入口已完成，CHANGELOG 与文档合同测试已准备；README 与示例配置因 LocalHost 写入检查阻断而待落地。四家真实 Search/Fetch 均已 PASS，完整离线门仍有 9 项文档合同失败；具体证据见 4.3–4.4。合成 fixture 未被当作真实响应记录。
+- 本轮执行状态：Tasks 1–13 全部完成并经独立复查。README、示例配置、CHANGELOG 和测试均已落地；最终离线测试 2554 PASS / 12 SKIP / 0 FAIL，四家真实 Search/Fetch 共 8 PASS。具体证据见 4.3–4.4，合成 fixture 未被当作真实响应记录。
 - 2026-11-17 修订：用户确认方案 A，允许在 Gateway 的 open_websearch Provider 配置中声明 `engines`；原先一律省略 engines 的要求由本版替代。三份 spec 已同步，其他三家范围不变。
 - 只新增 `doubao`、`youcom`、`keenable`、`open_websearch` 四个名称，均为 `ProviderCapabilities(search=True, fetch=True)`。前三家 vendor option 仅 `api_url` 且需要 Key；open_websearch 允许 `api_url`、可选 `engines`，不需要 Key。
 - CLI、领域对象、通用配置 schema、Runtime、FetchScheduler、URLStore 和全局重试策略沿用已有实现。engines 走现有 `options` → factory kwargs 通道，值在新 adapter 构造时验证；不在通用层增加 provider 特判。新适配器不建立自己的 client、配额、缓存、retry loop 或进程管理。
@@ -973,7 +973,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/integration/test_live_new_w
 
 预期：docs新表合同FAIL；live八项SKIP。不能为了让门测试变红先调用付费API，也不测试pytest自身skip实现。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 config.example.toml新增四个表:
@@ -1027,7 +1027,7 @@ live Fetch直接调用adapter读取固定公开页面（例如 `https://www.pyth
 
 Live失败报告只保留provider/stage、安全类别、HTTP状态/已知业务码与实际attempt计数；不打印secret、查询、URL敏感参数或正文。可输出命中数量、正文长度和耗时。无Key/无显式daemon是SKIP；实际执行后的权限、账户额度、网络、schema错误是FAIL并说明前提，不能伪装成功。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/docs/test_documented_config.py -v
@@ -1037,10 +1037,10 @@ uv run python scripts/build_docs.py
 
 预期：docs PASS，默认live八项SKIP，文档生成成功至 `site/`。`docs/site/index.html` 是模板；本轮无须修改模板，构建产物不加入提交。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 文档用一个配置说明表避免重复；测试fixture只封装构造/关闭，不重写provider逻辑。重跑 Step 4，保留live gate和默认关闭行为。
-**本轮执行记录：** live 入口已完成，CHANGELOG 与文档合同测试已准备；默认 8 项 SKIP，真实 Search/Fetch 已逐家执行并全部 PASS。README 与 config.example.toml 的 SHA 保护窄编辑被 LocalHost 的 Secret-looking content 检查拒绝；新建待审补丁文件也被同一检查拒绝，未生成该补丁文件。两份文档尚未落地，文档合同当前 11 PASS / 9 FAIL；Step 3–5 保留未完成。已按锁文件同步 docs 依赖，文档构建 PASS；未绕过内容检查或改用缺少 expected_sha256 的写入工具。
+**本轮执行记录：** Task13 全部完成。README、config.example.toml、CHANGELOG、文档合同测试与 live 入口均已落地；文档测试 20 PASS，默认 live 8 SKIP，四家真实 Search/Fetch 共 8 PASS，文档构建 PASS。此前两份文档的窄编辑与补丁文件保存受到 LocalHost 内容检查阻断；用户随后明确授权 Bash 操作，已在写入前复核当前 SHA-256、逐个校验原始字节与唯一锚点，并确认文件模式和旧配置值保持不变。完整差异经独立复查 No findings；最终全仓结果见 4.4。
 
 
 ## 4. 执行顺序与最终验收
@@ -1100,22 +1100,22 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 
 执行后分别填PASS/FAIL/SKIP和原因；不把SKIP写作已验证。只记录安全元数据；正文与完整请求/响应不进Git、PR或计划附录。
 
-### 4.4 本轮全仓结果与剩余阻断
+### 4.4 最终全仓结果与实施记录
 
 | 门 | 实际结果 |
 | --- | --- |
 | `uv run ruff format --check src tests scripts` | PASS；211 files already formatted |
 | `uv run ruff check .` | PASS |
 | `uv run mypy src tests scripts` | PASS；211 source files |
-| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -v` | 2545 PASS / 12 SKIP / 9 FAIL，13.85 s；为限制终端输出使用 pipefail 和 tail 保留完整退出码 |
+| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -v` | 2554 PASS / 12 SKIP / 0 FAIL，13.30 s；为限制终端输出使用 pipefail 和 tail 保留完整退出码 |
 | `uv run python scripts/build_docs.py` | PASS；已安装锁定的 docs 组依赖，无依赖文件变更 |
 | 四家 opt-in Search/Fetch | 8 PASS；全部首次请求成功，结果见 4.3 |
 
-9 项失败全部位于 `tests/docs/test_documented_config.py`：四家示例表完整性、逐家启用/禁用配置、README 合同、open-webSearch 示例 engines/默认分支和既有示例 provider 集合。它们等待 README/config 修改落地，未被跳过或改弱。
+先前 `tests/docs/test_documented_config.py` 的 9 项失败均由 README/config 尚未落地导致，涵盖四家示例、逐家启用/禁用、README 合同、open-webSearch engines 分支及 provider 集合。两文件落地后，该文件实际运行 20 PASS；完整离线门实际运行 2554 PASS / 12 SKIP，无跳过或削弱这些合同断言。
 
-LocalHost 的 `edit` 在已有文件 SHA 校验存在时仍拒绝内容；最小 README 提供商名称插入也被拒绝。已检查相关内容是环境变量引用及省略号占位示例，未要求写入真实 Key。可用 `apply_patch` 没有 `expected_sha256` 参数，因此未擅自替换用户要求的并发保护；待审补丁文件的 `write(overwrite=False)` 同样被拒绝，没有保存成功。README/config 保持原状；Task13 的 live 入口已完成，CHANGELOG 草稿与文档合同测试留待示例和说明落地后一并完成，未将草稿中的示例声明作为已交付事实。
+历史写入阻断已解除：用户明确授权使用 Bash 后，在指定工作树内按当前 SHA-256 和唯一锚点完成两份文档插入，保持原有文件模式与配置默认值。没有修改 LocalHost 检查规则，也没有保存真实凭据或原始供应商响应。README、配置示例、CHANGELOG 与文档测试均已完成；两份文档的实际差异通过独立审查。
 
-本地实施提交：`6e82899`、`264c957`、`9ac135f`、`3a8fdb4`、`6ca8737`、`ab664a2`、`ce6303c`。未开 PR、合并、发布或更改版本。实际生产修改限于四个新 adapter 和默认 registry 注册；公共 Runtime、编排、重试、quota 与存储未修改。
+前序本地实施提交：`6e82899`、`264c957`、`9ac135f`、`3a8fdb4`、`6ca8737`、`ab664a2`、`ce6303c`、`9bb05a7`；文档收尾提交见 Git 历史。未开 PR、合并、发布或更改版本。实际生产修改限于四个新 adapter 和默认 registry 注册；公共 Runtime、编排、重试、quota 与存储未修改。
 
 ## 5. 规格覆盖与类型一致性自检
 
@@ -1151,4 +1151,4 @@ LocalHost 的 `edit` 在已有文件 SHA 校验存在时仍拒绝内容；最小
 - `default_max_concurrency` 为group字段，`max_concurrency`为单家覆盖；env字符串是变量名称而非凭据。
 - engines 只属于 open_websearch；TOML/options 为 list，constructor 参数 list[str] | None，内部 tuple[str, ...] | None，HTTP body 为每次新建的 list。未配时无engines/limit，已配时limit固定50；Fetch仍仅url。
 - 无效engines直接构造TypeError、Runtime包装ConfigFailure；完全禁用时不构造。partialFailures仅有既有success语义+固定code/count摘要，不新增partial枚举、候选拒绝计数或原文日志。
-- 复选框与 4.3–4.4 按实际执行结果更新；Task13 的文档落地及全仓全绿仍未完成，不将写入阻断、SKIP 或尚未观察到的引擎命中视为已验证。
+- Tasks 1–13 与规格验收复选框均已按实际证据完成；最终结果见 4.3–4.4。SKIP 仍表示未在该次默认门中运行，未观察到的引擎命中不视为已验证；open-webSearch 的 duckduckgo 结果贡献保持未验证。

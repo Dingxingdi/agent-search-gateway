@@ -1,7 +1,7 @@
 # Error Handling: Doubao、You.com、Keenable 与 open-webSearch
 
 - 日期：2026-11-17
-- 状态：**设计已确认；2026-11-17 按方案 A 补充 engines 校验与多引擎局部失败诊断，未实施**
+- 状态：**已实施，错误矩阵、脱敏与回退验收通过。** 结果见[实施计划](../plans/20261117-doubao-youcom-keenable-openwebsearch.md)的 4.3–4.4；异常路径使用真实执行器和受控响应验证，live 记录按实际观测单独列出。
 - 关联：[架构](../architectures/20261117-doubao-youcom-keenable-openwebsearch.md) / [测试](../testings/20261117-doubao-youcom-keenable-openwebsearch.md)
 
 ## 1. Goals & Non-goals
@@ -145,17 +145,17 @@ open-webSearch 的局部引擎失败沿用已有 `provider_response_diagnostic`�
 
 ## 7. Acceptance Criteria
 
-- [ ] 四个 Provider 的 200 业务错误均正确识别，不误报成功。
-- [ ] 已知临时业务错误按共享尝试次数重试；认证、额度、参数/未知错误不重试。
-- [ ] HTTP 429/5xx、网络超时按已有日志及策略处理，未引入供应商独立 sleep。
-- [ ] 结构错误、非法 JSON、Fetch 空正文均按对应错误分类失败。
-- [ ] 单条坏 Search 记录被跳过且有计数；有效记录不丢。
-- [ ] 日志包含阶段、Provider、错误类别、尝试；敏感值和网页正文不泄漏。
-- [ ] 单个 Fetch Provider 失败时下一 Provider 可以接手；不修改调用方协议。
-- [ ] 不假设 `Retry-After` 已被执行器支持，不擅自改写全局重试语义。
-- [ ] 已启用 open_websearch 的错误 engines 值沿用 `TypeError` → `ConfigFailure`；禁用项行为未被改变。
-- [ ] 局部引擎失败只使用既有安全标记/本地计数，保留有效命中；没有子引擎重试、假 `partial` 枚举或混用候选计数。
-- [ ] 多引擎 HTTP 重试保留原列表和固定预算；Fetch 不携带 Search 参数。
+- [x] 四个 Provider 的 200 业务错误均正确识别，不误报成功。
+- [x] 已知临时业务错误按共享尝试次数重试；认证、额度、参数/未知错误不重试。
+- [x] HTTP 429/5xx、网络超时按已有日志及策略处理，未引入供应商独立 sleep。
+- [x] 结构错误、非法 JSON、Fetch 空正文均按对应错误分类失败。
+- [x] 单条坏 Search 记录被跳过且有计数；有效记录不丢。
+- [x] 日志包含阶段、Provider、错误类别、尝试；敏感值和网页正文不泄漏。
+- [x] 单个 Fetch Provider 失败时下一 Provider 可以接手；不修改调用方协议。
+- [x] 不假设 `Retry-After` 已被执行器支持，不擅自改写全局重试语义。
+- [x] 已启用 open_websearch 的错误 engines 值沿用 `TypeError` → `ConfigFailure`；禁用项行为未被改变。
+- [x] 局部引擎失败只使用既有安全标记/本地计数，保留有效命中；没有子引擎重试、假 `partial` 枚举或混用候选计数。
+- [x] 多引擎 HTTP 重试保留原列表和固定预算；Fetch 不携带 Search 参数。
 
 ## 8. 参考
 
