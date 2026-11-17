@@ -8,6 +8,8 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-17
+
 ### Added
 
 - Add independent Search and Fetch providers for Doubao, You.com, Keenable, and an existing open-webSearch HTTP daemon. Include disabled configuration examples, credential and permission guidance, optional open-webSearch engine selection with a shared 50-result budget, safe partial-failure diagnostics, and opt-in live checks.
