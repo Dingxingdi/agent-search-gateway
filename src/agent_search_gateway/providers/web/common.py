@@ -11,7 +11,7 @@ from ...observability import log_event
 from ...url_normalization import NormalizedURL, normalize_url
 from ..contracts import KeywordSearchHit, URLFetchCandidate
 from ..diagnostics import CandidateCounts, best_effort_diagnostics, safe_diagnostic_fields
-from ..http import ResponseDiagnosticExtractor, ResponseInspector
+from ..http import RequestHeaders, ResponseDiagnosticExtractor, ResponseInspector
 
 
 class JsonRequester(Protocol):
@@ -21,7 +21,7 @@ class JsonRequester(Protocol):
         url: str,
         *,
         stage: str,
-        headers: Mapping[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,

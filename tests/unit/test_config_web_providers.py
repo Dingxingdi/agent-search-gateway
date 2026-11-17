@@ -163,6 +163,120 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize(
+    ("provider_data", "environment", "error_match"),
+    [
+        ({"enable_search": True}, {}, "requires api_key_env"),
+        (
+            {"enable_search": True, "api_key_env": "SERVICE_KEY"},
+            {},
+            "environment variable SERVICE_KEY is required",
+        ),
+        (
+            {"enable_search": True, "api_key_env": "SERVICE_KEY"},
+            {"SERVICE_KEY": ""},
+            "environment variable SERVICE_KEY is required",
+        ),
+        (
+            {"enable_fetch": True, "api_key_env": "SERVICE_KEY"},
+            {"SERVICE_KEY": "synthetic-service-value"},
+            "does not support fetch",
+        ),
+        (
+            {"enable_search": True, "api_key_env": "SERVICE_KEY", "unknown": True},
+            {"SERVICE_KEY": "synthetic-service-value"},
+            "unknown config key",
+        ),
+        (
+            {"enable_search": False, "enable_fetch": False, "unknown": True},
+            {},
+            "unknown config key",
+        ),
+    ],
+    ids=[
+        "missing-env-name",
+        "missing-env-value",
+        "empty-env-value",
+        "unsupported-fetch",
+        "unknown-option",
+        "disabled-unknown-option",
+    ],
+)
+def test_service_key_search_config_rejects_invalid_provider(
+    provider_name: str,
+    provider_data: dict[str, object],
+    environment: dict[str, str],
+    error_match: str,
+) -> None:
+    with pytest.raises(ConfigFailure, match=error_match) as caught:
+        resolve_web_provider_config(
+            {"web_providers": {provider_name: provider_data}},
+            build_default_registry(),
+            environment,
+        )
+
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize("api_url", [None, "https://service.example.test/gateway"])
+def test_service_key_search_config_preserves_only_explicit_options(
+    provider_name: str,
+    api_url: str | None,
+) -> None:
+    provider_data: dict[str, object] = {
+        "enable_search": True,
+        "api_key_env": "SERVICE_KEY",
+    }
+    options = {} if api_url is None else {"api_url": api_url}
+    provider_data.update(options)
+
+    resolved = resolve_web_provider_config(
+        {"web_providers": {provider_name: provider_data}},
+        build_default_registry(),
+        {"SERVICE_KEY": "synthetic-service-value"},
+    )
+
+    [provider] = resolved.providers
+    assert provider.name == provider_name
+    assert provider.enable_search is True
+    assert provider.enable_fetch is False
+    assert provider.api_key_env == "SERVICE_KEY"
+    assert provider.secret is not None
+    assert provider.secret.reveal() == "synthetic-service-value"
+    assert dict(provider.options) == options
+
+
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize("api_key_env", [None, "UNAVAILABLE_SERVICE_KEY"])
+def test_disabled_service_key_search_provider_skips_credentials(
+    provider_name: str,
+    api_key_env: str | None,
+) -> None:
+    provider_data: dict[str, object] = {
+        "enable_search": False,
+        "enable_fetch": False,
+        "api_url": "https://disabled.example.test",
+    }
+    if api_key_env is not None:
+        provider_data["api_key_env"] = api_key_env
+
+    resolved = resolve_web_provider_config(
+        {"web_providers": {provider_name: provider_data}},
+        build_default_registry(),
+        {},
+    )
+
+    [provider] = resolved.providers
+    assert provider.name == provider_name
+    assert provider.enable_search is False
+    assert provider.enable_fetch is False
+    assert provider.api_key_env is None
+    assert provider.secret is None
+    assert dict(provider.options) == {"api_url": "https://disabled.example.test"}
+
+
 def test_disabled_parallel_requires_no_credential_and_preserves_allowed_options() -> None:
     data = {
         "web_providers": {

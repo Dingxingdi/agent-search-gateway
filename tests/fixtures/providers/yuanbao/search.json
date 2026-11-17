@@ -1,0 +1,9 @@
+{
+  "Response": {
+    "Query": "示例查询",
+    "Pages": [
+      "{\"passage\":\"标准摘要\",\"content\":\"动态摘要\",\"score\":0.9,\"date\":\"2026-01-01 00:00:00\",\"title\":\"示例标题\",\"url\":\"https://example.com/article\",\"site\":\"示例站点\",\"pics\":[],\"favicon\":\"https://example.com/favicon.ico\"}",
+      "{\"passage\":\"备用摘要\",\"date\":\"2026-01-02 00:00:00\",\"title\":\"另一篇示例\",\"url\":\"https://example.org/article\",\"site\":\"\",\"favicon\":\"\"}"
+    ]
+  }
+}

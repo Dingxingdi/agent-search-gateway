@@ -1,0 +1,10 @@
+{
+  "Code": 0,
+  "Message": "success",
+  "Data": {
+    "HasMore": false,
+    "SearchHashId": "fixture-empty",
+    "Items": [],
+    "EmptyReason": "示例无结果说明"
+  }
+}

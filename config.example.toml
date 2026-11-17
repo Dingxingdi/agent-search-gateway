@@ -102,6 +102,18 @@ enable_search = false
 enable_fetch = true
 api_url = "https://r.jina.ai"
 
+[web_providers.yuanbao]
+enable_search = true
+enable_fetch = false
+api_url = "https://api.wsa.cloud.tencent.com"
+api_key_env = "YUANBAO_API_KEY"
+
+[web_providers.zhihu]
+enable_search = true
+enable_fetch = false
+api_url = "https://developer.zhihu.com"
+api_key_env = "ZHIHU_ACCESS_SECRET"
+
 [academic_providers]
 default_max_concurrency = 3
 
@@ -204,5 +216,7 @@ provider = "antigravity_main"
 [retry]
 max_attempts = 3
 base_delay_seconds = 0.25
+# Caps local exponential backoff only; valid Retry-After waits take precedence.
+# Server waits may be zero or exceed this cap; max_attempts remains the total budget.
 max_delay_seconds = 2.0
 request_timeout_seconds = 180.0

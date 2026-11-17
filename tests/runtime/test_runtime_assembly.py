@@ -17,6 +17,8 @@ from agent_search_gateway.providers.registry import WebProviderRegistration
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.jina import JinaReaderAdapter
 from agent_search_gateway.providers.web.parallel import ParallelAdapter
+from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
+from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from agent_search_gateway.runtime import Runtime
 from tests.support.logging import structured_test_logger
 
@@ -142,6 +144,8 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
         ("scrapingant", False, True),
         ("serpapi", True, False),
         ("jina", False, True),
+        ("yuanbao", True, False),
+        ("zhihu", True, False),
     ]
     parallel_registration = registry.get("parallel")
     assert parallel_registration is not None
@@ -213,6 +217,73 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     brave["enable_fetch"] = True
     with pytest.raises(ConfigFailure):
         resolve_config(bad, registry, environment)
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "adapter_type", "default_api_url"),
+    [
+        ("yuanbao", YuanbaoAdapter, "https://api.wsa.cloud.tencent.com"),
+        ("zhihu", ZhihuAdapter, "https://developer.zhihu.com"),
+    ],
+)
+@pytest.mark.parametrize("api_url", [None, "https://service.example.test/gateway"])
+async def test_runtime_assembles_service_key_search_provider_with_owned_resources(
+    tmp_path: Path,
+    provider_name: str,
+    adapter_type: type[YuanbaoAdapter] | type[ZhihuAdapter],
+    default_api_url: str,
+    api_url: str | None,
+) -> None:
+    registry = build_default_registry()
+    raw = _config()
+    provider_data: dict[str, object] = {
+        "enable_search": True,
+        "enable_fetch": False,
+        "api_key_env": "SERVICE_KEY",
+        "max_concurrency": 7,
+    }
+    if api_url is not None:
+        provider_data["api_url"] = api_url
+    raw["web_providers"] = {provider_name: provider_data}
+    environment = _environment()
+    environment["SERVICE_KEY"] = "synthetic-service-value"
+    resolved = resolve_config(raw, registry, environment)
+    clients: list[_CountingAsyncClient] = []
+
+    def client_factory() -> httpx.AsyncClient:
+        client = _CountingAsyncClient()
+        clients.append(client)
+        return client
+
+    runtime = Runtime.build(
+        resolved,
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=client_factory,
+    )
+    try:
+        [provider] = runtime.web_search_providers
+        assert isinstance(provider, adapter_type)
+        assert provider.name == provider_name
+        assert provider._api_url == (default_api_url if api_url is None else api_url)
+        assert runtime.web_fetch_providers == ()
+        [executor] = runtime._web_http_executors
+        assert isinstance(executor, HttpJsonExecutor)
+        assert provider._http is executor
+        assert executor._client is clients[0]
+        assert set(runtime.quotas._web) == {provider_name}
+        quota = runtime.quotas.get_web(provider_name)
+        assert quota.limit == 7
+        assert runtime.search_orchestrator.quotas is runtime.quotas
+        assert set(runtime.llm_clients) == {"primary", "secondary"}
+        assert len(clients) == 1 + len(runtime.llm_clients)
+        assert len({id(client) for client in clients}) == len(clients)
+        assert all(not client.is_closed for client in clients)
+    finally:
+        await runtime.aclose()
+
+    await runtime.aclose()
+    assert all(client.is_closed and client.close_calls == 1 for client in clients)
 
 
 async def test_runtime_assembles_credentialless_jina_fetch_provider(

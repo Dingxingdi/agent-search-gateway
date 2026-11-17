@@ -243,11 +243,54 @@ async def test_retry_delay_adjuster_updates_sleep_and_retry_hook() -> None:
     assert retry_delays == sleeps
 
 
+async def test_adjusted_delay_can_exceed_local_maximum() -> None:
+    calls = 0
+    bases: list[float] = []
+    sleeps: list[float] = []
+    retry_delays: list[float] = []
+
+    async def operation() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("retry")
+        return "done"
+
+    def adjust_delay(_exc: BaseException, delay: float) -> float:
+        bases.append(delay)
+        return 5.0
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    result = await retry_async(
+        resolve_retry_policy({"retry": {"max_delay_seconds": 0.1}}),
+        operation,
+        is_retryable=lambda _exc: True,
+        sleep=sleep,
+        adjust_delay=adjust_delay,
+        on_retry=lambda _attempt, _exc, delay: retry_delays.append(delay),
+    )
+
+    assert result == "done"
+    assert calls == 2
+    assert bases == [0.1]
+    assert sleeps == [5.0]
+    assert retry_delays == [5.0]
+
+
 @pytest.mark.parametrize(
     ("adjusted", "expected"),
-    [(-1.0, 0.0), (5.0, 0.1), (float("nan"), 0.1), (float("inf"), 0.1), (-float("inf"), 0.1)],
+    [
+        pytest.param(-1.0, 0.0, id="negative-clamped-to-zero"),
+        pytest.param(float("nan"), 0.1, id="nan-preserves-local-delay"),
+        pytest.param(float("inf"), 0.1, id="positive-infinity-preserves-local-delay"),
+        pytest.param(-float("inf"), 0.1, id="negative-infinity-preserves-local-delay"),
+    ],
 )
-async def test_retry_delay_adjuster_clamps_invalid_delays(adjusted: float, expected: float) -> None:
+async def test_retry_delay_adjuster_clamps_negative_and_ignores_nonfinite_delays(
+    adjusted: float, expected: float
+) -> None:
     calls = 0
     bases: list[float] = []
     sleeps: list[float] = []

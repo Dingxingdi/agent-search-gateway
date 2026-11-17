@@ -1,0 +1,8 @@
+{
+  "Response": {
+    "Error": {
+      "Code": "RequestLimitExceeded",
+      "Message": "Request limit exceeded."
+    }
+  }
+}
