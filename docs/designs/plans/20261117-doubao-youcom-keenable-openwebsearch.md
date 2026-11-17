@@ -796,7 +796,7 @@ uv run pytest tests/runtime -q
 - Conditional Modify: 对应新adapter的inspector/diagnostics/parser
 - Read: `tests/support/web_diagnostics.py`、`tests/support/logging.py`、`tests/providers/test_http_executor.py`、`src/agent_search_gateway/providers/diagnostics.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 对四家、search/fetch各阶段，用真实executor和MockTransport按以下合同逐项验证。基础HTTP机制已覆盖的情况优先参数化新adapter入口，不复制executor测试的全部内部断言。
 
@@ -819,7 +819,7 @@ uv run pytest tests/runtime -q
 
 已有 `assert_json_fetch_diagnostics` 内含固定正文/错误文字假设，不要为了复用它改供应商语义。必要时用现有logger/caplog在本测试文件写小型参数化断言；不建立第二套HTTP fake。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/observability/test_provider_diagnostics.py tests/providers/web/test_doubao.py tests/providers/web/test_youcom.py tests/providers/web/test_keenable.py tests/providers/web/test_open_websearch.py -v
@@ -827,7 +827,7 @@ uv run pytest tests/observability/test_provider_diagnostics.py tests/providers/w
 
 预期：若有漏检，失败必须指出attempt计数、诊断类别、泄露marker或错误类型；已正确的公共机制保留PASS，不修改它制造RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 新adapter在request_json传入两个本地回调
@@ -840,7 +840,7 @@ fetch parser为empty/no_match/invalid_envelope附加明确diagnostics
 
 不同HTTP事件有自己的类别；不要要求所有终态都叫provider_response，也不要为parser失败补发一条不存在的HTTP失败。测试检查实际责任边界，保留基线provider_header事件名称。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/observability tests/providers/web tests/providers/test_http_executor.py tests/unit/test_retry.py -q
@@ -848,7 +848,7 @@ uv run pytest tests/observability tests/providers/web tests/providers/test_http_
 
 预期：新四家及旧诊断/重试回归 PASS；日志无敏感marker。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 集中测试数据，保留每个案例的供应商/阶段id方便定位。不修改全局重试、ErrorCode或脱敏白名单来迎合错误fixture。重跑 Step 4。
 
@@ -861,7 +861,7 @@ uv run pytest tests/observability tests/providers/web tests/providers/test_http_
 - Read: `tests/orchestrators/test_keyword_provider_filtering.py`、`tests/orchestrators/test_url_fetch_admission.py`
 - Conditional Modify: 新adapter实际协议缺陷；不默认改编排器/scheduler/store
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_new_provider_search_admits_url_for_fetch_fallback` 按四家参数化：
 
@@ -888,7 +888,7 @@ Expected:
 - `test_new_provider_open_websearch_multi_engine_results_use_existing_staging`：显式 engines 的一次 daemon 请求返回不同 engine 标记的命中（含重复URL）；仍按现有 staging 收录/去重，provider身份始终 open_websearch，无子Provider/额外HTTP扇出。
 - 现有provider选择测试继续验证精确筛选、不回退到未选择者；无需新增CLI参数。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/acceptance/test_gateway_workflows.py -k new_provider -v
@@ -896,7 +896,7 @@ uv run pytest tests/acceptance/test_gateway_workflows.py -k new_provider -v
 
 缺陷时预期为收录、实际回退请求或正文断言FAIL；全链路已满足时记为回归PASS。用受控HTTP序列，不用sleep猜并发执行次序。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 复用既有SearchOrchestrator/FetchOrchestrator/FetchScheduler构造
@@ -908,7 +908,7 @@ FakeLLMClient只替代网络LLM，真实调用编排/存储/配额
 
 不把 `build_acceptance_runtime` 的固定fake provider集合改成全局新列表，避免影响不相关验收；在当前文件新增参数化装配即可。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/acceptance/test_gateway_workflows.py tests/orchestrators/test_keyword_provider_filtering.py tests/orchestrators/test_url_fetch_admission.py tests/orchestrators/test_url_fetch_flow.py -v
@@ -917,7 +917,7 @@ uv run pytest tests/acceptance tests/orchestrators tests/scheduler -q
 
 预期：真实新adapter链路、旧回退、admission和结果合同 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 收拢本文件内新case的参数化构造，保留可以看到完整业务行为的断言；不用mock绕过store/scheduler。重跑 Step 4。
 
