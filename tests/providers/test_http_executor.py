@@ -1,6 +1,7 @@
 import asyncio
 import io
 import logging
+import time
 
 import httpx
 import pytest
@@ -14,6 +15,525 @@ from agent_search_gateway.providers.http import (
     ProviderResponseFailure,
 )
 from tests.support.logging import structured_test_logger
+
+
+@pytest.mark.parametrize(
+    ("kind", "retry_after", "expected_delay", "source", "level"),
+    [
+        ("status", "5", 5.0, "retry_after", "WARNING"),
+        ("status", "0", 0.0, "retry_after", "WARNING"),
+        ("status", None, 0.25, "backoff", "WARNING"),
+        ("status", "invalid", 0.25, "backoff", "WARNING"),
+        ("transport", None, 0.25, "backoff", "WARNING"),
+        ("provider", "5", 0.25, "backoff", "DEBUG"),
+    ],
+)
+async def test_retry_after_logs_actual_delay_and_source(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    retry_after: str | None,
+    expected_delay: float,
+    source: str,
+    level: str,
+) -> None:
+    monkeypatch.setattr("agent_search_gateway.providers.http.random.uniform", lambda low, high: 1.0)
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            if kind == "transport":
+                raise httpx.ReadTimeout("PRIVATE_TRANSPORT", request=request)
+            headers = {"Retry-After": retry_after} if retry_after is not None else {}
+            return httpx.Response(429, headers=headers, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    def inspect(response: httpx.Response) -> ProviderResponseFailure | None:
+        if kind == "provider" and response.status_code == 429:
+            return ProviderResponseFailure(
+                "fake",
+                "search",
+                status_code=429,
+                retryable=True,
+                safe_reason="rate_limited",
+                diagnostics={},
+            )
+        return None
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.retry-delay-source")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        result = await executor.request_json(
+            "GET",
+            "https://provider.example.test/search",
+            stage="search",
+            response_inspector=inspect,
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [expected_delay]
+    lines = stream.getvalue().splitlines()
+    retry_lines = [line for line in lines if "event=http_retrying" in line]
+    assert len(retry_lines) == 1
+    assert retry_lines[0].startswith(level + " ")
+    assert f"delay_ms={int(expected_delay * 1000)}" in retry_lines[0]
+    assert f"delay_source={source}" in retry_lines[0]
+    assert sum("event=http_attempt_started" in line for line in lines) == 2
+    assert sum("event=http_attempt_completed" in line for line in lines) == (
+        1 if kind == "transport" else 2
+    )
+    assert not any("event=http_failed" in line or "event=provider_failed" in line for line in lines)
+    assert "PRIVATE_TRANSPORT" not in stream.getvalue()
+
+
+async def test_large_finite_retry_after_keeps_retry_event() -> None:
+    retry_after = "1" + "0" * 306
+    expected_delay = float(retry_after)
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.large-retry-delay")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        assert await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        ) == {"ok": True}
+
+    assert attempts == 2
+    assert delays == [expected_delay]
+    retry_lines = [line for line in stream.getvalue().splitlines() if "event=http_retrying" in line]
+    assert len(retry_lines) == 1
+    assert f"delay_ms={int(expected_delay) * 1000}" in retry_lines[0]
+    assert "delay_source=retry_after" in retry_lines[0]
+
+
+@pytest.mark.parametrize("response_mode", ["json", "text"])
+@pytest.mark.parametrize("status", [408, 429, 503])
+async def test_retry_after_exhaustion_uses_one_attempt_budget(
+    response_mode: str, status: int
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(status, headers={"Retry-After": "5"}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.retry-after-exhaustion")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        request_method = executor.request_json if response_mode == "json" else executor.request_text
+        with pytest.raises(HttpStatusFailure) as caught:
+            await request_method("GET", "https://provider.example.test/search", stage="search")
+
+    assert caught.value.status_code == status
+    assert attempts == 3
+    assert delays == [5.0, 5.0]
+    lines = stream.getvalue().splitlines()
+    assert sum("event=http_retrying" in line for line in lines) == 2
+    assert sum("event=http_failed" in line for line in lines) == 1
+    assert "event=provider_failed" not in stream.getvalue()
+
+
+@pytest.mark.parametrize("status", [200, 401, 403])
+async def test_retry_after_does_not_expand_retryable_failures(status: int) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(
+            status, text="MALFORMED_JSON_PRIVATE", headers={"Retry-After": "5"}, request=request
+        )
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.retry-after-terminal")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        with pytest.raises(ProtocolFailure if status == 200 else HttpStatusFailure) as caught:
+            await executor.request_json(
+                "GET", "https://provider.example.test/search", stage="search"
+            )
+
+    assert caught.value.code is (
+        ErrorCode.PROTOCOL_ERROR if status == 200 else ErrorCode.ALL_PROVIDERS_FAILED
+    )
+    assert attempts == 1
+    assert delays == []
+    logged = stream.getvalue()
+    assert "event=http_retrying" not in logged
+    assert sum("event=http_failed" in line for line in logged.splitlines()) == 1
+    assert "MALFORMED_JSON_PRIVATE" not in logged
+
+
+@pytest.mark.parametrize("phase", ["attempt", "retry_after_sleep"])
+async def test_retry_after_cancellation_propagates_without_later_request(phase: str) -> None:
+    reached = asyncio.Event()
+    blocked = asyncio.Event()
+    attempts = 0
+    delays: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if phase == "attempt":
+            reached.set()
+            await blocked.wait()
+        return httpx.Response(429, headers={"Retry-After": "5"}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+        reached.set()
+        await blocked.wait()
+
+    logger, stream = structured_test_logger("tests.http.retry-after-cancellation")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        task = asyncio.create_task(
+            executor.request_json("GET", "https://provider.example.test/search", stage="search")
+        )
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=1)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await asyncio.sleep(0)
+
+    assert attempts == 1
+    assert delays == ([] if phase == "attempt" else [5.0])
+    assert task.cancelled()
+    assert "event=http_failed" not in stream.getvalue()
+    assert "event=provider_failed" not in stream.getvalue()
+
+
+async def test_retry_after_http_date_uses_fixed_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_search_gateway.providers.http.time.time", lambda: 1_700_000_000.0)
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                503, headers={"Retry-After": "Tue, 14 Nov 2023 22:13:25 GMT"}, request=request
+            )
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0.25, 2.0, 30.0), provider_name="fake", sleep=sleep
+        )
+        result = await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [5.0]
+
+
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        pytest.param("Wed, 21 Oct 2015 07:28:00 XYZ", id="unknown-timezone"),
+        pytest.param("Wed, 21 Oct 2015 07:28:00", id="missing-timezone"),
+        pytest.param("Wed, 21 Oct 2015 07:28:00 GMT junk", id="trailing-junk"),
+        pytest.param("Wed, 21 Oct 2015 07:28 GMT", id="missing-seconds"),
+    ],
+)
+async def test_malformed_retry_after_date_falls_back_to_backoff(
+    monkeypatch: pytest.MonkeyPatch, retry_after: str
+) -> None:
+    monkeypatch.setattr("agent_search_gateway.providers.http.time.time", lambda: 1_445_412_475.0)
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    logger, stream = structured_test_logger("tests.http.malformed-retry-date")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            logger=logger,
+            sleep=sleep,
+        )
+        result = await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [0.25]
+    retry_lines = [line for line in stream.getvalue().splitlines() if "event=http_retrying" in line]
+    assert len(retry_lines) == 1
+    assert "delay_source=backoff" in retry_lines[0]
+    assert "delay_ms=250" in retry_lines[0]
+    assert retry_after not in stream.getvalue()
+
+
+async def test_retry_after_past_date_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("agent_search_gateway.providers.http.time.time", lambda: 1_700_000_000.0)
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                503, headers={"Retry-After": "Tue, 14 Nov 2023 22:13:15 GMT"}, request=request
+            )
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0.25, 2.0, 30.0), provider_name="fake", sleep=sleep
+        )
+        result = await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [0.0]
+
+
+def test_retry_after_obsolete_asctime_uses_utc_in_non_utc_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_search_gateway.providers.http import _parse_retry_after
+
+    try:
+        with monkeypatch.context() as timezone_patch:
+            timezone_patch.setenv("TZ", "EST5EDT")
+            time.tzset()
+            assert _parse_retry_after("Tue Nov 14 22:13:25 2023", now=1_700_000_000.0) == 5.0
+    finally:
+        time.tzset()
+
+
+@pytest.mark.parametrize("retry_after", [" \t5\t ", " \tTue, 14 Nov 2023 22:13:25 GMT\t "])
+def test_retry_after_accepts_surrounding_http_whitespace(retry_after: str) -> None:
+    from agent_search_gateway.providers.http import _parse_retry_after
+
+    assert _parse_retry_after(retry_after, now=1_700_000_000.0) == 5.0
+
+
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        pytest.param("Tue, 14 Nov 2023 22:13:25 UTC", id="utc-zone"),
+        pytest.param("Wed, 15 Nov 2023 00:13:25 +0200", id="positive-offset"),
+        pytest.param("Tue, 14 Nov 2023 17:13:25 -0500", id="negative-offset"),
+        pytest.param("Tuesday, 14-Nov-23 22:13:25 GMT", id="obsolete-rfc850"),
+    ],
+)
+def test_retry_after_date_zones_and_obsolete_forms(retry_after: str) -> None:
+    from agent_search_gateway.providers.http import _parse_retry_after
+
+    assert _parse_retry_after(retry_after, now=1_700_000_000.0) == 5.0
+
+
+@pytest.mark.parametrize("now", [float("nan"), float("inf"), float("-inf")])
+def test_retry_after_rejects_non_finite_date_difference(now: float) -> None:
+    from agent_search_gateway.providers.http import _parse_retry_after
+
+    assert _parse_retry_after("Tue, 14 Nov 2023 22:13:25 GMT", now=now) is None
+
+
+async def test_retry_after_delta_seconds_overrides_backoff() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"}, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            sleep=sleep,
+        )
+        result = await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [5.0]
+
+
+@pytest.mark.parametrize("response_mode", ["json", "text"])
+@pytest.mark.parametrize(
+    "retry_after,base_delay,expected_delay",
+    [
+        pytest.param("0", 0.25, 0.0, id="zero"),
+        pytest.param("1", 2.0, 1.0, id="shorter-than-backoff"),
+        pytest.param("5", 0.25, 5.0, id="above-local-cap"),
+        pytest.param("1" + "0" * 100, 0.25, 1e100, id="large-finite-integer"),
+    ],
+)
+async def test_retry_after_delta_seconds_uses_exact_server_delay(
+    response_mode: str, retry_after: str, base_delay: float, expected_delay: float
+) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after}, request=request)
+        if response_mode == "text":
+            return httpx.Response(200, text="<feed>ok</feed>", request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, base_delay, 2.0, 30.0),
+            provider_name="fake",
+            sleep=sleep,
+        )
+        request_method = executor.request_json if response_mode == "json" else executor.request_text
+        result = await request_method("GET", "https://provider.example.test/search", stage="search")
+
+    assert result == ({"ok": True} if response_mode == "json" else "<feed>ok</feed>")
+    assert attempts == 2
+    assert delays == [expected_delay]
+
+
+@pytest.mark.parametrize(
+    "retry_after",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("", id="empty"),
+        pytest.param(" \t ", id="blank"),
+        pytest.param("unknown-delay", id="bad-date"),
+        pytest.param("Tue, 32 Nov 2023 22:13:25 GMT", id="out-of-range-date"),
+        pytest.param("Tue, 14 Nov 10000 22:13:25 GMT", id="out-of-range-year"),
+        pytest.param("Tue, 14 Nov 2023 22:13:25 +2500", id="out-of-range-zone"),
+        pytest.param("-1", id="negative"),
+        pytest.param("+1", id="leading-plus"),
+        pytest.param("1.5", id="fraction"),
+        pytest.param("NaN", id="nan"),
+        pytest.param("Infinity", id="infinity"),
+        pytest.param("1e2", id="exponential"),
+        pytest.param("١", id="non-ascii-digit"),
+        pytest.param("9" * 5000, id="non-finite-integer"),
+    ],
+)
+async def test_invalid_retry_after_falls_back_to_backoff(retry_after: str | None) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            headers = {} if retry_after is None else {b"Retry-After": retry_after.encode("utf-8")}
+            return httpx.Response(429, headers=headers, request=request)
+        return httpx.Response(200, json={"ok": True}, request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="fake",
+            sleep=sleep,
+        )
+        result = await executor.request_json(
+            "GET", "https://provider.example.test/search", stage="search"
+        )
+
+    assert result == {"ok": True}
+    assert attempts == 2
+    assert delays == [0.25]
 
 
 async def test_every_received_response_has_bounded_diagnostics() -> None:

@@ -35,7 +35,11 @@ from agent_search_gateway.orchestrators.paper import PaperSearchOrchestrator
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.protocol import parse_response_frame, send_request
-from agent_search_gateway.providers.contracts import PaperSearchHit
+from agent_search_gateway.providers.contracts import (
+    KeywordSearchProvider,
+    PaperSearchHit,
+    URLFetchCandidate,
+)
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
@@ -44,6 +48,8 @@ from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapt
 from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 from agent_search_gateway.providers.web.youcom import YouComAdapter
+from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
+from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import normalize_url
@@ -54,7 +60,13 @@ from tests.support.acceptance import (
     build_filtering_acceptance_runtime,
 )
 from tests.support.agent_search import RecordingRunner, paper_markdown, web_markdown
-from tests.support.fakes import FakeAcademicSearchProvider, FakeLLMClient
+from tests.support.fakes import (
+    FakeAcademicSearchProvider,
+    FakeKeywordSearchProvider,
+    FakeLLMClient,
+    FakeURLFetchProvider,
+)
+from tests.support.logging import structured_test_logger
 
 _DAEMON_TIMEOUT_SECONDS = 2.0
 
@@ -698,6 +710,324 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
     assert "signature=" not in logged and "token=" not in logged
     if not existing_body:
         assert "event=provider_selected" in logged and "stage=fetch" in logged
+
+
+async def test_zhihu_cli_selection_deduplicates_both_branch_urls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = "https://example.org/article"
+    branches = {
+        "/api/v1/content/zhihu_search": " HTTPS://EXAMPLE.org/article ",
+        "/api/v1/content/global_search": target,
+    }
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.host == "zhihu.example.test"
+        assert request.url.params["Query"] == "selected query"
+        requests.append(request.url.path)
+        return httpx.Response(
+            200,
+            json={
+                "Code": 0,
+                "Data": {
+                    "Items": [
+                        {
+                            "Url": branches[request.url.path],
+                            "Title": "Article",
+                            "ContentText": "Branch abstract",
+                        }
+                    ]
+                },
+            },
+        )
+
+    paths = RuntimePaths(
+        config_file=tmp_path / "config.toml",
+        socket_file=tmp_path.parent / "zhihu-cli.sock",
+        results_dir=tmp_path / "results",
+    )
+    store = URLStore()
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": FakeLLMClient("judge")},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    other = FakeKeywordSearchProvider("other")
+    other_search = AsyncMock(side_effect=AssertionError("non-selected provider was called"))
+    monkeypatch.setattr(other, "search", other_search)
+    logger, stream = structured_test_logger("acceptance.zhihu.cli")
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            zhihu: KeywordSearchProvider = ZhihuAdapter(
+                name="zhihu",
+                api_url="https://zhihu.example.test",
+                secret=SecretValue("synthetic-zhihu-key"),
+                http_executor=HttpJsonExecutor(
+                    client, RetryPolicy(1, 0, 1, 0), provider_name="zhihu"
+                ),
+            )
+            providers: list[KeywordSearchProvider] = [zhihu, other]
+            runtime = build_acceptance_runtime(paths)
+            runtime.search_orchestrator = SearchOrchestrator(
+                keyword_providers=providers,
+                llm_invocations=(),
+                quotas=ProviderQuotaManager(web_limits={"zhihu": 1, "other": 1}, llm_limits={}),
+                stages=stages,
+                store=store,
+                result_writer=ResultWriter(paths.results_dir),
+                logger=logger,
+            )
+            daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime)
+            async with _running_daemon(daemon):
+                result = _successful_path(
+                    await _filtering_cli(
+                        paths, ["keyword-search", "selected query", "--provider", "zhihu"]
+                    )
+                )
+                records = [json.loads(line) for line in result.read_text().splitlines()]
+                assert records == [{"url": target, "abstract": "Branch abstract"}]
+                assert set(records[0]) == {"url", "abstract"}
+                snapshot = store.get(normalize_url(target))
+                assert snapshot is not None
+                assert (snapshot.url, snapshot.abstract) == (target, "Branch abstract")
+                assert (snapshot.raw_content, snapshot.content) == ("", "")
+            assert runtime.close_calls == 1
+    finally:
+        for log_handler in logger.handlers[:]:
+            logger.removeHandler(log_handler)
+            log_handler.close()
+
+    assert not paths.socket_file.exists()
+    assert sorted(requests) == sorted(branches)
+    other_search.assert_not_awaited()
+    # Both candidates reach the real pipeline before its URL deduplication.
+    completed = [
+        line for line in stream.getvalue().splitlines() if "event=provider_completed " in line
+    ]
+    assert len(completed) == 1
+    assert {"provider=zhihu", "hits=2", "results=2"} <= set(completed[0].split())
+    assert "reason=duplicate" in stream.getvalue()
+
+
+@pytest.mark.parametrize("global_outcome", ["hits", "empty", "failure"])
+async def test_zhihu_terminal_event_matches_branch_outcomes(
+    tmp_path: Path, global_outcome: str
+) -> None:
+    target = "https://example.org/partial"
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET"
+        assert request.url.host == "zhihu.example.test"
+        assert request.url.params["Query"] == "branch outcomes"
+        branch = request.url.path.removeprefix("/api/v1/content/")
+        assert branch in {"zhihu_search", "global_search"}
+        requests.append(branch)
+        if branch == "zhihu_search" or global_outcome == "failure":
+            return httpx.Response(403, json={"message": "denied"})
+        return httpx.Response(
+            200,
+            json={
+                "Code": 0,
+                "Data": {
+                    "Items": (
+                        [{"Url": target, "Title": "Article", "ContentText": "Surviving abstract"}]
+                        if global_outcome == "hits"
+                        else []
+                    )
+                },
+            },
+        )
+
+    paths = RuntimePaths(
+        config_file=tmp_path / "config.toml",
+        socket_file=tmp_path.parent / "zhihu-events.sock",
+        results_dir=tmp_path / "results",
+    )
+    store = URLStore()
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": FakeLLMClient("judge")},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    log_file = tmp_path / "debug.log"
+    session = configure_debug_logging(log_file, stderr=io.StringIO())
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            zhihu: KeywordSearchProvider = ZhihuAdapter(
+                name="zhihu",
+                api_url="https://zhihu.example.test",
+                secret=SecretValue("synthetic-zhihu-key"),
+                http_executor=HttpJsonExecutor(
+                    client, RetryPolicy(1, 0, 1, 0), provider_name="zhihu"
+                ),
+            )
+            runtime = build_acceptance_runtime(paths)
+            runtime.search_orchestrator = SearchOrchestrator(
+                keyword_providers=[zhihu],
+                llm_invocations=(),
+                quotas=ProviderQuotaManager(web_limits={"zhihu": 1}, llm_limits={}),
+                stages=stages,
+                store=store,
+                result_writer=ResultWriter(paths.results_dir),
+            )
+            daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime)
+            async with _running_daemon(daemon):
+                response = await send_request(
+                    paths.socket_file, KeywordSearchRequest("branch outcomes", provider="zhihu")
+                )
+                if global_outcome == "failure":
+                    assert response == ErrorResponse(
+                        ErrorCode.ALL_PROVIDERS_FAILED,
+                        "All keyword search provider pipelines failed",
+                    )
+                    assert not list(paths.results_dir.glob("*.jsonl"))
+                else:
+                    assert isinstance(response, SuccessResponse)
+                    result = Path(response.text)
+                    assert result.is_file()
+                    records = [json.loads(line) for line in result.read_text().splitlines()]
+                    assert records == (
+                        [{"url": target, "abstract": "Surviving abstract"}]
+                        if global_outcome == "hits"
+                        else []
+                    )
+                assert (store.get(normalize_url(target)) is not None) == (global_outcome == "hits")
+            assert runtime.close_calls == 1
+    finally:
+        session.close()
+
+    assert not paths.socket_file.exists()
+    assert sorted(requests) == ["global_search", "zhihu_search"]
+    events = [
+        set(line.split())
+        for line in log_file.read_text().splitlines()
+        if "provider=zhihu" in line.split()
+    ]
+    # Physical HTTP failures are separate from the logical provider terminal outcome.
+    http_failures = [event for event in events if "event=http_failed" in event]
+    assert len(http_failures) == (2 if global_outcome == "failure" else 1)
+    failed_stages = {
+        token for event in http_failures for token in event if token.startswith("stage=")
+    }
+    assert failed_stages == (
+        {"stage=zhihu_search", "stage=global_search"}
+        if global_outcome == "failure"
+        else {"stage=zhihu_search"}
+    )
+    partials = [event for event in events if "event=provider_partial_failure" in event]
+    terminals = [
+        event for event in events if event & {"event=provider_completed", "event=provider_failed"}
+    ]
+    assert len(terminals) == 1
+    assert "stage=search" in terminals[0]
+    if global_outcome == "failure":
+        assert partials == []
+        assert "event=provider_failed" in terminals[0]
+    else:
+        assert len(partials) == 1
+        assert {"stage=search", "branch=zhihu_search"} <= partials[0]
+        assert "event=provider_completed" in terminals[0]
+        count = 1 if global_outcome == "hits" else 0
+        assert {f"hits={count}", f"results={count}"} <= terminals[0]
+
+
+async def test_yuanbao_summary_does_not_skip_url_fetch(tmp_path: Path) -> None:
+    target = "https://example.org/yuanbao"
+    summary = "SearchPro summary is not the fetched article"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url == "https://yuanbao.example.test/SearchPro"
+        assert json.loads(request.content) == {"Query": "article query"}
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "Response": {
+                    "RequestId": "synthetic-request-id",
+                    "Pages": [
+                        json.dumps(
+                            {
+                                "url": target,
+                                "title": "Article",
+                                "content": summary,
+                                "passage": "Secondary search passage",
+                            }
+                        )
+                    ],
+                }
+            },
+        )
+
+    store = URLStore()
+    quotas = ProviderQuotaManager(web_limits={"yuanbao": 1, "fetch": 1}, llm_limits={})
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": FakeLLMClient("judge")},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    fetch_provider = FakeURLFetchProvider(
+        "fetch",
+        URLFetchCandidate(raw_content="Raw body from Fetch", content="Article body from Fetch"),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        yuanbao: KeywordSearchProvider = YuanbaoAdapter(
+            name="yuanbao",
+            api_url="https://yuanbao.example.test",
+            secret=SecretValue("synthetic-yuanbao-key"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 1, 0), provider_name="yuanbao"
+            ),
+        )
+        search = SearchOrchestrator(
+            keyword_providers=[yuanbao],
+            llm_invocations=(),
+            quotas=quotas,
+            stages=stages,
+            store=store,
+            result_writer=ResultWriter(tmp_path / "results"),
+        )
+        result = Path(await search.keyword_search("article query", request_id="ab000003"))
+        assert [json.loads(line) for line in result.read_text().splitlines()] == [
+            {"url": target, "abstract": summary}
+        ]
+        url = normalize_url(target)
+        before = store.get(url)
+        assert before is not None
+        assert before.abstract == summary
+        assert (before.raw_content, before.content) == ("", "")
+        assert fetch_provider.calls == []
+
+        fetch = FetchOrchestrator(
+            store=store,
+            scheduler=FetchScheduler([fetch_provider], quotas, stages),
+            stages=stages,
+        )
+        assert await fetch.url_fetch(target) == "Article body from Fetch"
+        assert fetch_provider.calls == [url]
+        after = store.get(url)
+        assert after is not None
+        assert after.abstract == summary
+        assert (after.raw_content, after.content) == (
+            "Raw body from Fetch",
+            "Article body from Fetch",
+        )
+        assert after.content != summary
+
+    assert len(requests) == 1
 
 
 @pytest.mark.parametrize("kind", ["llm-web", "llm-paper", "agent-web", "agent-paper", "paper"])

@@ -39,7 +39,7 @@
 | Fetch 候选文本未通过 cheap_check 或 LLM judge | 现有 `FetchScheduler` | 不在 HTTP 层重试 | 既有候选拒绝和下一 Provider 逻辑 |
 | 任务取消或 Runtime 退出 | 既有异步边界 | 不自动重新发起 | 按现有取消/关闭路径传播，不吞掉取消 |
 
-**重要基线事实：** 当前 `HttpJsonExecutor` 对 408/429/5xx 使用全局重试，但**没有通用的 `Retry-After` 响应头解析**；本次不会把“尊重 Retry-After”写成已经实现的能力。后续若需要此特性，应单独在共享 executor 中设计并测试，不在四个适配器里各写一份。
+**基线与集成说明：** 原始实施基线 `eeeff82` 的共享执行器尚不解析 `Retry-After`。PR 准备时已合入 `upstream/main`（`08bdd2f`），因此当前四个适配器沿用共享 `HttpJsonExecutor` 对可重试 HTTP 状态的有效 `Retry-After` 等待支持；原有尝试次数预算保持不变。本次未在适配器中新增重试循环或单独解析响应头。
 
 ## 3. Provider-Specific Classification
 
@@ -152,7 +152,7 @@ open-webSearch 的局部引擎失败沿用已有 `provider_response_diagnostic`�
 - [x] 单条坏 Search 记录被跳过且有计数；有效记录不丢。
 - [x] 日志包含阶段、Provider、错误类别、尝试；敏感值和网页正文不泄漏。
 - [x] 单个 Fetch Provider 失败时下一 Provider 可以接手；不修改调用方协议。
-- [x] 不假设 `Retry-After` 已被执行器支持，不擅自改写全局重试语义。
+- [x] 四个适配器复用同步后共享执行器的 `Retry-After` 支持，不另行改写全局重试语义。
 - [x] 已启用 open_websearch 的错误 engines 值沿用 `TypeError` → `ConfigFailure`；禁用项行为未被改变。
 - [x] 局部引擎失败只使用既有安全标记/本地计数，保留有效命中；没有子引擎重试、假 `partial` 枚举或混用候选计数。
 - [x] 多引擎 HTTP 重试保留原列表和固定预算；Fetch 不携带 Search 参数。

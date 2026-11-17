@@ -3,7 +3,11 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from agent_search_gateway.providers.http import ResponseDiagnosticExtractor, ResponseInspector
+from agent_search_gateway.providers.http import (
+    RequestHeaders,
+    ResponseDiagnosticExtractor,
+    ResponseInspector,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,14 +32,15 @@ class RecordingJsonExecutor:
         url: str,
         *,
         stage: str,
-        headers: Mapping[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
+        request_headers = headers() if callable(headers) else headers
         self.requests.append(
-            RecordedRequest(method, url, stage, headers, params, json_body, "json")
+            RecordedRequest(method, url, stage, request_headers, params, json_body, "json")
         )
         return self._pop_response()
 
@@ -111,14 +116,15 @@ class RecordingHttpExecutor:
         url: str,
         *,
         stage: str,
-        headers: Mapping[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         params: Mapping[str, object] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
+        request_headers = headers() if callable(headers) else headers
         self.requests.append(
-            RecordedRequest(method, url, stage, headers, params, json_body, "json")
+            RecordedRequest(method, url, stage, request_headers, params, json_body, "json")
         )
         if not self._json_responses:
             raise AssertionError("unexpected JSON HTTP request")

@@ -24,6 +24,43 @@ def _fixture(name: str) -> object:
     return json.loads((FIXTURES / name).read_text())
 
 
+async def test_semantic_scholar_honors_shared_retry_after() -> None:
+    import httpx
+
+    from agent_search_gateway.models import RetryPolicy
+    from agent_search_gateway.providers.http import HttpJsonExecutor
+
+    requests: list[httpx.Request] = []
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, headers={"Retry-After": "5"}, request=request)
+        return httpx.Response(200, json=_fixture("search.json"), request=request)
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0.25, 2.0, 30.0),
+            provider_name="semantic_scholar",
+            sleep=sleep,
+        )
+        hits = await SemanticScholarProvider(executor).search("transformers")
+
+    assert len(requests) == 2
+    assert requests[0].url == requests[1].url
+    assert requests[0].url.params["query"] == "transformers"
+    assert delays == [5.0]
+    assert len(hits) == 2
+    assert hits[0].source_id == "649DEF34F8BE52C8B66281AF98AE884C09AEF38B"
+    assert hits[0].doi == "10.5555/3295222.3295349"
+    assert hits[0].authors == ("Ashish Vaswani", "Noam Shazeer")
+
+
 async def test_semantic_scholar_maps_graph_search_without_auth_when_omitted() -> None:
     executor = RecordingJsonExecutor([_fixture("search.json")])
     hits = await SemanticScholarProvider(executor).search("transformers")

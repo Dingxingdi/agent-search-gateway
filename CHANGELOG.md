@@ -12,6 +12,20 @@ The first public release is `v0.1.0`.
 
 - Add independent Search and Fetch providers for Doubao, You.com, Keenable, and an existing open-webSearch HTTP daemon. Include disabled configuration examples, credential and permission guidance, optional open-webSearch engine selection with a shared 50-result budget, safe partial-failure diagnostics, and opt-in live checks.
 
+## [0.3.0] - 2026-11-17
+
+### Added
+
+- Added search-only Zhihu (site and global search) and Tencent Yuanbao SearchPro providers through the existing Web provider configuration. Zhihu retains usable results if one branch fails and refreshes its authentication timestamp for each HTTP attempt; Yuanbao summaries remain search snippets, not fetched page bodies.
+
+### Fixed
+
+- Respect valid server `Retry-After` waits on retryable HTTP statuses in the shared request executor, including Semantic Scholar and arXiv requests. The configured attempt budget stays unchanged, and a server-directed wait may exceed the local backoff cap.
+
+### Known limitations
+
+- Bright Data can still occasionally return HTTP 200 followed by a JSON parsing failure; the cause remains unconfirmed and this change does not add retries for malformed successful responses.
+
 ## [0.2.2] - 2026-11-14
 
 ### Fixed

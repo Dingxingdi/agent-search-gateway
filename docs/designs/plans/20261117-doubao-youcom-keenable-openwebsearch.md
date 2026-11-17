@@ -14,12 +14,12 @@
 
 - 工作目录：`/home/agent/agent-search-gateway/.worktrees/add-doubao-youcom-keenable-openwebsearch-20261117`；沿用此工作树，不另建、不切换其他分支。
 - 计划基线：`4f606d2`（设计文档提交），代码基线为 `eeeff82`（v0.2.2）。以下位置以该基线为准，实施时按符号定位，不能依赖行号永远不变。
-- 本轮执行状态：Tasks 1–13 全部完成并经独立复查。README、示例配置、CHANGELOG 和测试均已落地；最终离线测试 2554 PASS / 12 SKIP / 0 FAIL，四家真实 Search/Fetch 共 8 PASS。具体证据见 4.3–4.4，合成 fixture 未被当作真实响应记录。
+- 本轮执行状态：Tasks 1–13 全部完成并经独立复查。原始实施结果见 4.3–4.4；准备贡献者 PR 并同步主线后的最终离线测试为 2778 PASS / 12 SKIP / 0 FAIL，四家真实 Search/Fetch 共 8 PASS，记录见 4.5。合成 fixture 未被当作真实响应记录。
 - 2026-11-17 修订：用户确认方案 A，允许在 Gateway 的 open_websearch Provider 配置中声明 `engines`；原先一律省略 engines 的要求由本版替代。三份 spec 已同步，其他三家范围不变。
 - 只新增 `doubao`、`youcom`、`keenable`、`open_websearch` 四个名称，均为 `ProviderCapabilities(search=True, fetch=True)`。前三家 vendor option 仅 `api_url` 且需要 Key；open_websearch 允许 `api_url`、可选 `engines`，不需要 Key。
 - CLI、领域对象、通用配置 schema、Runtime、FetchScheduler、URLStore 和全局重试策略沿用已有实现。engines 走现有 `options` → factory kwargs 通道，值在新 adapter 构造时验证；不在通用层增加 provider 特判。新适配器不建立自己的 client、配额、缓存、retry loop 或进程管理。
 - `open_websearch` 只请求已有 daemon；配置 engines 时发送列表及固定总预算 `limit=50`，省略时保持 query-only。Fetch 始终 url-only。仍不发送 searchMode 或抓取渲染策略，不枚举/发现/逐个调度引擎，不安装或启动 Node.js、Playwright、daemon。
-- 本工作树不含其他工作树中的元宝、知乎及 Retry-After 改动。不得为本计划合并、重置或修改那些分支。
+- 原始实施阶段以 `eeeff82` 为基线，不涉及其他工作树中的元宝、知乎及 Retry-After 改动。2026-11-17 准备贡献者 PR 时，为解决与目标主线的冲突，在本任务工作树合入了已发布的 `upstream/main`（`08bdd2f`，v0.3.0）；保留主线提供商与共享 Retry-After 行为，没有修改其他工作树或分支。
 - 规划依据：`writing-plans`、`test-driven-development` 及其测试反模式参考。每次只增加一个行为测试，完成 RED → GREEN → REFACTOR，再处理下面表格的下一行。
 
 ### 0.1 既有调用链与职责
@@ -58,7 +58,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 1. 认证或业务错误不能变成 `[]`。HTTP 非 2xx 仍交给共享 executor：408/429/5xx、timeout、transport 有限重试；400/401/402/403/404/422 终态。只在 HTTP 200 的已知错误形状上使用 adapter 的 `response_inspector`；不得抢先把普通 429/5xx 改成不可重试错误。
 2. Doubao 200 业务重试白名单：Search 为 `700429`、`10500`；Fetch 增加 `10502`。`Code` 为数字字符串、`CodeN` 为整数；只有一种存在时可按文档解析，二者都有且冲突/类型异常时不可重试。参数、Key、额度、订阅限制、`10413` 和未知码终态。
 3. You.com/Keenable 文档主要定义非 2xx 错误；把其已文档化错误形状放到 200 的 fixture 是**防御性合成用例**，不是声称官方常态返回 200 错误。未知业务错误均终态；不要直接信任外部任意 `retryable=true`。
-4. 当前全局策略不等于各家全部业务码策略。例如 You.com 的 `429/spend_cap_exceeded` 及 Keenable 某些 422/500 带额外业务语义；本轮按 spec 保留 HTTP 状态策略，不在适配器旁加 retry loop，也不声称已实现所有供应商的特殊重试建议。此基线未通用支持 Retry-After。
+4. 当前全局策略不等于各家全部业务码策略。例如 You.com 的 `429/spend_cap_exceeded` 及 Keenable 某些 422/500 带额外业务语义；本轮按 spec 保留 HTTP 状态策略，不在适配器旁加 retry loop，也不声称已实现所有供应商的特殊重试建议。原始基线未通用支持 Retry-After；此次 PR 同步主线后沿用其共享执行器实现。
 5. `response_inspector(response: httpx.Response) -> ProviderResponseFailure | None`；构造失败必须传 `provider_name`、`stage`、`status_code`、`retryable`、固定 `safe_reason`、安全 `diagnostics`。非 JSON 时返回 None，让 executor 抛 `ProtocolFailure`。schema 和空正文用 `common.failure` 返回 `ExecutionFailure`。
 6. `request_json` 在 `common.JsonRequester` 上没有 `params` 参数。Keenable 使用 `urllib.parse.urlencode({"url": str(url)})` 拼入 endpoint，沿用现有 GET 适配器风格，不为这一家扩大公共 Protocol。用带 query/fragment/中文/`&` 的目标验证编码不串参。
 7. 搜索逐条校验 URL 非空且可经 `normalize_url` 接受；只捕获 `ExecutionFailure` / `InputFailure` 等预期解析失败，保留原始 URL 给既有 staging。用 `CandidateCounts` 统计 `received/accepted/rejected/rejection_counts`，原因使用现有 `missing_url`、`invalid_record` 等白名单。不在 common 的 `Literal["url", "link"]` 中硬塞 Doubao `Url`；在 Doubao 本地判定原因。
@@ -1116,6 +1116,32 @@ env WEB_SEARCH_RUN_INTEGRATION=1 OPEN_WEBSEARCH_API_URL=http://127.0.0.1:3210 uv
 历史写入阻断已解除：用户明确授权使用 Bash 后，在指定工作树内按当前 SHA-256 和唯一锚点完成两份文档插入，保持原有文件模式与配置默认值。没有修改 LocalHost 检查规则，也没有保存真实凭据或原始供应商响应。README、配置示例、CHANGELOG 与文档测试均已完成；两份文档的实际差异通过独立审查。
 
 前序本地实施提交：`6e82899`、`264c957`、`9ac135f`、`3a8fdb4`、`6ca8737`、`ab664a2`、`ce6303c`、`9bb05a7`；文档收尾提交见 Git 历史。未开 PR、合并、发布或更改版本。实际生产修改限于四个新 adapter 和默认 registry 注册；公共 Runtime、编排、重试、quota 与存储未修改。
+
+### 4.5 贡献者 PR 集成验证（2026-11-17）
+
+为解决与目标主线的冲突，本工作树合入 `upstream/main` 的 `08bdd2f`（v0.3.0）。保留既有 20 家 Web Provider 的注册顺序，再追加本次四家；同时保留元宝、知乎与共享 Retry-After 的代码及测试。冲突解决限于注册列表、相关测试、README、示例配置及 CHANGELOG，未修改其他工作树或用户常用配置。四个新适配器实现保持不变。
+
+独立只读审查覆盖四家实现、离线测试、装配、诊断、配置和文档，未发现代码缺陷；同步后过时的 Retry-After 文档说明已修正。
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `uv sync --locked --all-groups` | PASS；锁文件未改动，工作树环境同步到主线版本 |
+| `uv run ruff format --check src tests scripts` | PASS；217 files already formatted |
+| `uv run ruff check .` | PASS |
+| `uv run mypy src tests scripts` | PASS；215 source files |
+| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -v` | 2778 PASS / 12 SKIP / 0 FAIL；15.04 s |
+| `uv run python scripts/build_docs.py` | PASS |
+
+真实检查沿用 4.3 的逐家入口，使用预置凭据和现有本机 3210 daemon。只对本次命令恢复代理并绕过本机回环，没有启动、重启或改写服务。
+
+| Provider | Search | Fetch | 尝试与 HTTP 状态 |
+| --- | --- | --- | --- |
+| doubao | PASS；10 条 | PASS；2060 字符 | 每阶段 1 次，均 HTTP 200 |
+| youcom | PASS；10 条 | PASS；1193 字符 | 每阶段 1 次，均 HTTP 200 |
+| keenable | PASS；10 条 | PASS；2663 字符 | 每阶段 1 次，均 HTTP 200 |
+| open_websearch | PASS；25 条 | PASS；2548 字符 | 每阶段 1 次，均 HTTP 200 |
+
+open-webSearch 请求 `bing` / `duckduckgo`，返回解析名单匹配、`partialFailures=0`；实际命中仅观察到 `bing`。本次验证 Search/Fetch 协议与返回内容有效，不据此宣称 DuckDuckGo 或示例中的其他引擎产生了有效命中。正文长度按 Python `len(str)` 计数，未保存凭据、原始响应或正文。
 
 ## 5. 规格覆盖与类型一致性自检
 
