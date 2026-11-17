@@ -10,7 +10,7 @@ The first public release is `v0.1.0`.
 
 ### Added
 
-- Added search-only Zhihu (site and global search) and Tencent Yuanbao SearchPro providers through the existing Web provider configuration. Zhihu retains usable results if one branch fails; Yuanbao summaries remain search snippets, not fetched page bodies.
+- Added search-only Zhihu (site and global search) and Tencent Yuanbao SearchPro providers through the existing Web provider configuration. Zhihu retains usable results if one branch fails and refreshes its authentication timestamp for each HTTP attempt; Yuanbao summaries remain search snippets, not fetched page bodies.
 
 ### Fixed
 

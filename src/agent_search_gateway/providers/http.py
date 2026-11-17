@@ -115,6 +115,7 @@ class ProviderResponseFailure(ExecutionFailure):
         self.safe_reason = safe_reason
 
 
+RequestHeaders = Mapping[str, str] | Callable[[], Mapping[str, str]]
 ResponseInspector = Callable[[httpx.Response], ProviderResponseFailure | None]
 ResponseDiagnosticExtractor = Callable[[httpx.Response], Mapping[str, object]]
 
@@ -145,7 +146,7 @@ class HttpJsonExecutor:
         url: str,
         *,
         stage: str,
-        headers: Mapping[str, str] | None = None,
+        headers: RequestHeaders | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
@@ -221,7 +222,7 @@ class HttpJsonExecutor:
         url: str,
         *,
         stage: str,
-        headers: Mapping[str, str] | None,
+        headers: RequestHeaders | None,
         params: Mapping[str, Any] | None,
         json_body: object | None,
         response_inspector: ResponseInspector | None = None,
@@ -315,7 +316,7 @@ class HttpJsonExecutor:
             response = await self._client.request(
                 method,
                 url,
-                headers=headers,
+                headers=headers() if callable(headers) else headers,
                 params=params,
                 json=json_body,
                 timeout=self._retry_policy.request_timeout_seconds,

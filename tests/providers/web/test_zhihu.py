@@ -332,6 +332,55 @@ async def test_zhihu_retry_after_sleep_cancellation_stops_later_requests(
     )
 
 
+@pytest.mark.parametrize("retrying_branch", _BRANCHES)
+async def test_zhihu_refreshes_timestamp_after_retry_after(
+    retrying_branch: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    now = [1_800_000_000.75]
+    monkeypatch.setattr("agent_search_gateway.providers.web.zhihu.time.time", lambda: now[0])
+    query = "中文 & original /?"
+    attempts = dict.fromkeys(_BRANCHES, 0)
+    timestamps: list[int] = []
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+        now[0] += delay
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        branch = request.url.path.rsplit("/", 1)[-1]
+        assert request.url.params.multi_items() == [("Query", query)]
+        assert request.headers["Authorization"] == "Bearer synthetic-zhihu-key"
+        attempts[branch] += 1
+        if branch == retrying_branch:
+            timestamps.append(int(request.headers["X-Request-Timestamp"]))
+            if attempts[branch] == 1:
+                return httpx.Response(429, headers={"Retry-After": "900"})
+        return httpx.Response(200, json=_fixture(branch))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = ZhihuAdapter(
+            name="zhihu",
+            secret=SecretValue("synthetic-zhihu-key"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(2, 0.1, 1, 5), provider_name="zhihu", sleep=sleep
+            ),
+        )
+        hits = await adapter.search(query)
+
+    assert timestamps == [1_800_000_000, 1_800_000_900]
+    assert sleeps == [900.0]
+    assert attempts == {branch: 2 if branch == retrying_branch else 1 for branch in _BRANCHES}
+    assert [hit.title for hit in hits] == ["示例标题", "全网示例标题"]
+    events = [getattr(record, "gateway_event", None) for record in caplog.records]
+    assert events.count("http_retrying") == 1
+    assert "provider_partial_failure" not in events
+    assert "http_failed" not in events
+
+
 async def test_zhihu_refreshes_timestamp_immediately_before_each_branch_and_search(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

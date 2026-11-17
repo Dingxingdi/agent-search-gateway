@@ -124,16 +124,19 @@ class ZhihuAdapter:
         return hits
 
     async def _search_branch(self, query: str, branch: str) -> list[KeywordSearchHit]:
+        def request_headers() -> dict[str, str]:
+            return {
+                "Authorization": f"Bearer {self._secret.reveal()}",
+                "X-Request-Timestamp": str(int(time.time())),
+                "Content-Type": "application/json",
+            }
+
         url = endpoint(self._api_url, f"/api/v1/content/{branch}")
         payload = await self._http.request_json(
             "GET",
             f"{url}?{urlencode({'Query': query})}",
             stage=branch,
-            headers={
-                "Authorization": f"Bearer {self._secret.reveal()}",
-                "X-Request-Timestamp": str(int(time.time())),
-                "Content-Type": "application/json",
-            },
+            headers=request_headers,
             response_diagnostics=_response_diagnostics,
         )
         root = require_object(payload, self.name, branch, "response")

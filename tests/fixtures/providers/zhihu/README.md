@@ -13,7 +13,8 @@ Official sources:
 The rendered search pages were unreadable through web lookup, so the website's
 public document feed was retrieved directly without authentication, following
 the feed reference in its public JavaScript. No authenticated search requests
-were made. All fixtures are **doc-synthesized**, not sanitized observed responses.
+were made for the original fixture construction on 2026-11-16. All fixtures are
+**doc-synthesized**, not sanitized observed responses.
 Text, identifiers, dates, counts, scores and example.com/example.org URLs are
 synthetic. No real account/author, key, request identifier value or raw search
 response is retained.
@@ -34,7 +35,8 @@ response is retained.
 
 Both endpoints document Authorization: Bearer <Access Secret>,
 X-Request-Timestamp in Unix seconds, and Content-Type: application/json.
-A timestamp is generated per branch request; no headers are stored here.
+A timestamp is generated immediately before each physical HTTP attempt, including
+retries; no headers are stored here.
 Success Code was independently checked in both search examples, never inferred
 from quota documentation. String "0" and boolean false are not the documented
 numeric success value.
@@ -65,3 +67,25 @@ No speculative aliases are represented.
 - The published global example includes unescaped prose quotes and trailing
   commas. These fixtures are valid JSON synthesized from the field tables and
   intended example structure, not byte copies.
+
+## Live timestamp validation (2026-11-17)
+
+A separate controlled check used the same query and credential with current and
+900-second-old timestamps against each search endpoint. Only HTTP status,
+business code and item count were retained; no response bodies or credentials
+were saved. The observed results were:
+
+| Endpoint | Timestamp age | HTTP status | Code | Item count |
+| --- | --- | --- | --- | --- |
+| zhihu_search | Current | 200 | 0 | 10 |
+| zhihu_search | 900 seconds | 200 | 20001 | No successful result list |
+| global_search | Current | 200 | 0 | 10 |
+| global_search | 900 seconds | 200 | 20001 | No successful result list |
+
+The [official quota documentation](https://developer.zhihu.com/docs?key=quota)
+explicitly describes a ten-minute timestamp window. The search endpoints were
+checked independently; their rejection of the old timestamp is observed
+behavior, not an inferred search error-code catalogue or an exact measurement
+of the search cutoff. A long retry wait therefore requires refreshing the
+request timestamp on the next physical attempt. These checks do not change the
+doc-synthesized provenance of the committed JSON fixtures.
