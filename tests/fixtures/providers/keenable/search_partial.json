@@ -1,0 +1,49 @@
+{
+  "results": [
+    {
+      "url": "https://EXAMPLE.com/good#x",
+      "title": "Good",
+      "snippet": "kept"
+    },
+    null,
+    {},
+    {
+      "url": null
+    },
+    {
+      "url": " "
+    },
+    {
+      "url": 4
+    },
+    {
+      "url": "bad",
+      "title": "Bad"
+    },
+    {
+      "url": "javascript:bad",
+      "title": "Bad"
+    },
+    {
+      "url": "https://example.com/a"
+    },
+    {
+      "url": "https://example.com/a",
+      "title": null
+    },
+    {
+      "url": "https://example.com/a",
+      "title": 4
+    },
+    {
+      "url": "https://example.com/a",
+      "title": "A",
+      "snippet": []
+    },
+    {
+      "url": "https://example.com/a",
+      "title": "A",
+      "snippet": 4
+    }
+  ]
+}

@@ -1,0 +1,8 @@
+{
+  "error": "PRIVATE_ERROR",
+  "message": "PRIVATE_MESSAGE",
+  "type": "PRIVATE_TYPE",
+  "code": "invalid_api_key",
+  "fix": "PRIVATE_FIX",
+  "retryable": true
+}

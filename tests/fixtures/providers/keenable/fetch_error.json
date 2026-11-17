@@ -1,0 +1,7 @@
+{
+  "error": "Synthetic extraction failure",
+  "code": "content_not_extracted",
+  "retryable": true,
+  "message": "Synthetic explanation",
+  "fix": "Synthetic suggestion"
+}

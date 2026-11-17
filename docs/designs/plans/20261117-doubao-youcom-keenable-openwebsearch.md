@@ -366,7 +366,7 @@ Fetch成功解析与diagnostics使用同一判定，避免一处array一处objec
 - Create: `tests/fixtures/providers/keenable/invalid_json.txt`
 - Read: `src/agent_search_gateway/providers/web/common.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_search_maps_keyed_results`：根对象含 results 两项，断言 url/title/snippet，description 即使出现也不覆盖 snippet。逐次添加：
 
@@ -379,7 +379,7 @@ Fetch成功解析与diagnostics使用同一判定，避免一处array一处objec
 | `test_search_rejects_embedded_keyed_error` | 把已文档化 flat error/code/message 对象置于200（防御性合成） → ProviderResponseFailure，不当零结果。 |
 | `test_search_never_falls_back_to_public_endpoint` | 401/402之后不出现 /public 请求，无第二套请求或Key替换。 |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_keenable.py -k search -v
@@ -387,7 +387,7 @@ uv run pytest tests/providers/web/test_keenable.py -k search -v
 
 预期：请求路径、结果或失败分类 assertion FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 KeenableAdapter(*, name, api_url=官方根地址, secret, http_executor: JsonRequester)
@@ -403,7 +403,7 @@ inspector
 
 Keenable 官方 title 必填；以单条字段校验落实。snippet 可缺失，类型错误拒绝该条。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_keenable.py -v
@@ -412,7 +412,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：目标与相关回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 本地复用 error 形状/鉴权，不复制共享 retry。重跑 Step 4。
 
@@ -427,7 +427,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/keenable/fetch_error.json`
 - Read: `src/agent_search_gateway/providers/web/scraperapi.py`（GET URL 编码模式参考）、`src/agent_search_gateway/providers/web/common.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_fetch_encodes_target_url_once`：目标包含 query、`&`、`+`、中文及 fragment；检查 GET request 的 `httpx.URL(request.url).params["url"] == str(target)`，只存在 url 查询参数，json_body=None。随后依次测试：
 
@@ -437,7 +437,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - `test_fetch_rejects_missing_or_invalid_content`：缺失/null/空白/非字符串分类准确；error对象不能当正文。
 - 402/422一次终态、429/500受全局尝试次数限制（与Task11共同覆盖，勿重复两套相同测试）。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_keenable.py -k fetch -v
@@ -445,7 +445,7 @@ uv run pytest tests/providers/web/test_keenable.py -k fetch -v
 
 预期：编码、正文或端点断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 fetch(target)
@@ -462,7 +462,7 @@ _parse_fetch
 
 不要求Markdown必须有标题符号；正文格式检查保持上游文本与现有候选判定，不引入Markdown parser。完整目标URL不能进入异常或日志。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_keenable.py -v
@@ -471,7 +471,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：编码 roundtrip 与搜索/抓取回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只抽本供应商的解析小函数；保持 JsonRequester/HttpRequester 类型不变。重跑 Step 4。
 
