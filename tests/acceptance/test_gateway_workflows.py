@@ -1007,9 +1007,10 @@ async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -
 
 @pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
 async def test_new_provider_and_existing_provider_share_url_deduplication(
-    tmp_path: Path, name: str
+    tmp_path: Path, name: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     http = _NewWebHTTP(name)
+    caplog.set_level("DEBUG")
     async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
         workflow = _NewWebWorkflow(tmp_path, client, name)
         records = await workflow.search()
@@ -1019,6 +1020,23 @@ async def test_new_provider_and_existing_provider_share_url_deduplication(
         assert snapshot is not None and snapshot.abstract == records[0]["abstract"]
         assert snapshot.raw_content == snapshot.content == ""
         assert sorted(http.calls) == sorted([(name, "search"), ("tavily", "search")])
+        assert [response.status_code for response in http.responses] == [200, 200]
+        summaries = [
+            getattr(record, "gateway_fields", {})
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+            and getattr(record, "gateway_fields", {}).get("phase") == "adapter"
+        ]
+        assert sorted((item["provider"], item["accepted"]) for item in summaries) == sorted(
+            [(name, 1), ("tavily", 1)]
+        )
+        duplicates = [
+            getattr(record, "gateway_fields", {})
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "candidate_rejected"
+            and getattr(record, "gateway_fields", {}).get("reason") == "duplicate"
+        ]
+        assert len(duplicates) == 1
         assert not workflow.llm.json_calls and not workflow.llm.text_calls
 
 
