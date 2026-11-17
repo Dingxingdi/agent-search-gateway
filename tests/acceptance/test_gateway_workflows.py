@@ -42,7 +42,12 @@ from agent_search_gateway.providers.contracts import (
 )
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
+from agent_search_gateway.providers.web.doubao import DoubaoAdapter
+from agent_search_gateway.providers.web.keenable import KeenableAdapter
+from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
+from agent_search_gateway.providers.web.tavily import TavilyAdapter
+from agent_search_gateway.providers.web.youcom import YouComAdapter
 from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
 from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from agent_search_gateway.result_writer import ResultWriter
@@ -1087,3 +1092,347 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
     assert len(records) == 1 and records[0]["url"] == wrapper
     assert store.get(normalize_url(wrapper)) is not None
     assert store.get(normalize_url(target)) is None
+
+
+_NEW_WEB_PROVIDERS = ("doubao", "youcom", "keenable", "open_websearch")
+_NEW_WEB_TARGET = "https://example.org/new-provider-article"
+_NEW_WEB_BODY = "Article body returned by Tavily fallback."
+
+
+class _NewWebWorkflow:
+    """Exercise real adapters and shared workflows with only external I/O replaced."""
+
+    def __init__(self, tmp_path: Path, client: httpx.AsyncClient, name: str) -> None:
+        self.store = URLStore()
+        self.quotas = ProviderQuotaManager(web_limits={name: 1, "tavily": 1}, llm_limits={})
+        self.llm = FakeLLMClient("llm", text_result=_NEW_WEB_BODY)
+        self.stages = LLMStages(
+            {"llm": self.llm},
+            judge=LLMInvocation("llm", "judge"),
+            safety=LLMInvocation("llm", "safety"),
+            content_clean=LLMInvocation("llm", "clean"),
+            focus_summary=LLMInvocation("llm", "focus"),
+        )
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 1, 0), provider_name=name)
+        api_url = f"https://{name}.example.test"
+        provider: DoubaoAdapter | YouComAdapter | KeenableAdapter | OpenWebSearchAdapter
+        if name == "open_websearch":
+            provider = OpenWebSearchAdapter(
+                name=name, api_url=api_url, http_executor=executor, engines=["bing", "duckduckgo"]
+            )
+        else:
+            adapters: dict[
+                str, type[DoubaoAdapter] | type[YouComAdapter] | type[KeenableAdapter]
+            ] = {
+                "doubao": DoubaoAdapter,
+                "youcom": YouComAdapter,
+                "keenable": KeenableAdapter,
+            }
+            adapter = adapters[name]
+            provider = adapter(
+                name=name,
+                api_url=api_url,
+                secret=SecretValue("test-credential"),
+                http_executor=executor,
+            )
+        self.provider = provider
+        tavily = TavilyAdapter(
+            name="tavily",
+            api_url="https://tavily.example.test",
+            secret=SecretValue("test-credential"),
+            http_executor=HttpJsonExecutor(client, RetryPolicy(1, 0, 1, 0), provider_name="tavily"),
+        )
+        self.search_orchestrator = SearchOrchestrator(
+            keyword_providers=[provider, tavily],
+            llm_invocations=(),
+            quotas=self.quotas,
+            stages=self.stages,
+            store=self.store,
+            result_writer=ResultWriter(tmp_path / "results"),
+        )
+        self.scheduler = FetchScheduler([provider, tavily], self.quotas, self.stages)
+        self.fetch_orchestrator = FetchOrchestrator(
+            store=self.store, scheduler=self.scheduler, stages=self.stages
+        )
+
+    async def search(self, provider: str | None = None) -> list[dict[str, str]]:
+        path = Path(
+            await self.search_orchestrator.keyword_search(
+                "article query", request_id="ab000012", provider=provider
+            )
+        )
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _new_web_search_payload(name: str) -> object:
+    if name == "doubao":
+        return {
+            "Result": {
+                "WebResults": [
+                    {"Url": _NEW_WEB_TARGET, "Title": "Article", "Summary": "New abstract"}
+                ]
+            }
+        }
+    if name == "youcom":
+        return {
+            "results": {
+                "web": [{"url": _NEW_WEB_TARGET, "title": "Article", "snippets": ["New abstract"]}]
+            }
+        }
+    if name == "keenable":
+        return {
+            "results": [{"url": _NEW_WEB_TARGET, "title": "Article", "snippet": "New abstract"}]
+        }
+    assert name == "open_websearch"
+    return {
+        "status": "ok",
+        "data": {
+            "results": [{"url": _NEW_WEB_TARGET, "title": "Article", "description": "New abstract"}]
+        },
+    }
+
+
+class _NewWebHTTP:
+    def __init__(self, name: str, *, search_failure: bool = False) -> None:
+        self.name = name
+        self.search_failure = search_failure
+        self.calls: list[tuple[str, str]] = []
+        self.responses: list[httpx.Response] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        response = self._respond(request)
+        self.responses.append(response)
+        return response
+
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        name = request.url.host.removesuffix(".example.test") if request.url.host else ""
+        assert name in {self.name, "tavily"}
+        search = request.url.path in {"/search", "/v1/search", "/web_search"}
+        stage = "search" if search else "fetch"
+        self.calls.append((name, stage))
+        if search:
+            assert request.method == "POST"
+            if name == self.name:
+                if self.search_failure:
+                    return httpx.Response(401, json={"error": "Unauthorized"})
+                return httpx.Response(200, json=_new_web_search_payload(name))
+            return httpx.Response(
+                200,
+                json={
+                    "results": [
+                        {"url": _NEW_WEB_TARGET, "title": "Article", "content": "Old abstract"}
+                    ]
+                },
+            )
+        if name == "tavily":
+            assert self.calls[-2] == (self.name, "fetch")
+            assert request.method == "POST" and request.url.path == "/extract"
+            assert json.loads(request.content) == {"urls": [_NEW_WEB_TARGET]}
+            return httpx.Response(
+                200, json={"results": [{"url": _NEW_WEB_TARGET, "raw_content": _NEW_WEB_BODY}]}
+            )
+        # Every first Fetch reaches the real adapter and fails at HTTP 200.
+        if name == "doubao":
+            assert request.method == "POST" and request.url.path == "/fetch"
+            assert json.loads(request.content) == {"Url": _NEW_WEB_TARGET}
+            return httpx.Response(200, json={"ResponseMetadata": {"Error": {"Code": "10413"}}})
+        if name == "youcom":
+            assert request.method == "POST" and request.url.path == "/v1/contents"
+            assert json.loads(request.content)["urls"] == [_NEW_WEB_TARGET]
+            return httpx.Response(200, json=[{"url": _NEW_WEB_TARGET, "markdown": "  "}])
+        if name == "keenable":
+            assert request.method == "GET" and request.url.path == "/v1/fetch"
+            assert request.url.params["url"] == _NEW_WEB_TARGET
+            return httpx.Response(200, json={"url": _NEW_WEB_TARGET, "content": ""})
+        assert request.method == "POST" and request.url.path == "/fetch-web"
+        assert json.loads(request.content) == {"url": _NEW_WEB_TARGET}
+        return httpx.Response(200, json={"status": "ok", "data": {"content": ""}})
+
+
+@pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
+async def test_new_provider_search_admits_url_for_fetch_fallback(tmp_path: Path, name: str) -> None:
+    http = _NewWebHTTP(name)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, name)
+        records = await workflow.search(provider=name)
+        assert records == [{"url": _NEW_WEB_TARGET, "abstract": "New abstract"}]
+        snapshot = workflow.store.get(normalize_url(records[0]["url"]))
+        assert snapshot is not None
+        assert snapshot.url == _NEW_WEB_TARGET
+        assert (snapshot.raw_content, snapshot.content) == ("", "")
+        assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == _NEW_WEB_BODY
+        after = workflow.store.get(normalize_url(records[0]["url"]))
+        assert after is not None and after.available
+        assert (after.url, after.abstract, after.raw_content, after.content) == (
+            records[0]["url"],
+            records[0]["abstract"],
+            _NEW_WEB_BODY,
+            _NEW_WEB_BODY,
+        )
+        assert http.calls == [(name, "search"), (name, "fetch"), ("tavily", "fetch")]
+        assert [response.status_code for response in http.responses] == [200, 200, 200]
+        assert workflow.scheduler.provider_names == (name, "tavily")
+        assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
+        assert [call[0].model for call in workflow.llm.text_calls] == ["clean"]
+        assert _NEW_WEB_BODY in workflow.llm.text_calls[0][1][-1]["content"]
+        assert workflow.quotas.get_web(name).max_observed_in_use == 1
+        assert workflow.quotas.get_web("tavily").max_observed_in_use == 1
+
+
+@pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
+async def test_new_provider_failure_does_not_discard_other_search_results(
+    tmp_path: Path, name: str
+) -> None:
+    http = _NewWebHTTP(name, search_failure=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, name)
+        assert await workflow.search() == [{"url": _NEW_WEB_TARGET, "abstract": "Old abstract"}]
+        snapshot = workflow.store.get(normalize_url(_NEW_WEB_TARGET))
+        assert snapshot is not None and snapshot.abstract == "Old abstract"
+        assert sorted(http.calls) == sorted([(name, "search"), ("tavily", "search")])
+        assert not workflow.llm.text_calls
+
+
+@pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
+async def test_new_provider_cannot_fetch_unadmitted_url(tmp_path: Path, name: str) -> None:
+    http = _NewWebHTTP(name)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, name)
+        await workflow.search(provider=name)
+        before = list(http.calls)
+        unknown = "https://example.org/unadmitted"
+        with pytest.raises(InputFailure) as error:
+            await workflow.fetch_orchestrator.url_fetch(unknown)
+        assert error.value.code is ErrorCode.URL_NOT_ADMITTED
+        assert http.calls == before == [(name, "search")]
+        assert workflow.store.get(normalize_url(unknown)) is None
+        assert not workflow.llm.json_calls and not workflow.llm.text_calls
+
+
+@pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
+async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -> None:
+    http = _NewWebHTTP(name)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, name)
+        normalized = normalize_url(_NEW_WEB_TARGET)
+        workflow.store.admit(
+            normalized, "Existing abstract", raw_content="Existing raw", content="Existing content"
+        )
+        records = await workflow.search(provider=name)
+        assert records == [{"url": _NEW_WEB_TARGET, "abstract": "Existing abstract"}]
+        assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == "Existing content"
+        snapshot = workflow.store.get(normalized)
+        assert snapshot is not None and snapshot.available
+        assert (snapshot.url, snapshot.abstract, snapshot.raw_content, snapshot.content) == (
+            _NEW_WEB_TARGET,
+            "Existing abstract",
+            "Existing raw",
+            "Existing content",
+        )
+        assert http.calls == [(name, "search")]
+        assert [call[0].model for call in workflow.llm.json_calls] == ["safety"]
+        assert not workflow.llm.text_calls
+        assert workflow.quotas.get_web("tavily").max_observed_in_use == 0
+
+
+@pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
+async def test_new_provider_and_existing_provider_share_url_deduplication(
+    tmp_path: Path, name: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    http = _NewWebHTTP(name)
+    caplog.set_level("DEBUG")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, name)
+        records = await workflow.search()
+        assert len(records) == 1 and records[0]["url"] == _NEW_WEB_TARGET
+        assert records[0]["abstract"] in {"New abstract", "Old abstract"}
+        snapshot = workflow.store.get(normalize_url(_NEW_WEB_TARGET))
+        assert snapshot is not None and snapshot.abstract == records[0]["abstract"]
+        assert snapshot.raw_content == snapshot.content == ""
+        assert sorted(http.calls) == sorted([(name, "search"), ("tavily", "search")])
+        assert [response.status_code for response in http.responses] == [200, 200]
+        summaries = [
+            getattr(record, "gateway_fields", {})
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+            and getattr(record, "gateway_fields", {}).get("phase") == "adapter"
+        ]
+        assert sorted((item["provider"], item["accepted"]) for item in summaries) == sorted(
+            [(name, 1), ("tavily", 1)]
+        )
+        duplicates = [
+            getattr(record, "gateway_fields", {})
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == "candidate_rejected"
+            and getattr(record, "gateway_fields", {}).get("reason") == "duplicate"
+        ]
+        assert len(duplicates) == 1
+        assert not workflow.llm.json_calls and not workflow.llm.text_calls
+
+
+async def test_new_provider_open_websearch_multi_engine_results_use_existing_staging(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[httpx.Request] = []
+    second = "https://example.org/second-engine-article"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.url.host == "open_websearch.example.test"
+        assert request.method == "POST" and request.url.path == "/search"
+        assert json.loads(request.content) == {
+            "query": "article query",
+            "engines": ["bing", "duckduckgo"],
+            "limit": 50,
+        }
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "data": {
+                    "results": [
+                        {
+                            "url": _NEW_WEB_TARGET,
+                            "title": "Article",
+                            "description": "Bing abstract",
+                            "engine": "bing",
+                        },
+                        {
+                            "url": _NEW_WEB_TARGET,
+                            "title": "Duplicate",
+                            "description": "Duplicate abstract",
+                            "engine": "duckduckgo",
+                        },
+                        {
+                            "url": second,
+                            "title": "Second article",
+                            "description": "DuckDuckGo abstract",
+                            "engine": "duckduckgo",
+                        },
+                    ]
+                },
+            },
+        )
+
+    caplog.set_level("DEBUG")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, "open_websearch")
+        records = await workflow.search(provider="open_websearch")
+        assert records == [
+            {"url": _NEW_WEB_TARGET, "abstract": "Bing abstract"},
+            {"url": second, "abstract": "DuckDuckGo abstract"},
+        ]
+        for record in records:
+            snapshot = workflow.store.get(normalize_url(record["url"]))
+            assert snapshot is not None and snapshot.abstract == record["abstract"]
+            assert snapshot.raw_content == snapshot.content == ""
+        assert len(calls) == 1
+        assert workflow.provider.name == "open_websearch"
+        assert workflow.scheduler.provider_names == ("open_websearch", "tavily")
+        assert workflow.quotas.get_web("open_websearch").max_observed_in_use == 1
+        assert workflow.quotas.get_web("tavily").max_observed_in_use == 0
+        fields = [getattr(record, "gateway_fields", {}) for record in caplog.records]
+        assert any(item.get("reason") == "duplicate" for item in fields)
+        assert any(item.get("phase") == "staging" for item in fields)
+        identities = {item["provider"] for item in fields if "provider" in item}
+        assert identities == {"open_websearch"}

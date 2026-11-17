@@ -1,0 +1,17 @@
+{
+  "results": [
+    {
+      "url": "https://EXAMPLE.com/one#section",
+      "title": "First page",
+      "snippet": "first",
+      "description": "deprecated",
+      "content": "ignored",
+      "raw_content": "ignored"
+    },
+    {
+      "url": "https://example.com/two",
+      "title": "Second page",
+      "snippet": "second"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "status": "ok",
+  "data": {
+    "engines": [
+      "bing",
+      "duckduckgo"
+    ],
+    "results": [],
+    "partialFailures": [
+      {
+        "engine": "bing",
+        "code": "search_failed",
+        "message": "Synthetic failure"
+      },
+      {
+        "engine": "duckduckgo",
+        "code": "search_failed",
+        "message": "Synthetic failure"
+      }
+    ]
+  }
+}

@@ -241,6 +241,150 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
     assert set(action.choices) == documented
 
 
+def test_new_web_provider_examples_are_disabled_and_complete() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    expected = {
+        "doubao": ("https://open.feedcoopapi.com/search_api", "DOUBAO_" + "API_KEY"),
+        "youcom": ("https://ydc-index.io", "YDC_" + "API_KEY"),
+        "keenable": ("https://api.keenable.ai", "KEENABLE_" + "API_KEY"),
+        "open_websearch": ("http://127.0.0.1:3210", None),
+    }
+    assert set(expected) <= set(web)
+    for name, (root, key_env) in expected.items():
+        table = web[name]
+        assert isinstance(table, dict)
+        assert table["enable_search"] is False
+        assert table["enable_fetch"] is False
+        assert table["api_url"] == root
+        if key_env is None:
+            assert "api_key_env" not in table
+        else:
+            assert table["api_key_env"] == key_env
+
+
+@pytest.mark.parametrize("name", ["doubao", "youcom", "keenable", "open_websearch"])
+def test_new_web_example_resolves_without_new_credentials_and_can_be_enabled(name: str) -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    assert name in web
+    environment = _stub_environment(data)
+    for variable in ("DOUBAO_" + "API_KEY", "YDC_" + "API_KEY", "KEENABLE_" + "API_KEY"):
+        environment.pop(variable, None)
+    resolved = resolve_config(data, build_default_registry(), environment)
+    configured = next(item for item in resolved.web.providers if item.name == name)
+    assert configured.secret is None
+    assert configured.api_key_env is None
+    table = web[name]
+    assert isinstance(table, dict)
+    table["enable_search"] = True
+    table["enable_fetch"] = True
+    data["web_providers"] = {name: table}
+    key_env = table.get("api_key_env")
+    if isinstance(key_env, str):
+        environment[key_env] = "x"
+    enabled = resolve_config(data, build_default_registry(), environment)
+    [configured] = enabled.web.providers
+    assert configured.enable_search and configured.enable_fetch
+    assert (configured.secret is not None) is (name != "open_websearch")
+    assert configured.api_key_env == key_env
+
+
+def test_readme_documents_new_web_provider_configuration_contracts() -> None:
+    readme = (_ROOT / "README.md").read_text(encoding="utf-8")
+    for name in ("Doubao", "You.com", "Keenable", "open-webSearch"):
+        assert f"| {name} | yes | yes |" in readme
+    for token in (
+        "https://open.feedcoopapi.com/search_api",
+        "https://ydc-index.io",
+        "https://api.keenable.ai",
+        "http://127.0.0.1:3210",
+        "DOUBAO_" + "API_KEY",
+        "YDC_" + "API_KEY",
+        "KEENABLE_" + "API_KEY",
+        "[web_providers.open_websearch]",
+        "engines",
+        "ALLOWED_SEARCH_ENGINES",
+        "DEFAULT_SEARCH_ENGINE",
+        "partialFailures",
+    ):
+        assert token in readme
+
+
+@pytest.mark.parametrize("explicit", [True, False], ids=["explicit-engines", "daemon-default"])
+async def test_open_websearch_example_has_explicit_multi_engine_list(
+    tmp_path: Path, explicit: bool
+) -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    assert "open_websearch" in web
+    table = web["open_websearch"]
+    assert isinstance(table, dict)
+    engines = [
+        "bing",
+        "duckduckgo",
+        "brave",
+        "startpage",
+        "baidu",
+        "sogou",
+        "exa",
+        "keenable",
+        "csdn",
+        "juejin",
+        "hackernews",
+    ]
+    assert table["engines"] == engines
+    assert len(engines) == len(set(engines))
+    assert table["enable_search"] is False and table["enable_fetch"] is False
+    if not explicit:
+        table.pop("engines")
+    table["enable_search"] = True
+    data["web_providers"] = {"open_websearch": table}
+    resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "status": "ok",
+                "data": {
+                    "results": [
+                        {
+                            "url": "https://example.com/docs",
+                            "title": "Docs",
+                            "description": "Reference",
+                        }
+                    ]
+                },
+            },
+        )
+
+    def client_factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    runtime = Runtime.build(
+        resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
+    )
+    try:
+        [provider] = runtime.web_search_providers
+        hits = await provider.search("documentation")
+        assert [hit.url for hit in hits] == ["https://example.com/docs"]
+    finally:
+        await runtime.aclose()
+    [request] = requests
+    assert request.method == "POST"
+    assert request.url == httpx.URL("http://127.0.0.1:3210/search")
+    expected: dict[str, object] = {"query": "documentation"}
+    if explicit:
+        expected.update(engines=engines, limit=50)
+    assert json.loads(request.content) == expected
+
+
 def test_example_timeout_does_not_change_runtime_default() -> None:
     data = load_toml(_ROOT / "config.example.toml")
     assert resolve_retry_policy(data).request_timeout_seconds == 180.0
@@ -266,6 +410,10 @@ def test_example_provider_selection_omits_only_requested_templates() -> None:
         "scrapingant",
         "serpapi",
         "jina",
+        "doubao",
+        "youcom",
+        "keenable",
+        "open_websearch",
         "yuanbao",
         "zhihu",
     }

@@ -1,0 +1,13 @@
+{
+  "status": "error",
+  "error": {
+    "code": "browser_unavailable",
+    "message": "Synthetic browser unavailable",
+    "hint": "Synthetic installation hint",
+    "details": "Synthetic details",
+    "retryable": true
+  },
+  "data": {
+    "content": "Synthetic body must be rejected"
+  }
+}

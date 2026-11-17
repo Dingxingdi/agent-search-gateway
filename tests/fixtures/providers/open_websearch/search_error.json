@@ -1,0 +1,10 @@
+{
+  "status": "error",
+  "error": {
+    "code": "engine_error",
+    "message": "Synthetic engine failure",
+    "retryable": true,
+    "hint": "Synthetic hint",
+    "fix": "Synthetic fix"
+  }
+}

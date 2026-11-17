@@ -1,0 +1,25 @@
+{
+  "status": "ok",
+  "data": {
+    "query": "synthetic query",
+    "engines": [
+      "bing",
+      "duckduckgo"
+    ],
+    "results": [
+      {
+        "url": "https://EXAMPLE.com/one#section",
+        "title": "First page",
+        "description": "first",
+        "engine": "bing"
+      },
+      {
+        "url": "https://example.com/two",
+        "title": "Second page",
+        "description": "second",
+        "engine": "duckduckgo"
+      }
+    ],
+    "partialFailures": []
+  }
+}

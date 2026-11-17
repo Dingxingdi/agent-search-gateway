@@ -102,6 +102,36 @@ enable_search = false
 enable_fetch = true
 api_url = "https://r.jina.ai"
 
+# New providers are opt-in; enable Search and Fetch independently.
+[web_providers.doubao]
+enable_search = false
+enable_fetch = false
+api_url = "https://open.feedcoopapi.com/search_api"
+api_key_env = "DOUBAO_API_KEY"
+
+[web_providers.youcom]
+enable_search = false
+enable_fetch = false
+api_url = "https://ydc-index.io"
+api_key_env = "YDC_API_KEY"
+
+[web_providers.keenable]
+enable_search = false
+enable_fetch = false
+api_url = "https://api.keenable.ai"
+api_key_env = "KEENABLE_API_KEY"
+
+[web_providers.open_websearch]
+enable_search = false
+enable_fetch = false
+api_url = "http://127.0.0.1:3210"
+# User-editable example, not a built-in default or engine availability guarantee.
+# Omit engines to use the daemon's single default; explicit engines share limit=50.
+engines = [
+  "bing", "duckduckgo", "brave", "startpage", "baidu", "sogou",
+  "exa", "keenable", "csdn", "juejin", "hackernews",
+]
+
 [web_providers.yuanbao]
 enable_search = true
 enable_fetch = false

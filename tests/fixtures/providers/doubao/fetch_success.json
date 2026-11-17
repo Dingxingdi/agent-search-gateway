@@ -1,0 +1,9 @@
+{
+  "ResponseMetadata": {},
+  "Result": {
+    "Data": {
+      "StatusCode": 200,
+      "ContentText": "  First synthetic paragraph.\n\nSecond synthetic paragraph.\n"
+    }
+  }
+}

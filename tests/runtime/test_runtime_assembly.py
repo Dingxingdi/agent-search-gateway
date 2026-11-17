@@ -146,6 +146,10 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
         ("jina", False, True),
         ("yuanbao", True, False),
         ("zhihu", True, False),
+        ("doubao", True, True),
+        ("youcom", True, True),
+        ("keenable", True, True),
+        ("open_websearch", True, True),
     ]
     parallel_registration = registry.get("parallel")
     assert parallel_registration is not None

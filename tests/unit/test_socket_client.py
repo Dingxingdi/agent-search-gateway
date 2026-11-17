@@ -164,7 +164,9 @@ async def test_socket_timeout_depends_on_request_type_and_honors_override(
 
     async def recording_wait_for(awaitable: Awaitable[bytes], timeout: float | None) -> bytes:
         seen.append(timeout)
-        return await real_wait_for(awaitable, timeout=timeout)
+        # Check deadline selection without a 10 ms socket round-trip requirement.
+        # The stalled-response test above covers real timeout behavior.
+        return await real_wait_for(awaitable, timeout=5.0)
 
     monkeypatch.setattr(asyncio, "wait_for", recording_wait_for)
     path = tmp_path / "timeout.sock"

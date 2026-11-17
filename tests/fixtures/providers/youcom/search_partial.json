@@ -1,0 +1,63 @@
+{
+  "results": {
+    "web": [
+      {
+        "url": "https://example.com/good",
+        "title": "Good",
+        "snippets": [
+          "kept"
+        ]
+      },
+      {},
+      {
+        "url": null
+      },
+      {
+        "url": " \t "
+      },
+      null,
+      [],
+      {
+        "url": 7
+      },
+      {
+        "url": "not a URL"
+      },
+      {
+        "url": "ftp://example.com/file"
+      },
+      {
+        "url": "https://example.com/good",
+        "title": 3,
+        "snippets": [
+          "kept"
+        ]
+      },
+      {
+        "url": "https://example.com/good",
+        "title": "Good",
+        "snippets": "bad"
+      },
+      {
+        "url": "https://example.com/good",
+        "title": "Good",
+        "snippets": {}
+      },
+      {
+        "url": "https://example.com/good",
+        "title": "Good",
+        "snippets": [
+          "good",
+          null
+        ]
+      },
+      {
+        "url": "https://example.com/good",
+        "title": "Good",
+        "snippets": [
+          3
+        ]
+      }
+    ]
+  }
+}

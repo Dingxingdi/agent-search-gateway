@@ -78,6 +78,10 @@ The results directory is created by the daemon as needed. The debug log is creat
 | ScrapingAnt | no | yes |
 | SerpApi | yes | no |
 | Jina Reader | no | yes |
+| Doubao | yes | yes |
+| You.com | yes | yes |
+| Keenable | yes | yes |
+| open-webSearch | yes | yes |
 | Yuanbao | yes | no |
 | Zhihu | yes | no |
 
@@ -86,6 +90,58 @@ Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, p
 Jina Reader is a credential-free, fetch-only provider, so its configuration must omit `api_key_env`. Each actual Jina Reader request sends `X-No-Cache: true` to refresh Reader-side content. This does not bypass content already prepared by the gateway: an admitted URL whose body is already prepared still short-circuits before provider dispatch, and the gateway exposes no force-refresh option. Configuration order remains fetch-provider priority, so place Jina earlier when free-first behavior is desired.
 
 Web search and fetch stages for the same provider share one concurrency quota. LLM provider transports have their own independent quotas.
+
+#### Doubao, You.com, Keenable, and open-webSearch
+
+These four examples are disabled by default. Set `enable_search = true` and/or
+`enable_fetch = true` in the corresponding `[web_providers.NAME]` table to enable
+each capability independently. Set `api_url` to the API root below; the adapter
+adds the Search or Fetch path. Existing timeout and retry settings in `[retry]`
+and provider `max_concurrency` continue to apply.
+
+| Provider name | API root | Credential or service prerequisite |
+|---|---|---|
+| `doubao` | `https://open.feedcoopapi.com/search_api` | `api_key_env = "DOUBAO_API_KEY"`; Fetch requires a pay-as-you-go Key with Fetch permission. |
+| `youcom` | `https://ydc-index.io` | `api_key_env = "YDC_API_KEY"`; the official Contents endpoint is a separate API call with separate billing and the appropriate Contents scope. |
+| `keenable` | `https://api.keenable.ai` | `api_key_env = "KEENABLE_API_KEY"`; only the keyed API is used. Omitting `live` does not guarantee the upstream avoids real-time charges. |
+| `open_websearch` | `http://127.0.0.1:3210` | Omit `api_key_env`; run your own open-webSearch HTTP daemon before enabling it. |
+
+Only `open_websearch` accepts the provider-specific `engines` option. The full
+user-editable list in `config.example.toml` is an example, not a production default
+or a supported-engine enumeration. For a smaller selection, edit the existing block:
+
+```toml
+[web_providers.open_websearch]
+enable_search = false
+enable_fetch = false
+api_url = "http://127.0.0.1:3210"
+engines = ["bing", "duckduckgo"]
+```
+
+The gateway passes the configured list to one daemon Search request, with a fixed
+`limit=50` total result budget shared across the selected engines. This is not 50
+results per engine and does not guarantee a hit from every engine. There are no
+`limit` or `searchMode` configuration keys. Omit `engines` to send only the query
+and use the daemon's single default engine, without sending a limit.
+
+The daemon's `ALLOWED_SEARCH_ENGINES` must allow the selected names. Filtering can
+remove requested engines; if all are filtered, the daemon may fall back to its
+default. `DEFAULT_SEARCH_ENGINE` selects one default engine, not a list. Actual
+availability depends on daemon version, network access, and its allowlist.
+Duplicate entries consume the shared budget; the example has no duplicates.
+`linuxdo` is currently unavailable and is omitted from the example. The gateway
+does not enumerate, discover, or schedule child engines, or manage daemon lifecycle.
+
+A valid daemon response can contain `partialFailures`; diagnostics retain only a
+safe marker and count. A provider-level PASS does not prove every engine succeeded.
+The response's `data.engines` is the parsed/filtered request list, not a success
+list. Matching that list with no partial failures still does not prove that every
+engine succeeded; `results[*].engine` confirms only the engines with observed hits.
+
+Use `keyword-search --provider NAME` to isolate an enabled Search provider.
+`url-fetch` has no `--provider` flag: isolate Fetch using a temporary configuration
+or the opt-in adapter checks below. Normal CLI Fetch still requires a URL admitted
+by search in the same gateway runtime.
 
 #### Enabling Zhihu and Yuanbao
 
@@ -524,6 +580,38 @@ PARALLEL_API_KEY=...
 ```
 
 `OPENAI_MODEL` may optionally select the chat-completions model used by the OpenAI-compatible connectivity check. Parallel Search and Extract use `PARALLEL_API_KEY` when their opt-in live checks are enabled. These integration checks validate connectivity and basic response shape only; normal CI does not enable them.
+
+The Doubao, You.com, and Keenable adapter checks use `DOUBAO_API_KEY`,
+`YDC_API_KEY`, and `KEENABLE_API_KEY`, respectively. The open-webSearch check
+requires an explicit `OPEN_WEBSEARCH_API_URL` pointing to your already-running HTTP
+daemon; this variable selects only the test endpoint and is not a production
+configuration option. Search uses only `["bing", "duckduckgo"]` with total
+`limit=50`, rather than the full example list. Ensure both engines are allowed.
+
+Run one provider at a time, replacing `doubao` with `youcom`, `keenable`, or
+`open_websearch` as appropriate:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_new_web_providers.py -k doubao -v -rs -rP
+```
+
+Each provider has one Search and one Fetch case. Fetch reads the fixed public
+`https://www.python.org/about/` page directly through the adapter; no gateway
+service is started. Requests share a bounded three-attempt retry policy with a
+30-second request timeout. Missing credentials or the explicit daemon address
+produce SKIP; configured connection, permission, quota, or schema failures produce
+FAIL. Ordinary CI leaves all eight cases skipped.
+
+Captured output contains safe JSON metrics for provider/stage, actual HTTP
+attempts, last observed HTTP status, fixed failure category/known code, hit count
+or content length, elapsed time, and response-contract outcome. `-rP` displays
+metrics for successful cases; failed cases retain their safe captured output.
+open-webSearch also reports whether the effective request list matched, the
+partial-failure count, and only requested engine names with observed hits. A
+filtered/defaulted list fails multi-engine coverage. A matching list with no
+partial failures still does not prove both engines succeeded; engines without
+observed hits remain unverified. The tests do not print raw requests, responses,
+queries, URL parameters, page text, or credentials.
 
 ## Contributing and support
 
