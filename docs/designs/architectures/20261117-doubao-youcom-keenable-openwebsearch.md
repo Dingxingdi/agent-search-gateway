@@ -72,7 +72,7 @@
 **D3 — 采用供应商低侵入、低成本 API 选项**
 
 - Doubao Search：发送 `Query` 与 `SearchType="web"`，解析 `Result.WebResults` 的 `Url`、`Title`、`Summary` 或 `Snippet`。Fetch：发送 `Url`，解析 `Result.Data.ContentText`；检查响应元数据和网页抓取状态。
-- You.com Search：发送 `query` 和保守固定 `count`，解析 `results.web` 列表及其 `contents.snippets`；不启用额外 `extraction`。Fetch：`urls` 仅包含目标 URL，`formats` 指定 Markdown，取匹配目标的非空 `markdown`。
+- You.com Search：发送 `query` 和保守固定 `count`，解析 `results.web` 列表及其 `results.web[].snippets`；不启用额外 `extraction`。Fetch：`urls` 仅包含目标 URL，`formats` 指定 Markdown，取匹配目标的非空 `markdown`。
 - Keenable Search：`query`、固定保守 `max_results`，将文档定义的结果 URL/标题/摘要映射。Fetch：`GET` 查询参数 `url`，读取 Markdown `content`；不发送 `live`，服从默认缓存/实时策略。
 - open-webSearch Search：仅发送 `query`（如必要可设保守固定 `limit`），**省略 `engines`**；解析 `status=ok` 之后的 `data`。Fetch：`url`，读取 `status=ok` 后的 `data.content`。
 - Rationale：维持与既有适配器相同的“固定内部参数 + 稳定领域输出”风格；不意外引入费用更高的选项。

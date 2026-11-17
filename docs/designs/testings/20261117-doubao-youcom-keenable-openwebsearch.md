@@ -63,7 +63,7 @@
 ### 3.2 You.com
 
 - Search 请求必须指向 `ydc-index.io/v1/search`、采用 `X-API-Key`，具备 `query` 和固定保守 `count`，**不包含额外 `extraction`**。
-- `results.web` 正常列表、空列表、部分坏条目、错误类型和内嵌错误分别覆盖；`contents.snippets` 是数组时应得到正确文本摘要，不能误返回列表字符串字面量。
+- `results.web` 正常列表、空列表、部分坏条目、错误类型和内嵌错误分别覆盖；`results.web[].snippets` 是数组时应得到正确文本摘要，不能误返回列表字符串字面量。
 - Fetch 必须 `POST /v1/contents`，传单个 `urls` 和 `formats=["markdown"]`。
 - Contents 返回记录与目标 URL 对齐；无匹配 URL、`markdown=null`、空字符串、只有 HTML、非法数组项均不可被当作成功 Fetch。
 - 401/402/429/500 模拟响应分别验证不重试/重试边界；凭据值不得进入日志。

@@ -57,7 +57,7 @@
 
 ### 3.2 You.com
 
-- Search：顶层或嵌套 `results.web` 不符合预期类型时失败；`results.web=[]` 是合法空结果。单个 `url` 或 `contents.snippets` 类型损坏的结果按单条拒绝，其他结果保留。
+- Search：顶层或嵌套 `results.web` 不符合预期类型时失败；`results.web=[]` 是合法空结果。单个 `url` 或 `results.web[].snippets` 类型损坏的结果按单条拒绝，其他结果保留。
 - Contents Fetch：只接受与请求目标匹配的返回记录；`markdown` 字段缺失、为空、只含空白或不是字符串时为抓取失败，**不允许回退到 `html` 冒充已经要求的 Markdown**。
 - JSON 中出现明确官方错误 envelope 时不伪装成功；HTTP 401/403/402/429/5xx 继续由共享 executor 分类。
 - Search 不主动请求更高成本的 `extraction`；Fetch 是单独计费能力，错误诊断不暴露付费 Key。
