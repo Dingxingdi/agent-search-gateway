@@ -1,0 +1,45 @@
+{
+  "status": "ok",
+  "data": {
+    "engines": [
+      "bing",
+      "duckduckgo"
+    ],
+    "results": [
+      {
+        "url": "https://EXAMPLE.com/good#x",
+        "title": "Good",
+        "description": "kept"
+      },
+      {
+        "title": "Missing"
+      },
+      {
+        "url": "",
+        "title": "Empty"
+      },
+      {
+        "url": null,
+        "title": "Null"
+      },
+      {
+        "url": "ftp://example.com/no",
+        "title": "Bad URL"
+      },
+      42,
+      {
+        "url": "https://example.com/title",
+        "title": 42
+      },
+      {
+        "url": "https://example.com/snippet",
+        "title": "Bad description",
+        "description": []
+      },
+      {
+        "url": 14,
+        "title": "Bad URL type"
+      }
+    ]
+  }
+}

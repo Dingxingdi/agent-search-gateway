@@ -493,7 +493,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Read: `src/agent_search_gateway/providers/web/parallel.py`（构造 TypeError、可选参数与 Search/Fetch 隔离）
 - Read: `src/agent_search_gateway/providers/diagnostics.py`、`tests/support/web_diagnostics.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 编写 fixture 前核对所支持 daemon 版本与 0.2 的文档/固定源码；data.results、partialFailures、engines 和总预算语义以这些证据为准。证据不同先更新合同/fixture并记录差异，不做“多个猜测字段中取一个”的解析。没有 daemon 时可先离线实施，明确 live 未验证；不把源码支持的引擎名单固化为 Gateway 枚举。
 
@@ -518,7 +518,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 故意传错误类型的测试沿用 `test_parallel.py` 的写法保证 strict mypy 可检查；不要因此放宽生产构造签名或关闭整文件类型检查。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_open_websearch.py -k "search or engines" -v
@@ -526,7 +526,7 @@ uv run pytest tests/providers/web/test_open_websearch.py -k "search or engines" 
 
 预期：缺少显式列表/固定总预算、结构验证、快照或安全诊断时，相应行为断言 FAIL；不破坏已正确的省略分支制造 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 private validate_engines(value: object) -> tuple[str, ...] | None
@@ -557,7 +557,7 @@ response_diagnostics(合法status=ok/搜索信封)
 
 `daemon_unavailable` 的CLI示例里有 retryable 标志，不等于HTTP服务的重试合同；HTTP连接失败仍由共享传输重试处理。不要从原始message/hint猜重试。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_open_websearch.py -v
@@ -566,7 +566,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：省略时默认行为不变，显式时名单与固定总预算准确发送；构造验证、快照、局部失败诊断及相关测试 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 本模块统一status/envelope验证，供Fetch复用。没有公共进程/浏览器抽象。重跑 Step 4。
 
@@ -581,7 +581,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/open_websearch/fetch_error.json`
 - Read: `src/agent_search_gateway/providers/http.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_fetch_maps_daemon_content`：status=ok,data.content非空 → URLFetchCandidate；请求仅url。再用 `test_fetch_omits_search_options_when_engines_are_configured` 明确构造 engines=["bing","duckduckgo"] 后 Fetch，body 仍严格为 url-only、无 engines/limit/searchMode。逐次覆盖：
 
@@ -591,7 +591,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - `test_fetch_cancellation_propagates`：用Event控制的传输抛/触发CancelledError，原样传播，无新一轮请求。不用真实sleep制造时序。
 - browser_unavailable为单provider失败，hint/details不入日志。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_open_websearch.py -k fetch -v
@@ -605,7 +605,7 @@ uv run pytest tests/providers/web/test_open_websearch.py -k connection_refusal -
 
 预期：新Fetch行为尚未满足；取消/传输本来已由executor正确处理的断言可以直接PASS，记录为回归证据，不刻意破坏旧代码制造RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 fetch(target)
@@ -619,7 +619,7 @@ fetch(target)
 
 错误处理复用模块私有helper，传输和取消无新增代码路径。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_open_websearch.py -v
@@ -628,7 +628,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：Search/Fetch、有限重试和取消回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 检查函数只负责协议转换；移除重复诊断与无用异常包裹。重跑 Step 4。
 
