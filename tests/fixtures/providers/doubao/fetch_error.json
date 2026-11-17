@@ -1,0 +1,15 @@
+{
+  "ResponseMetadata": {
+    "Error": {
+      "Code": "10409",
+      "CodeN": 10409,
+      "Message": "Synthetic subscription limitation"
+    }
+  },
+  "Result": {
+    "Data": {
+      "StatusCode": 200,
+      "ContentText": "Synthetic content that must be rejected"
+    }
+  }
+}

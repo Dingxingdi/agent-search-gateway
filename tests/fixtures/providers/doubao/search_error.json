@@ -1,0 +1,13 @@
+{
+  "ResponseMetadata": {
+    "RequestId": "synthetic-error",
+    "Error": {
+      "Code": "10403",
+      "CodeN": 10403,
+      "Message": "PRIVATE_ERROR"
+    }
+  },
+  "Result": {
+    "WebResults": []
+  }
+}

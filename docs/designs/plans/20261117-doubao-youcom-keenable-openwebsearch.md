@@ -118,7 +118,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 - Create: `tests/fixtures/providers/doubao/invalid_json.txt`
 - Read: `src/agent_search_gateway/providers/web/brightdata.py`、`common.py`（同目录）、`tests/support/http.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_search_maps_web_results`：给两个文档形状结果，一个含 Summary，另一个仅 Snippet；调用真实 adapter.search；断言两个 KeywordSearchHit 的字段与原始 URL，且 raw_content/content 为空。逐次补充以下行为：
 
@@ -133,7 +133,7 @@ You.com 的 `count=10` 和 Keenable 的 `max_results=10` 是本轮固定的保�
 
 缺失功能的预期失败是映射、请求或错误分类断言不成立。非法 JSON 的传输验证放 Task 11，不能用字典 fake 代替 decode。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_doubao.py -k search -v
@@ -141,7 +141,7 @@ uv run pytest tests/providers/web/test_doubao.py -k search -v
 
 预期：新行为 assertion FAIL；不是 fixture 文件名、import 拼写或工具故障。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 DoubaoAdapter(*, name, api_url=官方根地址, secret: SecretValue, http_executor: JsonRequester)
@@ -162,7 +162,7 @@ inspector
 
 Summary 存在但非字符串属于坏条目，不得悄悄退回 Snippet 掩盖协议错误。只保存搜索摘要，不把 Summary 填入网页正文。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_doubao.py -v
@@ -171,7 +171,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：目标行为与现有 web/executor 测试 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 将该供应商的元数据错误识别抽为本模块私有 helper，给 Task 2 复用；不要抽通用字段路径框架。再次运行 Step 4 命令。
 
@@ -186,7 +186,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Create: `tests/fixtures/providers/doubao/fetch_error.json`
 - Docs/Read: `docs/designs/error-handlings/20261117-doubao-youcom-keenable-openwebsearch.md`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首个 `test_fetch_maps_content_text` 使用 StatusCode=200、两段合成正文，断言 raw_content == content == 原正文，POST /fetch 只传 Url。逐个增加：
 
@@ -196,7 +196,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - `test_fetch_retries_documented_temporary_errors`：700429/10500/10502 后成功；共享尝试次数有效。
 - `test_fetch_rejects_subscription_key_error_without_retry`：200 Error10409 一次终态；10413同样不重试。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_doubao.py -k fetch -v
@@ -204,7 +204,7 @@ uv run pytest tests/providers/web/test_doubao.py -k fetch -v
 
 预期：Fetch 未完成相应映射/拒绝的断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 fetch(normalized_url)
@@ -220,7 +220,7 @@ _parse_fetch
 
 原站非成功是本地解析终态，交给 scheduler 尝试其他 provider；不添加原站状态的独立重试。保留正文原始格式，不用 strip 后的文本覆盖返回值。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_doubao.py -v
@@ -229,7 +229,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 预期：Search/Fetch 全部 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 Task 1 的错误码解析与鉴权 helper；Search/Fetch 使用各自可恢复码集合与 stage。重跑 Step 4。
 

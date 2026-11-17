@@ -1,0 +1,41 @@
+{
+  "ResponseMetadata": {
+    "RequestId": "synthetic-partial"
+  },
+  "Result": {
+    "WebResults": [
+      {
+        "Url": "https://example.com/good",
+        "Title": "Good",
+        "Summary": "Summary"
+      },
+      {},
+      {
+        "Url": null
+      },
+      {
+        "Url": " "
+      },
+      {
+        "Url": "not-a-url"
+      },
+      null,
+      {
+        "Url": 12
+      },
+      {
+        "Url": "https://example.com/bad-title",
+        "Title": 3
+      },
+      {
+        "Url": "https://example.com/bad-summary",
+        "Summary": [],
+        "Snippet": "Must not hide invalid summary"
+      },
+      {
+        "Url": "https://example.com/bad-snippet",
+        "Snippet": []
+      }
+    ]
+  }
+}
