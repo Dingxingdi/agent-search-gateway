@@ -7,13 +7,17 @@ from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.registry import ProviderRegistry, WebProviderRegistration
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.decodo import DecodoAdapter
+from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.jina import JinaReaderAdapter
+from agent_search_gateway.providers.web.keenable import KeenableAdapter
+from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.scrape_do import ScrapeDoAdapter
 from agent_search_gateway.providers.web.scrapegraphai import ScrapeGraphAIAdapter
 from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
 from agent_search_gateway.providers.web.scrapingant import ScrapingAntAdapter
 from agent_search_gateway.providers.web.scrapingdog import ScrapingDogAdapter
 from agent_search_gateway.providers.web.serpapi import SerpApiAdapter
+from agent_search_gateway.providers.web.youcom import YouComAdapter
 from agent_search_gateway.providers.web.zenrows import ZenRowsAdapter
 from tests.support.fakes import FakeKeywordSearchProvider, FakeURLFetchProvider
 
@@ -79,9 +83,29 @@ def test_registry_exposes_exact_capabilities_and_contract_types() -> None:
     assert "URLStore" not in str(fetch_fake.fetch.__annotations__)
 
 
-def test_default_registry_appends_new_providers_with_exact_contracts() -> None:
+def test_default_registry_preserves_existing_provider_contracts() -> None:
     registry = build_default_registry()
-    registrations = registry.list_in_registration_order()[-10:]
+    assert [item.name for item in registry.list_in_registration_order()[:18]] == [
+        "tavily",
+        "firecrawl",
+        "exa",
+        "linkup",
+        "brave",
+        "anysearch",
+        "tinyfish",
+        "parallel",
+        "brightdata",
+        "scrape_do",
+        "zenrows",
+        "decodo",
+        "scrapingdog",
+        "scrapegraphai",
+        "scraperapi",
+        "scrapingant",
+        "serpapi",
+        "jina",
+    ]
+    registrations = registry.list_in_registration_order()[8:18]
 
     expected = [
         (
@@ -122,7 +146,7 @@ def test_default_registry_appends_new_providers_with_exact_contracts() -> None:
     ] == expected
 
 
-def test_default_registry_marks_only_jina_credentialless() -> None:
+def test_default_registry_marks_jina_and_open_websearch_credentialless() -> None:
     registry = build_default_registry()
 
     jina = registry.require("jina")
@@ -133,4 +157,23 @@ def test_default_registry_marks_only_jina_credentialless() -> None:
     assert jina.requires_api_key is False
     assert {
         item.name for item in registry.list_in_registration_order() if not item.requires_api_key
-    } == {"jina"}
+    } == {"jina", "open_websearch"}
+
+
+def test_default_registry_adds_four_dual_capability_providers() -> None:
+    registrations = build_default_registry().list_in_registration_order()
+    expected = [
+        ("doubao", DoubaoAdapter, frozenset({"api_url"}), True),
+        ("youcom", YouComAdapter, frozenset({"api_url"}), True),
+        ("keenable", KeenableAdapter, frozenset({"api_url"}), True),
+        ("open_websearch", OpenWebSearchAdapter, frozenset({"api_url", "engines"}), False),
+    ]
+    for name, factory, allowed_keys, requires_key in expected:
+        matches = [item for item in registrations if item.name == name]
+        assert len(matches) == 1, f"{name} must be registered exactly once"
+        [registration] = matches
+        assert registration.factory is factory
+        assert registration.capabilities == ProviderCapabilities(search=True, fetch=True)
+        assert registration.allowed_config_keys == allowed_keys
+        assert registration.requires_api_key is requires_key
+    assert [item.name for item in registrations[18:]] == [name for name, _, _, _ in expected]

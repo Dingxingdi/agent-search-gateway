@@ -1,0 +1,406 @@
+"""Integration contracts for the four newly registered Web providers."""
+
+import asyncio
+import json
+import logging
+import tomllib
+from collections.abc import Iterator
+from pathlib import Path
+from typing import cast
+
+import httpx
+import pytest
+
+from agent_search_gateway.config import resolve_config
+from agent_search_gateway.errors import ConfigFailure
+from agent_search_gateway.paths import RuntimePaths
+from agent_search_gateway.providers.defaults import build_default_registry
+from agent_search_gateway.providers.web.doubao import DoubaoAdapter
+from agent_search_gateway.providers.web.keenable import KeenableAdapter
+from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
+from agent_search_gateway.providers.web.youcom import YouComAdapter
+from agent_search_gateway.runtime import Runtime
+from agent_search_gateway.url_normalization import normalize_url
+
+_ADAPTERS: dict[str, type[object]] = {
+    "doubao": DoubaoAdapter,
+    "youcom": YouComAdapter,
+    "keenable": KeenableAdapter,
+    "open_websearch": OpenWebSearchAdapter,
+}
+_ENDPOINTS = {
+    "doubao": ("https://open.feedcoopapi.com/search_api", "/web_search", "/fetch"),
+    "youcom": ("https://ydc-index.io", "/v1/search", "/v1/contents"),
+    "keenable": ("https://api.keenable.ai", "/v1/search", "/v1/fetch"),
+    "open_websearch": ("http://127.0.0.1:3210", "/search", "/fetch-web"),
+}
+_TARGET = normalize_url("https://example.test/article?q=a%26b&lang=zh")
+_BODY = "Runtime integration page body."
+
+
+def _unexpected_request(request: httpx.Request) -> httpx.Response:
+    raise AssertionError("Assembly must not issue HTTP requests")
+
+
+class _CountingAsyncClient(httpx.AsyncClient):
+    def __init__(self, transport: httpx.MockTransport) -> None:
+        super().__init__(transport=transport)
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        await super().aclose()
+
+
+class _ClientFactory:
+    def __init__(self) -> None:
+        self.transport = httpx.MockTransport(_unexpected_request)
+        self.clients: list[_CountingAsyncClient] = []
+
+    def __call__(self) -> httpx.AsyncClient:
+        client = _CountingAsyncClient(self.transport)
+        self.clients.append(client)
+        return client
+
+
+@pytest.fixture
+def client_factory() -> Iterator[_ClientFactory]:
+    factory = _ClientFactory()
+    yield factory
+    assert all(client.is_closed for client in factory.clients)
+
+
+def _provider_config(name: str, **options: object) -> dict[str, object]:
+    config: dict[str, object] = {
+        "enable_search": True,
+        "enable_fetch": True,
+        "max_concurrency": 7,
+    }
+    if name != "open_websearch":
+        config["api_key_env"] = "TEST_WEB"
+    config.update(options)
+    return config
+
+
+def _config(web: dict[str, object]) -> dict[str, object]:
+    return {
+        "web_providers": web,
+        "llm_providers": {
+            name: {
+                "protocol": "openai",
+                "api_endpoint": "chat_completions",
+                "api_url": f"https://{name}.example.test",
+                "api_key_env": "TEST_LLM",
+            }
+            for name in ("primary", "secondary")
+        },
+        "global_default_llm": {"provider": "primary", "model": "global"},
+        "search_llm": {"providers": [{"provider": "secondary", "model": "search"}]},
+        "fetch_llm": {"judge": {}, "safety": {}, "content_clean": {}, "focus_summary": {}},
+        "retry": {"max_attempts": 1},
+    }
+
+
+def _build_runtime(
+    tmp_path: Path, web: dict[str, object], client_factory: _ClientFactory
+) -> Runtime:
+    registry = build_default_registry()
+    resolved = resolve_config(_config(web), registry, {"TEST_WEB": "x", "TEST_LLM": "x"})
+    return Runtime.build(
+        resolved,
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=client_factory,
+    )
+
+
+def _response(name: str, *, search: bool) -> httpx.Response:
+    if search:
+        payloads: dict[str, object] = {
+            "doubao": {"Result": {"WebResults": []}},
+            "youcom": {"results": {"web": []}},
+            "keenable": {"results": []},
+            "open_websearch": {"status": "ok", "data": {"results": []}},
+        }
+    else:
+        payloads = {
+            "doubao": {"Result": {"Data": {"StatusCode": 200, "ContentText": _BODY}}},
+            "youcom": [{"url": str(_TARGET), "markdown": _BODY}],
+            "keenable": {"url": str(_TARGET), "content": _BODY},
+            "open_websearch": {"status": "ok", "data": {"content": _BODY}},
+        }
+    return httpx.Response(200, json=payloads[name])
+
+
+@pytest.mark.parametrize("name", _ADAPTERS)
+async def test_new_web_provider_shares_adapter_and_closes_client_once(
+    tmp_path: Path, name: str, client_factory: _ClientFactory
+) -> None:
+    runtime = _build_runtime(tmp_path, {name: _provider_config(name)}, client_factory)
+    try:
+        [search] = runtime.web_search_providers
+        [fetch] = runtime.web_fetch_providers
+        assert search is cast(object, fetch)
+        assert isinstance(search, _ADAPTERS[name])
+        assert runtime.quotas.get_web(name).limit == 7
+        assert len(client_factory.clients) == 3
+        assert not any(client.close_calls for client in client_factory.clients)
+    finally:
+        await runtime.aclose()
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+@pytest.mark.parametrize("name", _ADAPTERS)
+@pytest.mark.parametrize("custom", [False, True], ids=["default-root", "custom-prefix-root"])
+async def test_new_web_provider_routes_search_and_fetch_through_configured_executor(
+    tmp_path: Path, name: str, custom: bool, client_factory: _ClientFactory
+) -> None:
+    requests: list[httpx.Request] = []
+    default_root, search_path, fetch_path = _ENDPOINTS[name]
+    root = "https://gateway.example.test/prefix/" if custom else default_root
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(name, search=request.url.path.endswith(search_path))
+
+    client_factory.transport = httpx.MockTransport(handler)
+    options = {"api_url": root} if custom else {}
+    runtime = _build_runtime(tmp_path, {name: _provider_config(name, **options)}, client_factory)
+    try:
+        assert await runtime.web_search_providers[0].search("runtime query") == []
+        candidate = await runtime.web_fetch_providers[0].fetch(_TARGET)
+        assert candidate.content == _BODY
+        search_request, fetch_request = requests
+        assert search_request.method == "POST"
+        assert str(search_request.url) == root.rstrip("/") + search_path
+        assert str(fetch_request.url.copy_with(query=None)) == root.rstrip("/") + fetch_path
+        if name == "keenable":
+            assert fetch_request.method == "GET"
+            assert list(fetch_request.url.params.multi_items()) == [("url", str(_TARGET))]
+            assert fetch_request.content == b""
+        else:
+            assert fetch_request.method == "POST"
+            assert fetch_request.url.query == b""
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize("name", _ADAPTERS)
+@pytest.mark.parametrize(
+    ("search_enabled", "fetch_enabled"),
+    [(True, False), (False, True), (False, False)],
+    ids=["search-only", "fetch-only", "disabled"],
+)
+async def test_new_web_provider_obeys_capability_switches(
+    tmp_path: Path,
+    name: str,
+    search_enabled: bool,
+    fetch_enabled: bool,
+    client_factory: _ClientFactory,
+) -> None:
+    runtime = _build_runtime(
+        tmp_path,
+        {name: _provider_config(name, enable_search=search_enabled, enable_fetch=fetch_enabled)},
+        client_factory,
+    )
+    try:
+        assert [provider.name for provider in runtime.web_search_providers] == (
+            [name] if search_enabled else []
+        )
+        assert [provider.name for provider in runtime.web_fetch_providers] == (
+            [name] if fetch_enabled else []
+        )
+        assert len(client_factory.clients) == 2 + int(search_enabled or fetch_enabled)
+        if not search_enabled and not fetch_enabled:
+            with pytest.raises(KeyError):
+                runtime.quotas.get_web(name)
+    finally:
+        await runtime.aclose()
+
+
+async def test_new_web_providers_together_own_four_clients_and_close_each_once(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    runtime = _build_runtime(
+        tmp_path, {name: _provider_config(name) for name in _ADAPTERS}, client_factory
+    )
+    try:
+        assert [provider.name for provider in runtime.web_search_providers] == list(_ADAPTERS)
+        assert [provider.name for provider in runtime.web_fetch_providers] == list(_ADAPTERS)
+        for search, fetch in zip(
+            runtime.web_search_providers, runtime.web_fetch_providers, strict=True
+        ):
+            assert search is cast(object, fetch)
+        assert len(client_factory.clients) == 6
+    finally:
+        await runtime.aclose()
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+class _SchedulerWaitingHandler(logging.Handler):
+    def __init__(self, waiting: asyncio.Event) -> None:
+        super().__init__()
+        self.waiting = waiting
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(record, "gateway_event", None) == "scheduler_waiting":
+            self.waiting.set()
+
+
+@pytest.mark.parametrize("name", _ADAPTERS)
+async def test_new_web_provider_search_and_fetch_contend_for_runtime_quota(
+    tmp_path: Path,
+    name: str,
+    client_factory: _ClientFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    search_entered = asyncio.Event()
+    release_search = asyncio.Event()
+    fetch_entered = asyncio.Event()
+    scheduler_waiting = asyncio.Event()
+    _, search_path, _ = _ENDPOINTS[name]
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "primary.example.test":
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+        if request.url.path.endswith(search_path):
+            search_entered.set()
+            await release_search.wait()
+            return _response(name, search=True)
+        fetch_entered.set()
+        return _response(name, search=False)
+
+    client_factory.transport = httpx.MockTransport(handler)
+    runtime = _build_runtime(
+        tmp_path, {name: _provider_config(name, max_concurrency=1)}, client_factory
+    )
+    logger = logging.getLogger("agent_search_gateway.scheduler.fetch")
+    caplog.set_level(logging.DEBUG, logger=logger.name)
+    waiting_handler = _SchedulerWaitingHandler(scheduler_waiting)
+    logger.addHandler(waiting_handler)
+    try:
+        async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
+            search = tasks.create_task(
+                runtime.search_orchestrator.keyword_search("runtime query", request_id="12345678")
+            )
+            await search_entered.wait()
+            fetch = tasks.create_task(
+                runtime.fetch_orchestrator._scheduler.fetch_until_accepted(_TARGET)
+            )
+            await scheduler_waiting.wait()
+            assert not fetch_entered.is_set()
+            assert runtime.quotas.get_web(name).in_use == 1
+            release_search.set()
+            await fetch_entered.wait()
+        assert Path(search.result()).is_file()
+        assert fetch.result().kind == "accepted"
+        assert runtime.quotas.get_web(name).in_use == 0
+        assert runtime.quotas.get_web(name).max_observed_in_use == 1
+    finally:
+        release_search.set()
+        logger.removeHandler(waiting_handler)
+        await runtime.aclose()
+
+
+async def test_new_web_provider_forwards_open_websearch_toml_engines(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    parsed = tomllib.loads(
+        """
+[web_providers.open_websearch]
+enable_search = true
+enable_fetch = true
+max_concurrency = 7
+engines = ["custom_z", "bing", "custom_z", " custom_a "]
+"""
+    )
+    web = parsed["web_providers"]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response("open_websearch", search=request.url.path == "/search")
+
+    client_factory.transport = httpx.MockTransport(handler)
+    runtime = _build_runtime(tmp_path, web, client_factory)
+    try:
+        [search] = runtime.web_search_providers
+        [fetch] = runtime.web_fetch_providers
+        assert search is cast(object, fetch)
+        await search.search("runtime query")
+        await fetch.fetch(_TARGET)
+        assert [json.loads(request.content) for request in requests] == [
+            {
+                "query": "runtime query",
+                "engines": ["custom_z", "bing", "custom_z", " custom_a "],
+                "limit": 50,
+            },
+            {"url": str(_TARGET)},
+        ]
+        assert runtime.quotas.get_web("open_websearch").limit == 7
+        assert len(client_factory.clients) == 3
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    "engines", [[], "bing,duckduckgo", {}, 1, True, [""], ["   "], ["bing", 1], [None]]
+)
+async def test_new_web_provider_wraps_invalid_engines_as_config_failure(
+    tmp_path: Path, engines: object, client_factory: _ClientFactory
+) -> None:
+    try:
+        with pytest.raises(
+            ConfigFailure, match="Invalid configuration for web provider open_websearch"
+        ) as caught:
+            _build_runtime(
+                tmp_path,
+                {"open_websearch": _provider_config("open_websearch", engines=engines)},
+                client_factory,
+            )
+        assert isinstance(caught.value.__cause__, TypeError)
+        assert len(client_factory.clients) == 1
+    finally:
+        for client in client_factory.clients:
+            await client.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+async def test_new_web_provider_skips_engines_validation_when_disabled(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    runtime = _build_runtime(
+        tmp_path,
+        {
+            "open_websearch": _provider_config(
+                "open_websearch", enable_search=False, enable_fetch=False, engines=[], api_url=" "
+            )
+        },
+        client_factory,
+    )
+    try:
+        assert runtime.web_search_providers == ()
+        assert runtime.web_fetch_providers == ()
+        assert len(client_factory.clients) == 2
+        with pytest.raises(KeyError):
+            runtime.quotas.get_web("open_websearch")
+    finally:
+        await runtime.aclose()
+
+
+def test_new_web_provider_rejects_unknown_key_even_when_disabled(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    with pytest.raises(ConfigFailure, match="unknown config key"):
+        _build_runtime(
+            tmp_path,
+            {
+                "open_websearch": _provider_config(
+                    "open_websearch", enable_search=False, enable_fetch=False, engines=[], limit=50
+                )
+            },
+            client_factory,
+        )
+    assert client_factory.clients == []

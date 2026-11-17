@@ -6,10 +6,13 @@ from .web.anysearch import AnySearchAdapter
 from .web.brave import BraveAdapter
 from .web.brightdata import BrightDataAdapter
 from .web.decodo import DecodoAdapter
+from .web.doubao import DoubaoAdapter
 from .web.exa import ExaAdapter
 from .web.firecrawl import FirecrawlAdapter
 from .web.jina import JinaReaderAdapter
+from .web.keenable import KeenableAdapter
 from .web.linkup import LinkupAdapter
+from .web.open_websearch import OpenWebSearchAdapter
 from .web.parallel import ParallelAdapter
 from .web.scrape_do import ScrapeDoAdapter
 from .web.scrapegraphai import ScrapeGraphAIAdapter
@@ -19,6 +22,7 @@ from .web.scrapingdog import ScrapingDogAdapter
 from .web.serpapi import SerpApiAdapter
 from .web.tavily import TavilyAdapter
 from .web.tinyfish import TinyFishAdapter
+from .web.youcom import YouComAdapter
 from .web.zenrows import ZenRowsAdapter
 
 
@@ -132,6 +136,31 @@ def build_default_registry() -> ProviderRegistry:
             ProviderCapabilities(search=False, fetch=True),
             JinaReaderAdapter,
             frozenset({"api_url"}),
+            requires_api_key=False,
+        ),
+        WebProviderRegistration(
+            "doubao",
+            ProviderCapabilities(search=True, fetch=True),
+            DoubaoAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "youcom",
+            ProviderCapabilities(search=True, fetch=True),
+            YouComAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "keenable",
+            ProviderCapabilities(search=True, fetch=True),
+            KeenableAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "open_websearch",
+            ProviderCapabilities(search=True, fetch=True),
+            OpenWebSearchAdapter,
+            frozenset({"api_url", "engines"}),
             requires_api_key=False,
         ),
     )

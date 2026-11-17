@@ -642,7 +642,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 - Test/Modify: `tests/runtime/test_runtime_assembly.py`（原119–145精确名单）
 - Read: `src/agent_search_gateway/providers/registry.py`、`src/agent_search_gateway/config.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_default_registry_adds_four_dual_capability_providers` 通过已存在的 `build_default_registry().list_in_registration_order()` 断言四个新名称各出现一次、class factory、双能力、allowed_config_keys及Key要求。四家尚未注册时为清晰的assertion FAIL。
 
@@ -664,7 +664,7 @@ uv run pytest tests/providers/web tests/providers/test_http_executor.py -q
 
 修正旧断言的意图：旧18家顺序不变；不再用“新名单最后10个仍是旧名单”的 `[-10:]`；credentialless集合为 `{"jina","open_websearch"}`，相应测试重命名。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_providers.py -v
@@ -672,7 +672,7 @@ uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_provid
 
 预期：新注册/配置不满足；旧provider测试不能通过删除断言来“修绿”。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 defaults.py imports四个真实adapter
@@ -687,7 +687,7 @@ defaults.py imports四个真实adapter
 
 新默认根地址由adapter constructor提供；自定义api_url及末尾斜杠由各家合同测试验证。`__init__.py` 现无统一导出需求，不为了注册新增导出层。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_providers.py tests/runtime/test_runtime_assembly.py -v
@@ -696,7 +696,7 @@ uv run pytest tests/providers tests/unit/test_config_web_providers.py -q
 
 预期：新注册配置和旧provider回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只提取测试数据表，避免按provider复制整套配置测试。保留明显的requires_api_key差异，重跑 Step 4。
 
@@ -705,12 +705,14 @@ uv run pytest tests/providers tests/unit/test_config_web_providers.py -q
 
 **Files:**
 
-- Test/Modify: `tests/runtime/test_runtime_assembly.py`
+- Test/Create: `tests/runtime/test_new_web_runtime_assembly.py`
+- Regression/Read: `tests/runtime/test_runtime_assembly.py`
+- 执行调整：原测试文件的纯 import 窄编辑（带 expected_sha256）仍被 LocalHost 的 Secret-looking content 检测拒绝；将本任务新增回归放入独立新文件，保留全部验收行为、现有运行时测试与公共生产代码。
 - Read: `src/agent_search_gateway/runtime.py`（Runtime.build、_build_web_providers、aclose）
 - Read: `src/agent_search_gateway/config.py`、`tests/runtime/test_quota_manager.py`
 - Conditional Modify: 四个新adapter的constructor，仅在注入/默认地址测试证明有错时修正
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 `test_new_web_provider_shares_adapter_between_search_and_fetch` 按四家参数化，使用现有 `_config()` 的LLM部分与仅一家新的web配置。配置max_concurrency=7，真实Runtime构造；断言：
 
@@ -735,15 +737,15 @@ assert runtime.quotas.get_web(provider_name).limit == 7
 
 这些是新注册项的集成合同。如果现有通用层已使其首跑PASS，记录回归通过，不为制造RED修改正确的Runtime；只有缺失/错误注入才需修复生产代码。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
-uv run pytest tests/runtime/test_runtime_assembly.py -k new_web_provider -v
+uv run pytest tests/runtime/test_new_web_runtime_assembly.py -k new_web_provider -v
 ~~~
 
 缺陷时预期失败应定位到实例、URL、能力或关闭次数；不得把LLM配置不完整误判成新provider缺陷。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 复用resolve_config与现有Runtime.build
@@ -769,16 +771,16 @@ runtime = Runtime.build(
 
 不存在 `http_transport_factory`。复用基线 `_CountingAsyncClient`；若保留两家LLM，一家Web总client数为3，四家Web为6。不要把双能力算两个client。测试用try/finally关闭，不能泄漏会话。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
-uv run pytest tests/runtime/test_runtime_assembly.py tests/runtime/test_quota_manager.py -v
+uv run pytest tests/runtime/test_runtime_assembly.py tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_quota_manager.py -v
 uv run pytest tests/runtime -q
 ~~~
 
 预期：装配、配额、关闭、旧LLM/学术/Agent回归 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 共用参数化输入与client收集fixture，不改Runtime生命周期策略。重跑 Step 4。
 

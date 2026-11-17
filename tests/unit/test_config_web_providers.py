@@ -2,6 +2,7 @@ import pytest
 
 from agent_search_gateway.config import resolve_web_provider_config
 from agent_search_gateway.errors import ConfigFailure, ErrorCode
+from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.contracts import ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.registry import ProviderRegistry, WebProviderRegistration
@@ -323,3 +324,208 @@ def test_disabled_new_provider_needs_no_credential_or_constructor_validation() -
         "search_zone": " ",
         "fetch_zone": " ",
     }
+
+
+_NEW_KEYED_PROVIDERS = ("doubao", "youcom", "keenable")
+_NEW_PROVIDERS = (*_NEW_KEYED_PROVIDERS, "open_websearch")
+
+
+@pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
+@pytest.mark.parametrize("value", [0, -1, True, 1.5, "7"])
+def test_new_provider_rejects_invalid_concurrency_override(
+    provider_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(ConfigFailure, match="positive integer"):
+        resolve_web_provider_config(
+            {"web_providers": {provider_name: {"max_concurrency": value}}},
+            build_default_registry(),
+            {},
+        )
+
+
+@pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
+def test_new_provider_inherits_group_concurrency(provider_name: str) -> None:
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {"default_max_concurrency": 5, provider_name: {}}},
+        build_default_registry(),
+        {},
+    ).providers
+    assert provider.max_concurrency == 5
+
+
+@pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
+@pytest.mark.parametrize("option", ["live", "count", "limit", "searchMode"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_new_provider_rejects_unknown_vendor_options_even_when_disabled(
+    provider_name: str,
+    option: str,
+    enabled: bool,
+) -> None:
+    table = {"enable_search": enabled, "enable_fetch": enabled, option: True}
+    with pytest.raises(ConfigFailure, match="unknown config key"):
+        resolve_web_provider_config(
+            {"web_providers": {provider_name: table}},
+            build_default_registry(),
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "provider_name",
+    [
+        item.name
+        for item in build_default_registry().list_in_registration_order()
+        if item.name != "open_websearch"
+    ],
+)
+def test_engines_are_not_a_shared_option(provider_name: str) -> None:
+    with pytest.raises(ConfigFailure, match="unknown config key"):
+        resolve_web_provider_config(
+            {"web_providers": {provider_name: {"engines": ["google"]}}},
+            build_default_registry(),
+            {},
+        )
+
+
+def test_disabled_open_websearch_preserves_unvalidated_options() -> None:
+    engines: list[str] = []
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                "open_websearch": {
+                    "enable_search": False,
+                    "enable_fetch": False,
+                    "api_url": " ",
+                    "engines": engines,
+                    "api_key_env": "MISSING",
+                }
+            }
+        },
+        build_default_registry(),
+        {},
+    ).providers
+    assert dict(provider.options) == {"api_url": " ", "engines": []}
+    assert provider.options["engines"] is engines
+    assert provider.secret is None
+    assert provider.api_key_env is None
+
+
+@pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
+def test_new_provider_options_preserve_shared_fields(provider_name: str) -> None:
+    engines = ["google", "bing", "google"]
+    table: dict[str, object] = {
+        "enable_search": True,
+        "enable_fetch": True,
+        "api_url": "https://provider.example.test/",
+        "max_concurrency": 7,
+    }
+    expected: dict[str, object] = {"api_url": "https://provider.example.test/"}
+    if provider_name in _NEW_KEYED_PROVIDERS:
+        table["api_key_env"] = "KEY"
+    else:
+        table["engines"] = engines
+        expected["engines"] = engines
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {provider_name: table}},
+        build_default_registry(),
+        {"KEY": "fixture-value"},
+    ).providers
+    assert dict(provider.options) == expected
+    assert provider.max_concurrency == 7
+    if provider_name == "open_websearch":
+        assert provider.options["engines"] is engines
+        assert isinstance(provider.options["engines"], list)
+
+
+@pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
+@pytest.mark.parametrize(
+    ("search", "fetch"), [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_new_provider_independent_capability_switches(
+    provider_name: str,
+    search: bool,
+    fetch: bool,
+) -> None:
+    table: dict[str, object] = {"enable_search": search, "enable_fetch": fetch}
+    environment = {}
+    if provider_name in _NEW_KEYED_PROVIDERS:
+        table["api_key_env"] = "KEY"
+        if search or fetch:
+            environment["KEY"] = "fixture-value"
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {provider_name: table}},
+        build_default_registry(),
+        environment,
+    ).providers
+    assert provider.enable_search is search
+    assert provider.enable_fetch is fetch
+    if not search and not fetch:
+        assert provider.secret is None
+        assert provider.api_key_env is None
+    elif provider_name in _NEW_KEYED_PROVIDERS:
+        assert provider.secret is not None
+    else:
+        assert provider.secret is None
+
+
+@pytest.mark.parametrize("include_key", [False, True])
+def test_open_websearch_credential_policy(include_key: bool) -> None:
+    table: dict[str, object] = {"enable_search": True, "enable_fetch": True}
+    if include_key:
+        table["api_key_env"] = "KEY"
+        with pytest.raises(ConfigFailure, match="does not accept api_key_env"):
+            resolve_web_provider_config(
+                {"web_providers": {"open_websearch": table}},
+                build_default_registry(),
+                {"KEY": "fixture-value"},
+            )
+    else:
+        [provider] = resolve_web_provider_config(
+            {"web_providers": {"open_websearch": table}},
+            build_default_registry(),
+            {},
+        ).providers
+        assert provider.secret is None
+        assert provider.api_key_env is None
+
+
+@pytest.mark.parametrize("provider_name", _NEW_KEYED_PROVIDERS)
+def test_new_keyed_provider_resolves_only_explicit_secret(provider_name: str) -> None:
+    data = {
+        "web_providers": {
+            provider_name: {
+                "enable_search": True,
+                "api_key_env": "KEY",
+            }
+        }
+    }
+    [provider] = resolve_web_provider_config(
+        data,
+        build_default_registry(),
+        {"KEY": "fixture-value", "OTHER": "unused"},
+    ).providers
+
+    assert isinstance(provider.secret, SecretValue)
+    assert provider.secret.reveal() == "fixture-value"
+    assert provider.api_key_env == "KEY"
+    assert "fixture-value" not in repr(provider.secret)
+    assert "fixture-value" not in repr(provider)
+
+
+@pytest.mark.parametrize("provider_name", _NEW_KEYED_PROVIDERS)
+@pytest.mark.parametrize("credential", [None, "", "MISSING"])
+def test_new_keyed_provider_requires_named_environment_value(
+    provider_name: str,
+    credential: str | None,
+) -> None:
+    table: dict[str, object] = {"enable_fetch": True}
+    if credential is not None:
+        table["api_key_env"] = credential
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {"web_providers": {provider_name: table}},
+            build_default_registry(),
+            {"OTHER": "unused"},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
