@@ -1531,3 +1531,12 @@ Unpaywall 和 Tavily 未留存传输异常具体子类；现有证据只能确�
 - 同步修正设计/计划的实施状态与贡献指南的 DEBUG 安全预览说明。此轮使用合成输入、MockTransport 和本地编码验证；没有追加真实上游请求，沿用第 6.5 节的真实结果与限制。按七类最新状态，OpenAlex、arXiv、Agent 和 OpenRouter LLM 为 PASS；Semantic Scholar、Unpaywall、Tavily 的三项失败记录保留。
 - 提交目标已确认：贡献者 `Dingxingdi-coder/agent-search-gateway` 的当前任务分支，合入 `Dingxingdi/agent-search-gateway:main`。创建草稿 PR 后，以 GitHub 上对应提交的 CI 结果补充跨平台、依赖审计、打包及秘密扫描证据。
 
+### 6.7 草稿 PR 首轮 CI 与轮转测试修复（2026-11-19）
+
+- 已以贡献者身份创建 [草稿 PR #104](https://github.com/Dingxingdi/agent-search-gateway/pull/104)。首轮提交 `f9d5fdb0e00a063cb0137b0605f05ca1d0a26215` 的 [CI run 44503019709](https://github.com/Dingxingdi/agent-search-gateway/actions/runs/44503019709) 中，质量检查（含依赖审计）、文档构建、打包 smoke、秘密扫描及 Ubuntu Python 3.11 均通过；Ubuntu Python 3.12/3.13/3.14 和 macOS Python 3.12 均为同一个轮转测试失败（3427 passed / 18 skipped / 1 failed），不能把首轮 CI 记为通过。
+- 失败位于 `test_rotation_preserves_timestamp_and_request_id_at_default_boundary`：测试通过另一个文件句柄预填充日志，handler 自身流位置仍停在第一条记录之后。核对 CPython 官方 [3.11 源码](https://github.com/python/cpython/blob/3.11/Lib/logging/handlers.py) 与 [3.12 源码](https://github.com/python/cpython/blob/3.12/Lib/logging/handlers.py)，前者的 `shouldRollover` 在计量前 seek 到 EOF，后者直接采用当前 `stream.tell()`。CI 的 3.12.13 等新版本因此未在测试预期处轮转。
+- 本地 Python 3.12.3 的原测试仍通过，没有声称在本机复现完整 CI 失败。新增真实 setup 断言后，旧预填充方式得到明确 RED：handler 位置为 97，实际文件大小为 5242785；改用 `handler.stream.write` 并 `handler.flush()` 后位置同步，定向用例 GREEN。
+- 修复仅改上述测试函数，保留真实 5 MiB 阈值、3 个备份配置、精确轮转边界以及时间戳、请求 ID 和内容断言；没有修改生产日志逻辑、安装其他 Python 或改变共享环境。
+- 修复后的日志测试文件为 32 passed；最终完整本地检查再次通过：格式检查 225 个文件、Ruff、mypy 223 个文件，以及完整离线 suite 3428 passed / 18 skipped（16.38 秒）。跨 Python 版本和 macOS 的验收以 PR 最新提交的远端检查为准，不以本地旧补丁版本的结果替代。
+
+

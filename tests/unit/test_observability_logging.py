@@ -369,10 +369,13 @@ def test_rotation_preserves_timestamp_and_request_id_at_default_boundary(tmp_pat
         assert log_file.read_text(encoding="utf-8") == before_line
 
         # One bounded prefill reaches the production threshold without many log calls.
+        # Use the handler's stream so rollover checks see the updated position.
         remaining = LOG_MAX_BYTES - len(after_line.encode("utf-8")) - log_file.stat().st_size
         assert remaining > 1
-        with log_file.open("a", encoding="utf-8") as prefill:
-            prefill.write("x" * (remaining - 1) + "\n")
+        assert handler.stream is not None
+        handler.stream.write("x" * (remaining - 1) + "\n")
+        handler.flush()
+        assert handler.stream.tell() == log_file.stat().st_size
         assert log_file.stat().st_size < LOG_MAX_BYTES
         assert not (tmp_path / "debug.log.1").exists()
 
