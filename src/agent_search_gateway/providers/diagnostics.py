@@ -75,6 +75,8 @@ _FAILURE_REASONS = frozenset(
     {
         "spawn_failure",
         "argument_limit",
+        "input_budget_unfit",
+        "rate_limit_wait_timeout",
         "nonzero_exit",
         "terminal_status_failure",
         "invalid_json",

@@ -6,7 +6,9 @@ import time
 import httpx
 import pytest
 
+from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, ProtocolFailure
+from agent_search_gateway.input_limits import PreparedInput
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
 from agent_search_gateway.providers.http import (
@@ -14,7 +16,646 @@ from agent_search_gateway.providers.http import (
     HttpStatusFailure,
     ProviderResponseFailure,
 )
-from tests.support.logging import structured_test_logger
+from agent_search_gateway.rate_limit import RateGate, initial_rate_budget
+from tests.support.controlled import ManualClock
+from tests.support.logging import structured_test_logger, without_debug_body_previews
+
+
+def _rate_gate(clock: ManualClock, period: float) -> RateGate:
+    return RateGate(
+        ResolvedRatePolicy(windows=(ResolvedRateWindow(1, period),)),
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+    )
+
+
+async def test_client_redirect_setting_cannot_bypass_rate_gate_and_preview() -> None:
+    from logging.handlers import BufferingHandler
+
+    clock = ManualClock()
+    gate = _rate_gate(clock, 60)
+    logger, _ = structured_test_logger("tests.http.redirect-rate")
+    records = BufferingHandler(20)
+    logger.addHandler(records)
+    paths: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/old":
+            return httpx.Response(307, headers={"Location": "/new"})
+        return httpx.Response(200, json={"unexpected": "redirect followed"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), follow_redirects=True
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(3, 0, 0, 0.1),
+            provider_name="test",
+            logger=logger,
+            rate_gate=gate,
+            monotonic=clock.monotonic,
+        )
+        with pytest.raises(HttpStatusFailure) as caught:
+            await executor.request_json("POST", "https://example.test/old", stage="search")
+
+    assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert caught.value.status_code == 307
+    assert paths == ["/old"]
+    events = [vars(record)["gateway_event"] for record in records.buffer]
+    assert events.count("rate_limit_acquired") == 1
+    assert events.count("upstream_body_preview") == 1
+    assert events.count("http_attempt_started") == 1
+    assert events.count("http_retrying") == 0
+    assert gate.next_available_in_seconds() == 60
+
+
+@pytest.mark.parametrize("mode", ["success", "terminal_status", "status_retry", "transport_retry"])
+async def test_preview_logging_time_is_excluded_from_http_attempt_elapsed(mode: str) -> None:
+    from logging.handlers import BufferingHandler
+
+    clock = ManualClock()
+
+    class SlowPreviewHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if getattr(record, "gateway_event", "") == "upstream_body_preview":
+                clock.now += 0.875
+
+    logger, _ = structured_test_logger(f"tests.http.preview.elapsed.{mode}")
+    records = BufferingHandler(30)
+    logger.addHandler(records)
+    logger.addHandler(SlowPreviewHandler())
+    sends = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        clock.now += 0.125
+        if mode == "transport_retry" and sends == 1:
+            raise httpx.ReadTimeout("synthetic timeout", request=request)
+        status = (
+            401
+            if mode == "terminal_status"
+            else 503
+            if mode == "status_retry" and sends == 1
+            else 200
+        )
+        return httpx.Response(status, json={"ok": True})
+
+    def diagnostics(response: httpx.Response) -> dict[str, object]:
+        clock.now += 0.25
+        return {}
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0, 0, 1),
+            provider_name="test",
+            logger=logger,
+            monotonic=clock.monotonic,
+            sleep=_no_sleep,
+        )
+        request = executor.request_json(
+            "GET",
+            "https://example.test",
+            stage="search",
+            response_diagnostics=diagnostics,
+        )
+        if mode == "terminal_status":
+            with pytest.raises(HttpStatusFailure) as caught:
+                await request
+            assert caught.value.status_code == 401
+        else:
+            assert await request == {"ok": True}
+
+    fields = [
+        (vars(record)["gateway_event"], vars(record)["gateway_fields"]) for record in records.buffer
+    ]
+    completed = [entry for event, entry in fields if event == "http_attempt_completed"]
+    assert completed and all(entry["elapsed_ms"] == 125 for entry in completed)
+    retries = [entry for event, entry in fields if event == "http_retrying"]
+    failures = [entry for event, entry in fields if event == "http_failed"]
+    if mode.endswith("_retry"):
+        assert sends == 2
+        (retry,) = retries
+        assert retry["elapsed_ms"] == (125 if mode == "transport_retry" else 375)
+        assert retry["delay_ms"] == 0
+    else:
+        assert sends == 1 and retries == []
+    if mode == "terminal_status":
+        (failure,) = failures
+        assert failure["elapsed_ms"] == 375
+    else:
+        assert failures == []
+
+
+async def test_http_preview_pairs_each_retry_with_its_own_response() -> None:
+    from logging.handlers import BufferingHandler
+
+    from agent_search_gateway.request_ids import bind_request_id
+
+    logger, stream = structured_test_logger("tests.http.preview.retry")
+    records = BufferingHandler(30)
+    logger.addHandler(records)
+    bodies: list[bytes] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        bodies.append(request.content)
+        return httpx.Response(429 if len(bodies) == 1 else 200, json={"round": len(bodies)})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 1), provider_name="web", logger=logger
+        )
+        with bind_request_id("01ab23cd"):
+            assert await executor.request_json(
+                "POST",
+                "https://example.test/path?q=PRIVATE",
+                stage="search",
+                json_body={"text": "猫"},
+            ) == {"round": 2}
+    previews = [
+        vars(record)["gateway_fields"]
+        for record in records.buffer
+        if getattr(record, "gateway_event", "") == "upstream_body_preview"
+    ]
+    assert len(previews) == len(bodies) == 2
+    for index, (fields, sent) in enumerate(zip(previews, bodies, strict=True), 1):
+        assert fields == {
+            "provider": "web",
+            "stage": "search",
+            "endpoint": "https://example.test/path",
+            "attempt": index,
+            "transport": "http",
+            "request_body_preview": sent.decode(),
+            "request_body_original_bytes": len(sent),
+            "request_body_sent_bytes": len(sent),
+            "request_input_truncated": False,
+            "request_preview_truncated": False,
+            "response_body_preview": f'{{"round":{index}}}',
+            "response_body_bytes": len(f'{{"round":{index}}}'.encode()),
+            "response_preview_truncated": False,
+        }
+    lines = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview " in line
+    ]
+    assert len(lines) == 2 and all("request=01ab23cd" in line for line in lines)
+    assert "PRIVATE" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "json",
+        "text",
+        "400",
+        "401",
+        "403",
+        "503",
+        "inspector",
+        "decode",
+        "empty",
+        "transport",
+        "timeout",
+        "cancel",
+    ],
+)
+async def test_get_preview_covers_each_terminal_transport_outcome(mode: str) -> None:
+    from logging.handlers import BufferingHandler
+
+    logger, _ = structured_test_logger("tests.http.preview.outcomes")
+    records = BufferingHandler(20)
+    logger.addHandler(records)
+    dispatched = asyncio.Event()
+    body = b"" if mode == "empty" else b'{"received":true}' if mode == "json" else b"visible"
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        dispatched.set()
+        if mode == "transport":
+            raise httpx.ConnectError("unavailable")
+        if mode == "timeout":
+            raise httpx.ReadTimeout("slow")
+        if mode == "cancel":
+            await asyncio.Event().wait()
+        return httpx.Response(int(mode) if mode.isdigit() else 200, content=body)
+
+    def inspect(response: httpx.Response) -> ProviderResponseFailure:
+        return ProviderResponseFailure(
+            "web",
+            "search",
+            status_code=response.status_code,
+            retryable=False,
+            safe_reason="business",
+            diagnostics={},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 1), provider_name="web", logger=logger
+        )
+        url = "https://example.test/path"
+        if mode == "text":
+            assert await executor.request_text("GET", url, stage="search") == "visible"
+        else:
+            request = executor.request_json(
+                "GET",
+                url,
+                stage="search",
+                response_inspector=inspect if mode == "inspector" else None,
+                protocol_attempt=3,
+            )
+            if mode == "json":
+                assert await request == {"received": True}
+            elif mode == "cancel":
+                task = asyncio.create_task(request)
+                await asyncio.wait_for(dispatched.wait(), 1)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            else:
+                with pytest.raises((ProtocolFailure, ExecutionFailure)):
+                    await request
+    (fields,) = [
+        vars(r)["gateway_fields"]
+        for r in records.buffer
+        if vars(r)["gateway_event"] == "upstream_body_preview"
+    ]
+    assert fields.get("protocol_attempt") == (None if mode == "text" else 3)
+    assert fields["request_body_preview"] is None
+    assert fields["request_body_sent_bytes"] == fields["request_body_original_bytes"] == 0
+    received = b"" if mode in {"transport", "timeout", "cancel"} else body
+    assert fields["response_body_preview"] == (received.decode() or None)
+    assert fields["response_body_bytes"] == len(received)
+    assert fields["response_preview_truncated"] is False
+    if mode not in {"json", "text", "cancel"}:
+        (failure,) = [
+            vars(r)["gateway_fields"]
+            for r in records.buffer
+            if vars(r)["gateway_event"] == "http_failed"
+        ]
+        assert failure["protocol_attempt"] == 3 and failure["attempt"] == 1
+
+
+async def test_one_hundred_attempts_pair_responses_without_stale_content() -> None:
+    from logging.handlers import BufferingHandler
+
+    logger, _ = structured_test_logger("tests.http.preview.hundred")
+    records = BufferingHandler(1000)
+    logger.addHandler(records)
+    count = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        count += 1
+        if count % 2 == 0 and count < 100:
+            raise httpx.ReadTimeout("unavailable")
+        return httpx.Response(200 if count == 100 else 429, text=f"visible-{count}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(100, 0, 0, 1), provider_name="web", logger=logger, sleep=_no_sleep
+        )
+        assert (
+            await executor.request_text("GET", "https://example.test", stage="fetch")
+            == "visible-100"
+        )
+    previews = [
+        vars(r)["gateway_fields"]
+        for r in records.buffer
+        if vars(r)["gateway_event"] == "upstream_body_preview"
+    ]
+    assert len(previews) == count == 100
+    for n, fields in enumerate(previews, 1):
+        assert fields["attempt"] == n
+        expected = f"visible-{n}" if n % 2 or n == 100 else None
+        assert fields["response_body_preview"] == expected
+        assert fields["response_body_bytes"] == len(expected or "")
+
+
+async def test_retry_rate_timeout_has_only_the_first_real_send_preview() -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 10)
+    logger, stream = structured_test_logger("tests.http.preview.rate-timeout")
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda request: httpx.Response(429, text="first"))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 0, 0, 0.5),
+            provider_name="web",
+            logger=logger,
+            rate_gate=gate,
+            sleep=_no_sleep,
+        )
+        async with asyncio.timeout(1):
+            task = asyncio.create_task(
+                executor.request_text("GET", "https://example.test", stage="fetch")
+            )
+            try:
+                while not clock.sleepers:
+                    await asyncio.sleep(0)
+                await clock.advance_to(0.5)
+                with pytest.raises(ExecutionFailure) as caught:
+                    await task
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+    assert caught.value.reason == "rate_limit_wait_timeout"
+    (line,) = [s for s in stream.getvalue().splitlines() if "event=upstream_body_preview " in s]
+    assert "attempt=1" in line and "response_body_preview=first" in line
+
+
+@pytest.mark.parametrize("status", [200, 401])
+async def test_preview_helper_failure_keeps_original_http_outcome(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    from agent_search_gateway.providers import http
+
+    logger, stream = structured_test_logger("tests.http.preview.helper-failure")
+
+    def broken(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("PRIVATE_HELPER_EXCEPTION")
+
+    monkeypatch.setattr(http, "log_upstream_body_preview", broken)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(status, text="ok"))
+    ) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 1), provider_name="web", logger=logger
+        )
+        if status == 200:
+            assert await executor.request_text("GET", "https://example.test", stage="fetch") == "ok"
+        else:
+            with pytest.raises(HttpStatusFailure) as caught:
+                await executor.request_text("GET", "https://example.test", stage="fetch")
+            assert caught.value.status_code == 401
+    assert "PRIVATE_HELPER_EXCEPTION" not in stream.getvalue()
+
+
+async def test_prepared_and_ordinary_json_bodies_are_mutually_exclusive() -> None:
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 1), provider_name="test")
+        with pytest.raises(ValueError, match="json_body.*prepared_body"):
+            await executor.request_json(
+                "POST",
+                "https://example.test",
+                stage="search",
+                json_body={},
+                prepared_body=PreparedInput(b"{}", 2, False),
+            )
+    assert calls == 0
+
+
+async def test_prepared_json_is_sent_verbatim_with_json_content_type_for_text_response() -> None:
+    body = b'{ "value" : 2 }\n'
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, text="ok")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), headers={"content-type": "text/plain"}
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 0, 1), provider_name="test")
+        assert (
+            await executor.request_text(
+                "POST",
+                "https://example.test",
+                stage="fetch",
+                prepared_body=PreparedInput(body, len(body), False),
+            )
+            == "ok"
+        )
+
+    (sent,) = requests
+    assert sent.headers["content-type"] == "application/json"
+    assert sent.content == body
+
+
+async def test_invalid_json_request_consumes_no_rate_permit() -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 60)
+
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        pytest.fail("invalid JSON should fail before sending")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 1), provider_name="test", rate_gate=gate
+        )
+        with pytest.raises(TypeError):
+            await executor.request_json(
+                "POST", "https://example.test", stage="search", json_body=object()
+            )
+    assert gate.next_available_in_seconds() == 0
+
+
+@pytest.mark.parametrize("period", [3600.0, 1e308])
+async def test_rate_wait_timeout_is_terminal_without_an_http_attempt(
+    period: float, caplog: pytest.LogCaptureFixture
+) -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, period)
+    await gate.permit(timeout_seconds=0)
+    sends: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(request)
+        return httpx.Response(200, text="unexpected")
+
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0, 0, 0.5), provider_name="test", rate_gate=gate
+        )
+        task = asyncio.create_task(
+            executor.request_text("GET", "https://example.test/?private=query", stage="fetch")
+        )
+        await asyncio.sleep(0)
+        assert list(clock.sleepers.values()) == [0.5]
+        await clock.advance_to(0.5)
+        with pytest.raises(ExecutionFailure) as caught:
+            await asyncio.wait_for(task, 1)
+    assert caught.value.code == ErrorCode.ALL_PROVIDERS_FAILED
+    assert caught.value.reason == "rate_limit_wait_timeout"
+    assert sends == []
+    events = [
+        (vars(record)["gateway_event"], vars(record)["gateway_fields"])
+        for record in caplog.records
+        if getattr(record, "gateway_event", None)
+    ]
+    assert [event for event, _ in events] == ["rate_limit_waiting", "rate_limit_wait_timeout"]
+    common = {"provider": "test", "stage": "fetch", "attempt": 1}
+    assert events[0][1] == {**common, "estimated_wait_ms": int(period) * 1000}
+    assert events[1][1] == {**common, "elapsed_ms": 500, "reason": "rate_limit_wait_timeout"}
+
+
+async def test_rate_wait_ends_before_network_timer_and_dynamic_headers(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 1)
+    await gate.permit(timeout_seconds=0)
+    header_times: list[float] = []
+    sends: list[float] = []
+    caplog.set_level(logging.DEBUG)
+
+    def headers() -> dict[str, str]:
+        header_times.append(clock.now)
+        return {"X-Time": str(clock.now)}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        assert request.headers["X-Time"] == str(clock.now)
+        assert request.headers["X-Client"] == "default"
+        assert request.url.params["q"] == "value"
+        assert request.content == b'{"value":2}'
+        assert request.extensions["timeout"] == dict.fromkeys(
+            ("connect", "read", "write", "pool"), 2
+        )
+        assert vars(caplog.records[-1]).get("gateway_event") == "http_attempt_started"
+        await clock.sleep(0.25)
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond), headers={"X-Client": "default"}
+    ) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(1, 0, 0, 2),
+            provider_name="test",
+            rate_gate=gate,
+            monotonic=clock.monotonic,
+        )
+        task = asyncio.create_task(
+            executor.request_json(
+                "POST",
+                "https://example.test",
+                stage="search",
+                headers=headers,
+                params={"q": "value"},
+                json_body={"value": 2},
+            )
+        )
+        await asyncio.sleep(0)
+        assert not header_times
+        assert not any(
+            getattr(r, "gateway_event", "") == "http_attempt_started" for r in caplog.records
+        )
+        await clock.advance_to(1)
+        await clock.advance_to(1.25)
+        assert await asyncio.wait_for(task, 1) == {}
+    assert header_times == sends == [1]
+    events = [
+        (vars(record)["gateway_event"], vars(record)["gateway_fields"])
+        for record in caplog.records
+        if getattr(record, "gateway_event", None)
+    ]
+    assert [event for event, _ in events[:5]] == [
+        "rate_limit_waiting",
+        "rate_limit_acquired",
+        "http_attempt_started",
+        "upstream_body_preview",
+        "http_attempt_completed",
+    ]
+    assert events[0][1]["estimated_wait_ms"] == events[1][1]["waited_ms"] == 1000
+    assert events[4][1]["elapsed_ms"] == 250
+
+
+@pytest.mark.parametrize(
+    "failure", ["429", "408", "503", "connect", "timeout", "inspector", "401", "403"]
+)
+async def test_every_http_retry_reserves_a_rate_permit(failure: str) -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 3)
+    sends: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        if len(sends) == 1:
+            if failure == "connect":
+                raise httpx.ConnectError("unavailable", request=request)
+            if failure == "timeout":
+                raise httpx.ReadTimeout("timeout", request=request)
+            if failure.isdecimal():
+                return httpx.Response(int(failure), headers={"Retry-After": "2"})
+        return httpx.Response(200, json={})
+
+    def inspect(response: httpx.Response) -> ProviderResponseFailure | None:
+        if failure == "inspector" and len(sends) == 1:
+            return ProviderResponseFailure(
+                "test",
+                "search",
+                status_code=200,
+                retryable=True,
+                safe_reason="temporary",
+                diagnostics={},
+            )
+        return None
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 5), provider_name="test", rate_gate=gate, sleep=clock.sleep
+        )
+        task = asyncio.create_task(
+            executor.request_json(
+                "GET", "https://example.test", stage="search", response_inspector=inspect
+            )
+        )
+        await asyncio.sleep(0)
+        assert sends == [0]
+        if failure in {"401", "403"}:
+            with pytest.raises(HttpStatusFailure) as caught:
+                await task
+            assert caught.value.status_code == int(failure)
+        else:
+            retry_ready = 2 if failure.isdecimal() else 0
+            assert list(clock.sleepers.values()) == [retry_ready]
+            await clock.advance_to(retry_ready)
+            assert list(clock.sleepers.values()) == [3]
+            assert sends == [0]
+            await clock.advance_to(3)
+            assert await asyncio.wait_for(task, 1) == {}
+            assert sends == [0, 3]
+        assert gate.next_available_in_seconds() == 3
+
+
+@pytest.mark.parametrize("phase", ["waiting", "transport"])
+async def test_rate_permit_cancellation_counts_only_dispatched_attempts(phase: str) -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 1)
+    if phase == "waiting":
+        await gate.permit(timeout_seconds=0)
+    sends: list[float] = []
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        await asyncio.Event().wait()
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(3, 0, 0, 5), provider_name="test", rate_gate=gate
+        )
+        task = asyncio.create_task(
+            executor.request_text("GET", "https://example.test", stage="fetch")
+        )
+        await asyncio.sleep(0)
+        await clock.advance_to(0.5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not clock.sleepers
+        assert sends == ([] if phase == "waiting" else [0])
+        assert gate.next_available_in_seconds() == 0.5
 
 
 @pytest.mark.parametrize(
@@ -210,7 +851,7 @@ async def test_retry_after_does_not_expand_retryable_failures(status: int) -> No
     logged = stream.getvalue()
     assert "event=http_retrying" not in logged
     assert sum("event=http_failed" in line for line in logged.splitlines()) == 1
-    assert "MALFORMED_JSON_PRIVATE" not in logged
+    assert "MALFORMED_JSON_PRIVATE" not in without_debug_body_previews(logged)
 
 
 @pytest.mark.parametrize("phase", ["attempt", "retry_after_sleep"])
@@ -796,7 +1437,7 @@ async def test_transport_failure_does_not_inherit_response_metadata(first_respon
     assert "category=transport" in failed
     for key in ("status=", "response_bytes=", "content_type=", "upstream_"):
         assert key not in failed
-    assert "OLD_RESPONSE_MARKER" not in stream.getvalue()
+    assert "OLD_RESPONSE_MARKER" not in without_debug_body_previews(stream.getvalue())
     assert "TRANSPORT_MARKER" not in stream.getvalue()
 
 
@@ -832,7 +1473,7 @@ async def test_json_decode_failure_carries_response_diagnostics_without_retry() 
     failed = next(line for line in lines if "event=http_failed " in line)
     assert "category=decode" in failed
     assert "http_status=200" in failed and f"response_bytes={len(response.content)}" in failed
-    assert "INVALID_JSON_MARKER" not in stream.getvalue()
+    assert "INVALID_JSON_MARKER" not in without_debug_body_previews(stream.getvalue())
     assert "event=http_retrying " not in stream.getvalue()
 
 
@@ -884,7 +1525,7 @@ async def test_response_diagnostic_callback_renders_only_bounded_selected_fields
         "semantic_result=error" in diagnostic[0] and "category=provider_response" in diagnostic[0]
     )
     assert f"response_bytes={len(response.content)}" in diagnostic[0]
-    assert "BODY_MARKER" not in stream.getvalue()
+    assert "BODY_MARKER" not in without_debug_body_previews(stream.getvalue())
     assert "event=http_retrying " not in stream.getvalue()
     assert "event=http_failed " not in stream.getvalue()
 
@@ -1244,7 +1885,7 @@ async def test_large_unknown_payloads_do_not_invent_upstream_errors(mode: str) -
     )
     assert f"response_bytes={len(response.content)}" in line and "category=unknown" in line
     assert "upstream_" not in line
-    assert "BODY_MARKER" not in stream.getvalue()
+    assert "BODY_MARKER" not in without_debug_body_previews(stream.getvalue())
     assert len(line) < 512
 
 
@@ -1760,7 +2401,7 @@ async def test_http_executor_retries_retryable_status_and_hides_sensitive_payloa
     assert "QUERY_PARAMETER_SENTINEL" not in logged
     assert "#fragment" not in logged
     assert "credential-value" not in logged
-    assert "SENSITIVE_BODY" not in logged
+    assert "SENSITIVE_BODY" not in without_debug_body_previews(logged)
     assert "Request(" not in logged
 
 
@@ -1793,11 +2434,11 @@ async def test_request_text_returns_body_without_json_decode_or_payload_logging(
     assert sum("event=http_attempt_started" in line for line in lines) == 1
     assert sum("event=http_attempt_completed" in line for line in lines) == 1
     assert all("endpoint=https://provider.example.test/fetch" in line for line in lines)
+    for marker in ("TEXT_RESPONSE_MARKER", "TARGET_MARKER"):
+        assert marker not in without_debug_body_previews(logged)
     for marker in (
-        "TEXT_RESPONSE_MARKER",
         "ENDPOINT_MARKER",
         "QUERY_MARKER",
-        "TARGET_MARKER",
         "Request(",
     ):
         assert marker not in logged
@@ -1839,7 +2480,7 @@ async def test_http_executor_request_text_retries_retryable_statuses() -> None:
     assert "delay_ms=10" in retry_lines[0]
     assert "delay_ms=20" in retry_lines[1]
     for body in response_bodies:
-        assert body not in logged
+        assert body not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_request_text_maps_non_retryable_status_without_retry() -> None:
@@ -1872,7 +2513,7 @@ async def test_http_executor_request_text_maps_non_retryable_status_without_retr
     assert "TERMINAL_BODY_MARKER" not in caught.value.message
     logged = stream.getvalue()
     assert "category=status" in logged and "status=401" in logged
-    assert "TERMINAL_BODY_MARKER" not in logged
+    assert "TERMINAL_BODY_MARKER" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_request_text_retries_transport_failure() -> None:
@@ -1906,7 +2547,7 @@ async def test_http_executor_request_text_retries_transport_failure() -> None:
     assert "event=http_retrying" in logged
     assert "category=transport" in logged
     assert "TRANSPORT_MARKER" not in logged
-    assert "FETCHED_TEXT" not in logged
+    assert "FETCHED_TEXT" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_request_text_redacts_userinfo_query_and_fragment() -> None:
@@ -1957,12 +2598,17 @@ async def test_http_executor_request_text_allows_empty_success_body() -> None:
 
 async def test_http_executor_classifies_invalid_json_as_protocol_failure_without_retry() -> None:
     attempts = 0
-    times = iter([0.0, 10.0, 11.0, 12.0])
+    clock = ManualClock()
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
+        clock.now += 1
         return httpx.Response(200, text="not-json", request=request)
+
+    def diagnostics(response: httpx.Response) -> dict[str, object]:
+        clock.now += 1
+        return {}
 
     logger, stream = structured_test_logger("tests.http.invalid-json")
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -1972,13 +2618,14 @@ async def test_http_executor_classifies_invalid_json_as_protocol_failure_without
             provider_name="fake",
             logger=logger,
             sleep=_no_sleep,
-            monotonic=lambda: next(times),
+            monotonic=clock.monotonic,
         )
         with pytest.raises(ProtocolFailure) as caught:
             await executor.request_json(
                 "GET",
                 "https://provider.example.test/data",
                 stage="fetch",
+                response_diagnostics=diagnostics,
             )
 
     assert caught.value.code is ErrorCode.PROTOCOL_ERROR
@@ -1993,7 +2640,7 @@ async def test_http_executor_classifies_invalid_json_as_protocol_failure_without
     assert "transport_type=" not in logged
     assert "attempt=1" in failed_line
     assert "elapsed_ms=2000" in failed_line
-    assert "not-json" not in logged
+    assert "not-json" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_maps_non_retryable_http_error_to_execution_failure() -> None:
@@ -2023,7 +2670,7 @@ async def test_http_executor_maps_non_retryable_http_error_to_execution_failure(
     assert "category=status" in logged
     assert "status=401" in logged
     assert "elapsed_ms=" in logged
-    assert "do-not-log-response-body" not in logged
+    assert "do-not-log-response-body" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_classifies_redirect_as_status_failure_before_json_decode() -> None:
@@ -2057,7 +2704,7 @@ async def test_http_executor_classifies_redirect_as_status_failure_before_json_d
     assert "category=status" in logged
     assert "status=302" in logged
     assert "category=decode" not in logged
-    assert "REDIRECT_BODY_SENTINEL" not in logged
+    assert "REDIRECT_BODY_SENTINEL" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_terminal_transport_failure_includes_elapsed_time() -> None:
@@ -2123,7 +2770,7 @@ async def test_http_executor_logs_transport_retry_without_exception_or_payload_t
     assert "event=http_attempt_completed" in logged
     assert "status=200" in logged
     assert "TRANSPORT_DETAIL_SENTINEL" not in logged
-    assert "REQUEST_BODY_SENTINEL" not in logged
+    assert "REQUEST_BODY_SENTINEL" not in without_debug_body_previews(logged)
 
 
 async def test_http_executor_passes_query_params_without_logging_values() -> None:
@@ -2300,11 +2947,11 @@ async def test_http_executor_logs_safe_transport_subtypes(
         "USERINFO_MARKER",
         "QUERY_MARKER",
         "FRAGMENT_MARKER",
-        "REQUEST_BODY_MARKER",
-        "RESPONSE_BODY_MARKER",
         "traceback=",
     ):
         assert marker not in logged
+    for marker in ("REQUEST_BODY_MARKER", "RESPONSE_BODY_MARKER"):
+        assert marker not in without_debug_body_previews(logged)
 
 
 @pytest.mark.parametrize("response_mode", ["json", "text"])
@@ -2408,3 +3055,65 @@ async def test_request_text_diagnostic_error_preserves_default_classification(
     assert len(fields) == 1
     assert fields[0]["semantic_result"] == "success"
     assert fields[0]["response_kind"] == "text"
+
+
+async def test_retry_uses_a_fresh_rate_budget_after_the_scoped_first_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 0.4)
+    sends: list[float] = []
+    caplog.set_level(logging.DEBUG)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        return httpx.Response(503 if len(sends) == 1 else 200, text="body")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 0.5), provider_name="test", rate_gate=gate
+        )
+
+        async def fetch() -> str:
+            with initial_rate_budget(gate, remaining_seconds=0, waited_seconds=0.5):
+                return await executor.request_text("GET", "https://example.test", stage="fetch")
+
+        task = asyncio.create_task(fetch())
+        try:
+            async with asyncio.timeout(1):
+                while not clock.sleepers:
+                    await asyncio.sleep(0)
+            await clock.advance_to(0.4)
+            assert await asyncio.wait_for(task, 1) == "body"
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert sends == [0, 0.4]
+    acquired = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", "") == "rate_limit_acquired"
+    ]
+    assert [(f["attempt"], f["waited_ms"]) for f in acquired] == [(1, 500), (2, 400)]
+
+
+async def test_zero_remaining_first_attempt_budget_rejects_a_contended_permit_immediately() -> None:
+    clock = ManualClock()
+    gate = _rate_gate(clock, 1)
+    await gate.permit(timeout_seconds=0)
+    sends: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        return httpx.Response(200, text="body")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 0.5), provider_name="test", rate_gate=gate
+        )
+        with initial_rate_budget(gate, remaining_seconds=0, waited_seconds=0.5):
+            async with asyncio.timeout(1):
+                with pytest.raises(ExecutionFailure) as failure:
+                    await executor.request_text("GET", "https://example.test", stage="fetch")
+    assert failure.value.reason == "rate_limit_wait_timeout"
+    assert not sends and not clock.sleepers

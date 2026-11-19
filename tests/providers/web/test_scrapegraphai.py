@@ -9,7 +9,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.scrapegraphai import ScrapeGraphAIAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 async def test_scrapegraphai_search_uses_v2_search_and_sgai_apikey() -> None:
@@ -151,7 +151,7 @@ async def test_scrapegraphai_selects_only_known_error_fields(
     else:
         assert "upstream_message" not in rendered
         assert "upstream_code" not in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
 
 
 @pytest.mark.parametrize(

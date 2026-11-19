@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from io import StringIO
 from pathlib import Path
 from urllib.parse import quote
@@ -38,6 +39,7 @@ from tests.support.acceptance import (
     build_debug_acceptance_runtime,
 )
 from tests.support.fakes import FakeKeywordSearchProvider, FakeLLMClient
+from tests.support.logging import without_debug_body_previews
 
 
 async def _start_acceptance_daemon(
@@ -182,6 +184,16 @@ async def test_debug_cli_workflow_preserves_public_contract_and_correlates_trace
 
     debug_log = paths.debug_log_file.read_text(encoding="utf-8")
     debug_stderr = start_stderr.getvalue()
+    for output in (debug_log, debug_stderr):
+        assert output
+        assert all(
+            re.match(
+                r"[A-Z]+ time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z "
+                r"request=(?:a1b2c3d4|-) ",
+                line,
+            )
+            for line in output.splitlines()
+        )
     assert DEBUG_CREDENTIAL_SENTINEL not in debug_log
     assert DEBUG_CREDENTIAL_SENTINEL not in debug_stderr
     assert f"{DEBUG_CREDENTIAL_SENTINEL}_TRACEBACK_ONLY" not in debug_log
@@ -478,7 +490,8 @@ async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_
     assert len(files) > 1
     file_log = "\n".join(path.read_text() for path in files)
     for logged in (file_log, stderr.getvalue()):
-        assert "SENTINEL" not in logged
+        assert "URL_SENTINEL" not in logged
+        assert "SENTINEL" not in without_debug_body_previews(logged)
         assert credential.reveal() not in logged
         assert "<redacted>" in logged
         assert "upstream_message_truncated=true" in logged
@@ -520,6 +533,84 @@ async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_
             assert f"received={2 if label == 'alpha' else 3}" in staging[0]
             assert f"accepted={2 if label == 'alpha' else 3}" in staging[0]
             assert "rejected=0" in staging[0] and "unprocessed=0" in staging[0]
+
+
+@pytest.mark.parametrize("fault", ["helper", "sink"])
+@pytest.mark.parametrize("status", [200, 403])
+async def test_preview_fault_preserves_keyword_workflow_result_and_error_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str, status: int
+) -> None:
+    from agent_search_gateway.errors import ErrorCode, ExecutionFailure
+    from agent_search_gateway.observability import KeyValueFormatter
+
+    faults = 0
+    sends = 0
+
+    class Stream(StringIO):
+        def write(self, message: str) -> int:
+            nonlocal faults
+            if fault == "sink" and " event=upstream_body_preview " in message:
+                faults += 1
+                raise OSError("offline preview sink")
+            return super().write(message)
+
+    def broken(*args: object) -> str:
+        nonlocal faults
+        faults += 1
+        raise ValueError("offline preview preparation")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        return httpx.Response(
+            status, json={"results": [{"url": "https://example.test/paper", "content": "Abstract"}]}
+        )
+
+    paths = RuntimePaths.from_home(tmp_path)
+    session = configure_debug_logging(paths.debug_log_file, stderr=Stream())
+    if fault == "helper":
+        monkeypatch.setattr(KeyValueFormatter, "redact_for_preview", broken)
+    try:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            provider = TavilyAdapter(
+                name="tavily",
+                api_url="https://tavily.test",
+                secret=SecretValue("offline"),
+                http_executor=HttpJsonExecutor(
+                    client, RetryPolicy(1, 0, 0, 1), provider_name="tavily"
+                ),
+            )
+            invocation = LLMInvocation("chat", "model")
+            stages = LLMStages(
+                {"chat": FakeLLMClient("chat")},
+                judge=invocation,
+                safety=invocation,
+                content_clean=invocation,
+                focus_summary=invocation,
+            )
+            search = SearchOrchestrator(
+                keyword_providers=[provider],
+                llm_invocations=(),
+                quotas=ProviderQuotaManager(web_limits={"tavily": 1}, llm_limits={}),
+                stages=stages,
+                store=URLStore(),
+                result_writer=ResultWriter(paths.results_dir),
+            )
+            workflow = search.keyword_search("public", request_id="aaaabbbb")
+            if status == 200:
+                path = Path(await workflow)
+                assert json.loads(path.read_text()) == {
+                    "url": "https://example.test/paper",
+                    "abstract": "Abstract",
+                }
+            else:
+                with pytest.raises(ExecutionFailure) as raised:
+                    await workflow
+                assert raised.value.code == ErrorCode.ALL_PROVIDERS_FAILED
+                assert not list(paths.results_dir.glob("*.jsonl"))
+    finally:
+        session.close()
+    assert sends == 1 and faults > 0
 
 
 async def test_keyword_redirect_body_rejection_logs_omit_signed_target_query(

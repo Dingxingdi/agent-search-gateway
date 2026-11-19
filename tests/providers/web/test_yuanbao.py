@@ -15,7 +15,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web import yuanbao
 from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter, _response_diagnostics
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures/providers/yuanbao/search.json"
 
@@ -381,14 +381,14 @@ async def test_yuanbao_success_logs_omit_query_pages_and_request_id(
     assert "event=provider_response_diagnostic" in rendered
     assert "event=provider_candidates_summary" in rendered
     assert "received=2" in rendered and "accepted=1" in rendered and "rejected=1" in rendered
+    assert credential.reveal() not in rendered
     for sentinel in (
-        credential.reveal(),
         query,
         body,
         request_id,
         "YUANBAO_WHOLE_RESPONSE_SENTINEL",
     ):
-        assert sentinel not in rendered
+        assert sentinel not in without_debug_body_previews(rendered)
 
 
 async def test_yuanbao_error_logs_bound_and_redact_selected_vendor_fields() -> None:
@@ -431,10 +431,10 @@ async def test_yuanbao_error_logs_bound_and_redact_selected_vendor_fields() -> N
     assert len(rendered.split("upstream_code=", 1)[1].split()[0]) == 128
     assert len(rendered.split("upstream_message=", 1)[1].split()[0]) == 512
     assert "upstream_message_truncated=true" in rendered
-    assert "c" * 128 not in rendered
-    assert "界" * 512 not in rendered
+    assert "c" * 128 not in without_debug_body_previews(rendered)
+    assert "界" * 512 not in without_debug_body_previews(rendered)
+    assert credential.reveal() not in rendered
     for sentinel in (
-        credential.reveal(),
         "CODE_TAIL_SENTINEL",
         "MESSAGE_TAIL_SENTINEL",
         "YUANBAO_ERROR_DETAIL_SENTINEL",
@@ -443,7 +443,7 @@ async def test_yuanbao_error_logs_bound_and_redact_selected_vendor_fields() -> N
         "YUANBAO_ERROR_BODY_SENTINEL",
         "YUANBAO_REQUEST_QUERY_SENTINEL",
     ):
-        assert sentinel not in rendered
+        assert sentinel not in without_debug_body_previews(rendered)
 
 
 async def test_yuanbao_diagnostic_callback_failure_does_not_change_success(

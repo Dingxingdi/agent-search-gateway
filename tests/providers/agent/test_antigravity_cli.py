@@ -82,6 +82,259 @@ def test_terminal_envelope_rejects_unsafe_outcomes(
     assert "raw-secret" not in str(caught.value)
 
 
+async def test_agent_caps_complete_prompt_argument_before_spawn(tmp_path: Path) -> None:
+    from agent_search_gateway.input_limits import TruncatableMessage
+    from agent_search_gateway.providers.agent.antigravity_cli import run_antigravity
+
+    command = write_fake_cli(
+        tmp_path,
+        r"""
+        prompt = sys.argv[sys.argv.index("-p") + 1]
+        result = {
+            "bytes": len(prompt.encode("utf-8")),
+            "prefix": prompt.startswith("[SYSTEM]\nInstruction\n\n[USER]\nFocus\nHEAD"),
+            "suffix": prompt.endswith("TAIL\nEnd"),
+            "marker": "[... truncated ...]" in prompt,
+        }
+        print(json.dumps({"status": "SUCCESS", "response": json.dumps(result)}))
+        """,
+    )
+    result = json.loads(
+        await run_antigravity(
+            None,
+            (
+                {"role": "system", "content": "Instruction"},
+                TruncatableMessage("Focus\n", "HEAD" + "a界" * (30 * 1024) + "TAIL", "\nEnd"),
+            ),
+            provider_name="agy",
+            command=str(command),
+            timeout_seconds=1,
+            pass_env=(),
+            quota=CapacityGate(1),
+        )
+    )
+    assert result["bytes"] <= 98304
+    assert result["prefix"] and result["suffix"] and result["marker"]
+
+
+@pytest.mark.parametrize("mode", ["debug", "info", "late_debug"])
+async def test_agent_previews_the_sent_prompt_and_full_stdout_safely(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    mode: str,
+) -> None:
+    import asyncio
+    import logging
+    from io import StringIO
+
+    from agent_search_gateway import observability
+    from agent_search_gateway.body_preview import BodyScrubber
+    from agent_search_gateway.input_limits import TruncatableMessage
+    from agent_search_gateway.providers.agent import antigravity_cli as adapter
+
+    credential = "PRIVATE_LEFT" + "x" * 2000 + "PRIVATE_MIDDLE" + "y" * 2000 + "PRIVATE_RIGHT"
+    body = "VISIBLE_HEAD " + credential + " VISIBLE_TAIL"
+    monkeypatch.setenv("EXAMPLE_AGENT_ENV", "PRIVATE_ENV")
+    sizes = tmp_path / "sizes.json"
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        prompt = sys.argv[sys.argv.index("-p") + 1]
+        assert "PRIVATE_LEFT" in prompt and "PRIVATE_RIGHT" in prompt
+        assert "PRIVATE_MIDDLE" not in prompt
+        sys.stderr.write("PRIVATE_STDERR " + os.environ["EXAMPLE_AGENT_ENV"])
+        response = json.dumps({{"status": "SUCCESS", "token": "PRIVATE_TOKEN",
+            "url": "https://example.test/page?q=PRIVATE_QUERY",
+            "response": "public text " + "x" * 10000}})
+        Path({str(sizes)!r}).write_text(json.dumps([len(prompt.encode()),len(response.encode())]))
+        sys.stdout.write(response)
+        """,
+    )
+    logger = logging.getLogger(adapter.__name__)
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    stream = StringIO()
+    session = observability.configure_debug_logging(tmp_path / "debug.log", stderr=stream)
+    session.add_secrets(observability.SecretValue(credential))
+    gate = CapacityGate(1)
+    try:
+        if mode != "debug":
+            caplog.set_level(logging.INFO, logger=adapter.__name__)
+
+            def unexpected(*args: object) -> None:
+                pytest.fail("inactive logger prepared a body preview")
+
+            monkeypatch.setattr(BodyScrubber, "project", unexpected)
+            if mode == "info":
+                monkeypatch.setattr(observability, "_active_scrubber", unexpected)
+        async with gate.lease():
+            task = asyncio.create_task(
+                adapter.run_antigravity(
+                    None,
+                    [TruncatableMessage("", body)],
+                    provider_name="alias",
+                    command=str(command),
+                    timeout_seconds=2,
+                    pass_env=("EXAMPLE_AGENT_ENV",),
+                    quota=gate,
+                    prompt_max_bytes=500,
+                )
+            )
+            await asyncio.sleep(0)
+            if mode == "late_debug":
+                caplog.set_level(logging.DEBUG, logger=adapter.__name__)
+        assert await task == "public text " + "x" * 10000
+    finally:
+        session.close()
+    lines = stream.getvalue()
+    all_logs = (
+        lines + (tmp_path / "debug.log").read_text() + repr([r.__dict__ for r in caplog.records])
+    )
+    for forbidden in ("PRIVATE_", "--output-format", "--print-timeout", "EXAMPLE_AGENT_ENV"):
+        assert forbidden not in all_logs
+    previews = [
+        r for r in caplog.records if getattr(r, "gateway_event", None) == "upstream_body_preview"
+    ]
+    if mode == "info":
+        assert not previews and "event=upstream_body_preview" not in lines
+        return
+    [preview] = previews
+    fields = getattr(preview, "gateway_fields", {})
+    sent_bytes, stdout_bytes = json.loads(sizes.read_text())
+    assert (fields["provider"], fields["stage"], fields["attempt"], fields["transport"]) == (
+        "alias",
+        "agent_process",
+        1,
+        "agent_cli",
+    )
+    assert fields["endpoint"] is None and "protocol_attempt" not in fields
+    assert fields["request_body_sent_bytes"] == sent_bytes <= 500
+    assert fields["request_body_original_bytes"] == len(("[USER]\n" + body).encode())
+    assert (
+        fields["request_input_truncated"] is True and fields["request_preview_truncated"] is False
+    )
+    assert fields["response_body_bytes"] == stdout_bytes > 8192
+    assert (
+        fields["response_preview_truncated"] is True
+        and "public text" in fields["response_body_preview"]
+    )
+    assert "https://example.test/page" in fields["response_body_preview"]
+    if mode == "debug":
+        assert (
+            "VISIBLE_HEAD" in fields["request_body_preview"]
+            and "VISIBLE_TAIL" in fields["request_body_preview"]
+        )
+        assert "VISIBLE_HEAD" in lines and "VISIBLE_TAIL" in lines
+    else:
+        assert fields["request_body_preview"] is None
+
+
+@pytest.mark.parametrize("case", ["protected", "nul", "invalid_utf8"])
+async def test_unfit_prompt_is_rejected_before_quota_and_spawn(
+    case: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+    import logging
+
+    from agent_search_gateway.providers.agent.antigravity_cli import run_antigravity
+
+    content = "PRIVATE" + {"protected": "x" * 100, "nul": "\x00", "invalid_utf8": "\ud800"}[case]
+    gate = CapacityGate(1)
+
+    async def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("Rejected prompt reached spawn")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    with pytest.raises(ExecutionFailure) as caught:
+        await run_antigravity(
+            None,
+            ({"role": "system", "content": content},),
+            provider_name="agy",
+            command="unused",
+            timeout_seconds=1,
+            pass_env=(),
+            quota=gate,
+            prompt_max_bytes=32,
+        )
+    assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert caught.value.reason == "input_budget_unfit"
+    assert caught.value.__context__ is None
+    assert gate.max_observed_in_use == 0
+    assert not any(
+        getattr(r, "gateway_event", None) == "upstream_body_preview" for r in caplog.records
+    )
+    [record] = [r for r in caplog.records if getattr(r, "gateway_event", None) == "input_rejected"]
+    fields = getattr(record, "gateway_fields", {})
+    assert fields["reason"] == "input_budget_unfit"
+    assert fields["limit_bytes"] == 32
+    if case == "invalid_utf8":
+        assert "request_body_original_bytes" not in fields
+    else:
+        assert fields["request_body_original_bytes"] == len(("[SYSTEM]\n" + content).encode())
+    assert not record.exc_info
+    assert "PRIVATE" not in repr(fields) + caplog.text + str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("platform", "page_size", "prompt_bytes", "reject"),
+    [
+        ("linux", 4096, 131072, True),
+        ("linux", 4096, 131071, False),
+        ("linux", 65536, 131072, False),
+        ("darwin", 4096, 131072, False),
+        ("linux", 0, 131072, False),
+        ("linux", None, 131072, False),
+    ],
+)
+async def test_agent_checks_only_reliable_single_argument_bound(
+    platform: str,
+    page_size: int | None,
+    prompt_bytes: int,
+    reject: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import errno
+    import os
+    import sys
+
+    from agent_search_gateway.providers.agent.antigravity_cli import run_antigravity
+
+    def sysconf(name: str) -> int:
+        assert name == "SC_PAGE_SIZE"
+        if page_size is None:
+            raise OSError("page size unavailable")
+        return page_size
+
+    observed: list[int] = []
+
+    async def capture_spawn(*argv: str, **kwargs: object) -> None:
+        observed.append(len(argv[argv.index("-p") + 1].encode()))
+        raise OSError(errno.E2BIG, "other arguments or environment exceed OS limit")
+
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(os, "sysconf", sysconf)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture_spawn)
+    gate = CapacityGate(1)
+    with pytest.raises(ExecutionFailure) as caught:
+        await run_antigravity(
+            None,
+            ({"role": "user", "content": "a" * (prompt_bytes - len("[USER]\n"))},),
+            provider_name="agy",
+            command="unused",
+            timeout_seconds=1,
+            pass_env=(),
+            quota=gate,
+            prompt_max_bytes=256 * 1024,
+        )
+
+    assert caught.value.reason == ("input_budget_unfit" if reject else "argument_limit")
+    assert observed == ([] if reject else [prompt_bytes])
+    assert gate.max_observed_in_use == (0 if reject else 1)
+    assert gate.in_use == 0
+
+
 async def test_runner_spawns_one_fresh_process_and_returns_markdown(tmp_path: Path) -> None:
     from agent_search_gateway.providers.agent import antigravity_cli as adapter
 

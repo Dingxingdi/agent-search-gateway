@@ -17,7 +17,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor, ProviderRespon
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 _FIXTURES = Path(__file__).parents[2] / "fixtures" / "providers" / "doubao"
 
@@ -81,7 +81,8 @@ async def test_falsey_metadata_errors_are_terminal_with_safe_diagnostics(
     assert diagnostics[0]["semantic_result"] == "error"
     assert diagnostics[0]["category"] == "provider_response"
     assert diagnostics[0]["upstream_code"] == "unknown"
-    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+    assert "PRIVATE_KEY" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue()) + str(caught.value)
 
 
 @pytest.mark.parametrize("stage", ["search", "fetch"])
@@ -312,7 +313,8 @@ async def test_search_emits_safe_response_diagnostics(
         assert diagnostics[0]["category"] == category
     if fixture_name == "search_error.json":
         assert diagnostics[0]["upstream_code"] == "10403"
-    assert "PRIVATE_" not in stream.getvalue()
+    assert "PRIVATE_KEY" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue())
 
 
 async def test_search_rejects_metadata_error_before_parsing_empty_results() -> None:
@@ -613,7 +615,8 @@ async def test_fetch_response_diagnostics_match_parser(
         assert fields["semantic_result"] == expected.get("semantic_result")
     if upstream_code is not None:
         assert fields.get("upstream_code") == upstream_code
-    assert "PRIVATE_" not in stream.getvalue()
+    assert "PRIVATE_KEY" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue())
 
 
 @pytest.mark.parametrize(
@@ -661,7 +664,10 @@ async def test_fetch_does_not_retry_unknown_business_errors(error: object) -> No
     assert len(diagnostics) == 1
     assert diagnostics[0]["upstream_code"] == "unknown"
     assert diagnostics[0]["category"] == "provider_response"
-    assert "PRIVATE_" not in stream.getvalue() + str(caught.value) + str(caught.value.diagnostics)
+    assert "PRIVATE_KEY" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue()) + str(
+        caught.value
+    ) + str(caught.value.diagnostics)
 
 
 async def test_fetch_invalid_json_uses_shared_decode_failure() -> None:
@@ -683,7 +689,8 @@ async def test_fetch_invalid_json_uses_shared_decode_failure() -> None:
             await adapter.fetch(normalize_url("https://example.com/PRIVATE_URL"))
     assert len(requests) == 1
     assert "category=decode" in stream.getvalue()
-    assert "PRIVATE_" not in stream.getvalue()
+    assert "PRIVATE_KEY" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue())
 
 
 async def test_fetch_propagates_cancellation_without_retry() -> None:

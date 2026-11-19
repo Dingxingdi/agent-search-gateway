@@ -13,7 +13,7 @@ from agent_search_gateway.providers.web.common import HttpRequester
 from agent_search_gateway.providers.web.scraperapi import ScraperAPIAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingHttpExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 def _adapter(executor: HttpRequester) -> ScraperAPIAdapter:
@@ -142,7 +142,7 @@ async def test_scraperapi_reports_root_error_with_original_public_failure() -> N
     assert "upstream_message=" in rendered
     assert "Vendor quota exhausted" in rendered
     assert "semantic_result=error" in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
     assert "upstream_message" in caught.value.diagnostics
 
 
@@ -268,7 +268,7 @@ async def test_scraperapi_selects_only_known_error_children_and_preserves_failur
         diagnostic = caught.value.diagnostics[name]
         assert isinstance(diagnostic, DiagnosticText)
         assert diagnostic.text == value
-    assert "PRIVATE_" not in stream.getvalue()
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue())
     assert stream.getvalue().count("event=provider_response_diagnostic") == 1
 
 

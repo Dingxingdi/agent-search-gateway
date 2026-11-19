@@ -95,6 +95,31 @@ def _agent_data(**provider_values: object) -> dict[str, object]:
     return data
 
 
+@pytest.mark.parametrize(
+    ("limits", "llm_bytes", "agent_bytes"),
+    [
+        ({"agent_prompt_bytes": 1024}, 131072, 1024),
+        ({"llm_request_body_bytes": 2048, "agent_prompt_bytes": 1024}, 2048, 1024),
+        ({"llm_request_body_bytes": 1, "agent_prompt_bytes": 1}, 1, 1),
+    ],
+)
+def test_input_limits_customize_agent_budget_independently(
+    limits: dict[str, object], llm_bytes: int, agent_bytes: int
+) -> None:
+    data = _agent_data()
+    data["input_limits"] = limits
+    original = copy.deepcopy(data)
+
+    resolved = resolve_config(data, ProviderRegistry(), _environment())
+
+    assert resolved.input_limits.llm_request_body_bytes == llm_bytes
+    assert resolved.input_limits.agent_prompt_bytes == agent_bytes
+    assert resolved.agent.providers[0].command == "agy"
+    assert resolved.agent.search_invocations[0].model is None
+    assert resolved.llm.search_invocations[0].extra_body == {"entry": {"id": 1}}
+    assert data == original
+
+
 def test_agent_config_rejects_unknown_harness() -> None:
     from agent_search_gateway.errors import ConfigFailure, ErrorCode
 

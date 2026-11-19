@@ -90,6 +90,30 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
         await runtime.aclose()
 
 
+async def test_runtime_applies_configured_agent_prompt_limit(tmp_path: Path) -> None:
+    evidence = tmp_path / "prompt-size"
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        prompt = sys.argv[sys.argv.index("-p") + 1]
+        Path({str(evidence)!r}).write_text(str(len(prompt.encode("utf-8"))))
+        print(json.dumps({{"status": "SUCCESS", "response": {web_markdown()!r}}}))
+        """,
+    )
+    raw = agent_config(str(command))
+    raw["input_limits"] = {"agent_prompt_bytes": 4096}
+    runtime = Runtime.build(
+        resolve_config(raw, build_default_registry(), _environment()),
+        RuntimePaths.from_home(tmp_path),
+        http_client_factory=_CountingAsyncClient,
+    )
+    try:
+        await runtime.search_orchestrator.agent_search("q界" * 2048, request_id="11111111")
+        assert int(evidence.read_text()) <= 4096
+    finally:
+        await runtime.aclose()
+
+
 @pytest.mark.parametrize("command", ["bin/agy", "./bin/agy", "agy"])
 async def test_runtime_anchors_agent_paths_before_invocation_cwd_changes(
     tmp_path: Path,

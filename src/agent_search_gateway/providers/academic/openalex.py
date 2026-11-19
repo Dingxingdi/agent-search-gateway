@@ -58,10 +58,12 @@ class OpenAlexProvider:
         self,
         executor: AcademicHttpExecutor,
         *,
+        api_key: SecretValue,
         api_url: str = _DEFAULT_API_URL,
         contact_email: SecretValue | None = None,
     ) -> None:
         self._executor = executor
+        self._api_key = api_key
         self._api_url = api_url
         self._contact = contact_email
 
@@ -74,6 +76,7 @@ class OpenAlexProvider:
             "GET",
             join_url(self._api_url, "works"),
             stage="paper_search",
+            headers={"Authorization": f"Bearer {self._api_key.reveal()}"},
             params=params,
             response_diagnostics=_response_diagnostics,
         )

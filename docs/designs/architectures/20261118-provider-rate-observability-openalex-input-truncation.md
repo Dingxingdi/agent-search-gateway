@@ -1,7 +1,7 @@
 # Architecture: Provider 限速、可追踪日志、OpenAlex 鉴权和出站裁剪
 
 - 日期：2026-11-18
-- 状态：Brainstorming 架构方案已由用户确认；尚未实施代码
+- 状态：架构方案已由用户确认，2026-11-19 已完成实现；验证结果与保留限制见对应实施计划第 6 节
 - 基线：edcc627，独立 worktree：patch-rate-limits-logging-openalex-input-caps-20261118
 
 ## 1. Scope & Assumptions
@@ -106,6 +106,10 @@ Agent Runner 以最终单个 -p 参数的 UTF-8 字节计算预算，保留角�
 ### 3.6 官方免费层级速率调查：31/31 服务
 
 速率指**公开的请求频率/技术并发**，不是赠送 credits、月度可用调用次数或计费日预算。表中“建议”是将来写入 config.example.toml 的示例，不是程序内置强制默认。
+
+**2026-11-19 调查复核注记。** 下表保留初查记录，配置请以[最新 31 项来源表](../../provider-rate-limits.md)的端点、认证及套餐条件为准。Linkup、AnySearch、Keenable 分别核实到组织 Key、注册 Free、认证组织的 10 QPS；Bright Data 未充值 Free Tier 的适用 zone 共享 1000 RPM；元宝未知版本保守 5 QPS。Firecrawl 的 2 个并发浏览器是服务端 worker，Exa 普通 Search 与 Contents 分别为 10 和 100 QPS，Scrape.do 同步 Free 为 5 并发。Brave 与 Parallel 的数值分别适用于 Search Prepaid 与 keyed Build API，Decodo 的 10 RPS 要核对旧 Basic 接口资格。SerpApi 发布的是小时吞吐量。
+
+TinyFish Fetch 另有每日 1000 URL 的技术上限，日重置算法未经核实，本地采用滚动 24 小时并同时保留分钟、小时窗口。豆包默认账号 Search 为 10 QPS，免费-only 账号和 Fetch 的固定阈值未公开核实。OpenAlex 超过 5 个 Boolean operator 的查询限 2 RPS 且不可突发，因此示例另设 0.5 秒间隔；宽 topic/concept OR 和 semantic search 的 1 RPS 不属于当前 adapter。启用时必须提供 Key 是本项目的决定，官方仍允许部分基础匿名查询。dblp 的 2 秒间隔是礼貌建议，CORE 的 1/10 秒是本地保守选择，均未核实为当前端点固定硬阈值。全表来源覆盖不代表全服务实测成功。
 
 #### Web：24 个
 
@@ -214,4 +218,4 @@ Agent Runner 以最终单个 -p 参数的 UTF-8 字节计算预算，保留角�
 - upstream_body_preview：每个实际 attempt 一条 DEBUG 事件；Request 与 Response 原始预览字段可为 null，采用两个不同的 truncated 标志区分请求本身裁剪和日志预览裁剪。
 - 兼容性：除 enabled OpenAlex Key 要求外旧配置仍有效；不修改 Search/Fetch/Paper 的对外结果模式或重试总次数。
 
-第一阶段架构设计已获用户确认，LLM 默认 128 KiB、Agent 默认 96 KiB；下一阶段依次提交 Error Handling 和 Testing 设计供审阅，整体同意后再计划代码实现。
+架构、Error Handling 与 Testing 设计均已确认并实施；LLM 默认 128 KiB、Agent 默认 96 KiB。对应实施计划保留各任务的测试证据、真实上游验证结果及限制。

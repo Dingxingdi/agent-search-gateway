@@ -24,6 +24,7 @@ from agent_search_gateway.providers.diagnostics import (
     best_effort_diagnostics,
     diagnostic_fields_from_failure,
     safe_diagnostic_fields,
+    safe_failure_reason,
 )
 from agent_search_gateway.providers.http import (
     HttpJsonExecutor,
@@ -36,6 +37,32 @@ from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapt
 from agent_search_gateway.providers.web.youcom import YouComAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.logging import structured_test_logger
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [
+        (ErrorCode.LLM_STAGE_FAILED, "input_budget_unfit"),
+        (ErrorCode.ALL_PROVIDERS_FAILED, "input_budget_unfit"),
+        (ErrorCode.ALL_PROVIDERS_FAILED, "rate_limit_wait_timeout"),
+    ],
+)
+def test_safe_failure_reason_preserves_input_and_rate_failures(
+    code: ErrorCode, reason: str
+) -> None:
+    failure = ExecutionFailure(code, "safe local failure", reason=reason)
+
+    assert safe_failure_reason(failure) == reason
+
+
+def test_safe_failure_reason_filters_unknown_reason() -> None:
+    failure = ExecutionFailure(
+        ErrorCode.ALL_PROVIDERS_FAILED,
+        "safe local failure",
+        reason="synthetic_unknown_reason_sentinel",
+    )
+
+    assert safe_failure_reason(failure) == "execution_failure"
 
 
 def test_candidate_counts_render_as_bounded_structured_values() -> None:

@@ -12,7 +12,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.linkup import LinkupAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 _FIXTURES = Path(__file__).parents[2] / "fixtures/providers/linkup"
 
@@ -110,7 +110,7 @@ async def test_linkup_counts_malformed_name_and_content_without_logging_them(
     assert summaries[0]["accepted"] == 1
     assert summaries[0]["rejected"] == 4
     assert summaries[0]["rejection_counts"] == {"invalid_record": 4}
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
     assert "upstream_message" not in rendered
     assert "semantic_result=success" in rendered
 

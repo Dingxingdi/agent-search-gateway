@@ -14,7 +14,7 @@ from agent_search_gateway.providers.http import HttpJsonExecutor, ProviderRespon
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.url_normalization import normalize_url
 from tests.support.http import RecordingHttpExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 def _events(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, object]]:
@@ -165,7 +165,7 @@ async def test_brightdata_json_error_diagnostics_use_only_known_fields() -> None
     assert fields["semantic_result"] == "error"
     assert fields["upstream_code"] == "quota_limit"
     assert fields["upstream_message"] == "Vendor quota exhausted"
-    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue()) + str(caught.value)
 
 
 async def test_brightdata_invalid_organic_reports_invalid_envelope(
@@ -605,8 +605,6 @@ async def test_brightdata_header_events_expose_safe_metadata(
         "TARGET_PATH_MARKER",
         "HEADER_QUERY_MARKER",
         "HEADER_CONTROL_MARKER",
-        "RESULT_PATH_MARKER",
-        "BODY_MARKER",
         "CODE_MARKER",
         credential.reveal(),
         "[REDACTED_SECRET]",
@@ -614,6 +612,8 @@ async def test_brightdata_header_events_expose_safe_metadata(
         "Traceback",
     ):
         assert marker not in logged + message
+    for marker in ("RESULT_PATH_MARKER", "BODY_MARKER"):
+        assert marker not in without_debug_body_previews(logged) + message
 
     lines = logged.splitlines()
     retry_lines = [line for line in lines if "event=http_retrying" in line]
@@ -841,7 +841,7 @@ async def test_brightdata_header_diagnostics_override_body_error_in_one_event() 
     assert fields["upstream_message"] == "redirect location was rejected"
     assert fields["http_status"] == "200"
     assert fields["upstream_status"] == "502"
-    assert "PRIVATE_" not in stream.getvalue() + str(caught.value)
+    assert "PRIVATE_" not in without_debug_body_previews(stream.getvalue()) + str(caught.value)
 
 
 async def test_brightdata_long_header_message_redacts_before_truncation() -> None:

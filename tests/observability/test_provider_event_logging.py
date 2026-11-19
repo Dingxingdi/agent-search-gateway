@@ -37,6 +37,7 @@ from tests.support.fakes import (
     FakeLLMClient,
     FakeOAResolver,
 )
+from tests.support.logging import without_debug_body_previews
 
 
 async def test_paper_workflow_logs_lifecycle_rejection_and_enrichment_without_payloads(
@@ -288,7 +289,8 @@ async def test_provider_terminal_event_preserves_upstream_code_after_retries(
         assert len(events("provider_completed", "c")) == 1
         assert sum("event=workflow_completed " in line for line in lines) == 1
         assert "event=workflow_failed " not in logged
-        assert "SENTINEL" not in logged
+        assert "CREDENTIAL_SENTINEL" not in logged
+        assert "SENTINEL" not in without_debug_body_previews(logged)
         assert "upstream_code=quota_exhausted" in terminal[0]
 
 

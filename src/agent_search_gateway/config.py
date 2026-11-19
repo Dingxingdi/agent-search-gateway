@@ -22,11 +22,73 @@ from .providers.academic.registry import (
 )
 from .providers.registry import ProviderRegistry, WebProviderRegistration
 
-_WEB_SHARED_KEYS = frozenset({"enable_search", "enable_fetch", "api_key_env", "max_concurrency"})
+_WEB_SHARED_KEYS = frozenset(
+    {
+        "enable_search",
+        "enable_fetch",
+        "api_key_env",
+        "max_concurrency",
+        "rate_limits",
+        "min_interval_seconds",
+    }
+)
 _ACADEMIC_SHARED_KEYS = frozenset(
-    {"enabled", "max_concurrency", "api_key_env", "contact_email_env"}
+    {
+        "enabled",
+        "max_concurrency",
+        "api_key_env",
+        "contact_email_env",
+        "rate_limits",
+        "min_interval_seconds",
+    }
 )
 _ACADEMIC_RESERVED_OPTIONS = frozenset({"executor", "api_key", "contact_email", "name"})
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRateWindow:
+    requests: int
+    period_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRatePolicy:
+    windows: tuple[ResolvedRateWindow, ...] = ()
+    min_interval_seconds: float | None = None
+
+
+def _positive_rate_seconds(value: object, label: str) -> float:
+    try:
+        return _positive_float(value, label)
+    except OverflowError:
+        raise _config_error(f"{label} must be a positive number") from None
+
+
+def _resolve_rate_policy(table: Mapping[str, object], label: str) -> ResolvedRatePolicy:
+    raw_windows = table.get("rate_limits", [])
+    if not isinstance(raw_windows, list):
+        raise _config_error(f"{label}.rate_limits must be an array of tables")
+    windows: list[ResolvedRateWindow] = []
+    for index, raw_window in enumerate(raw_windows):
+        window_label = f"{label}.rate_limits[{index}]"
+        window = _require_mapping(raw_window, window_label)
+        if set(window) - {"requests", "period_seconds"}:
+            raise _config_error(f"{window_label} only accepts requests and period_seconds")
+        for key in ("requests", "period_seconds"):
+            if key not in window:
+                raise _config_error(f"{window_label}.{key} is required")
+        windows.append(
+            ResolvedRateWindow(
+                _positive_int(window["requests"], f"{window_label}.requests"),
+                _positive_rate_seconds(window["period_seconds"], f"{window_label}.period_seconds"),
+            )
+        )
+    interval = (
+        _positive_rate_seconds(table["min_interval_seconds"], f"{label}.min_interval_seconds")
+        if "min_interval_seconds" in table
+        else None
+    )
+    return ResolvedRatePolicy(tuple(windows), interval)
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +100,7 @@ class ResolvedWebProviderConfig:
     api_key_env: str | None
     secret: SecretValue | None
     options: Mapping[str, object]
+    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +162,8 @@ def _resolve_one_web_provider(
         f"web provider {name} max_concurrency",
     )
 
+    rate_policy = _resolve_rate_policy(table, f"web_providers.{name}")
+
     if not enable_search and not enable_fetch:
         return ResolvedWebProviderConfig(
             name=name,
@@ -108,6 +173,7 @@ def _resolve_one_web_provider(
             api_key_env=None,
             secret=None,
             options=MappingProxyType(dict(options)),
+            rate_policy=rate_policy,
         )
 
     if registration is None:
@@ -128,6 +194,7 @@ def _resolve_one_web_provider(
             api_key_env=None,
             secret=None,
             options=MappingProxyType(dict(options)),
+            rate_policy=rate_policy,
         )
 
     api_key_env = table.get("api_key_env")
@@ -145,6 +212,7 @@ def _resolve_one_web_provider(
         api_key_env=api_key_env,
         secret=SecretValue(secret_text),
         options=MappingProxyType(dict(options)),
+        rate_policy=rate_policy,
     )
 
 
@@ -186,6 +254,7 @@ class ResolvedAcademicProviderConfig:
     contact_email_env: str | None
     contact_email: SecretValue | None
     options: Mapping[str, object]
+    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +271,7 @@ class ResolvedOAResolverConfig:
     contact_email_env: str | None
     contact_email: SecretValue | None
     options: Mapping[str, object]
+    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
 
 
 def _enabled(table: Mapping[str, object], label: str) -> bool:
@@ -289,6 +359,7 @@ def resolve_academic_provider_config(
             table.get("max_concurrency", default_limit),
             f"academic provider {name} max_concurrency",
         )
+        rate_policy = _resolve_rate_policy(table, f"academic_providers.{name}")
         if not enabled:
             for key, requirement in (
                 ("api_key_env", registration.authentication),
@@ -312,6 +383,7 @@ def resolve_academic_provider_config(
                     None,
                     None,
                     MappingProxyType(dict(options)),
+                    rate_policy,
                 )
             )
             continue
@@ -339,6 +411,7 @@ def resolve_academic_provider_config(
                 contact_env,
                 contact_value,
                 MappingProxyType(dict(options)),
+                rate_policy,
             )
         )
     return ResolvedAcademicProviderGroup(default_limit, tuple(providers))
@@ -359,6 +432,7 @@ def resolve_oa_resolver_config(
         enabled = _enabled(table, f"oa_resolvers.{name}")
         options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
         _validate_academic_options(name, registration, options)
+        rate_policy = _resolve_rate_policy(table, f"oa_resolvers.{name}")
         if not enabled:
             continue
         if resolved is not None:
@@ -384,6 +458,7 @@ def resolve_oa_resolver_config(
             contact_env,
             contact_value,
             MappingProxyType(dict(options)),
+            rate_policy,
         )
     return resolved
 
@@ -427,6 +502,12 @@ class ResolvedAgentConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedInputLimits:
+    llm_request_body_bytes: int = 131072
+    agent_prompt_bytes: int = 98304
+
+
+@dataclass(frozen=True, slots=True)
 class ResolvedConfig:
     web: ResolvedWebProviderGroup
     llm: ResolvedLLMConfig
@@ -434,6 +515,7 @@ class ResolvedConfig:
     academic: ResolvedAcademicProviderGroup = field(default_factory=ResolvedAcademicProviderGroup)
     oa_resolver: ResolvedOAResolverConfig | None = None
     agent: ResolvedAgentConfig = field(default_factory=ResolvedAgentConfig)
+    input_limits: ResolvedInputLimits = ResolvedInputLimits()
 
 
 def _required_string(table: Mapping[str, object], key: str, label: str) -> str:
@@ -693,6 +775,22 @@ def resolve_retry_policy(data: Mapping[str, object]) -> RetryPolicy:
     )
 
 
+def _resolve_input_limits(data: Mapping[str, object]) -> ResolvedInputLimits:
+    table = _require_mapping(data.get("input_limits", {}), "input_limits")
+    if set(table) - {"llm_request_body_bytes", "agent_prompt_bytes"}:
+        raise _config_error(
+            "input_limits only accepts llm_request_body_bytes and agent_prompt_bytes"
+        )
+    return ResolvedInputLimits(
+        llm_request_body_bytes=_positive_int(
+            table.get("llm_request_body_bytes", 131072), "input_limits.llm_request_body_bytes"
+        ),
+        agent_prompt_bytes=_positive_int(
+            table.get("agent_prompt_bytes", 98304), "input_limits.agent_prompt_bytes"
+        ),
+    )
+
+
 def resolve_config(
     data: Mapping[str, object],
     registry: ProviderRegistry,
@@ -718,6 +816,7 @@ def resolve_config(
         academic=academic,
         oa_resolver=oa_resolver,
         agent=resolve_agent_config(data),
+        input_limits=_resolve_input_limits(data),
     )
 
 

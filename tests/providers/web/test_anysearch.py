@@ -11,7 +11,7 @@ from agent_search_gateway.providers.contracts import KeywordSearchHit
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.anysearch import AnySearchAdapter
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures/providers/anysearch/search.json"
 
@@ -87,4 +87,4 @@ async def test_anysearch_diagnoses_failure_without_changing_code_validation(code
         assert "category=invalid_envelope" in rendered
         assert "upstream_code" not in rendered
         assert "upstream_message" not in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)

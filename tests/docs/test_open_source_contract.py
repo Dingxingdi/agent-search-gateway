@@ -22,6 +22,7 @@ REQUIRED_PATHS = (
     "SECURITY.md",
     "SUPPORT.md",
     "docs/maintainers/repository-settings.md",
+    "docs/provider-rate-limits.md",
     "docs/public-interface.md",
     "docs/site/index.html",
 )

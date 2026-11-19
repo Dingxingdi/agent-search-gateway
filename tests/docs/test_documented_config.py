@@ -8,7 +8,13 @@ import httpx
 import pytest
 
 from agent_search_gateway.cli import build_parser
-from agent_search_gateway.config import load_toml, resolve_config, resolve_retry_policy
+from agent_search_gateway.config import (
+    ResolvedAcademicProviderConfig,
+    ResolvedWebProviderConfig,
+    load_toml,
+    resolve_config,
+    resolve_retry_policy,
+)
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.academic.defaults import (
     build_default_academic_registry,
@@ -19,6 +25,100 @@ from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
 
 _ROOT = Path(__file__).parents[2]
+
+
+def test_documented_rate_reference_covers_registered_non_llm_providers() -> None:
+    registries = (
+        build_default_registry(),
+        build_default_academic_registry(),
+        build_default_oa_resolver_registry(),
+    )
+    expected = {item.name for reg in registries for item in reg.list_in_registration_order()}
+    reference = _ROOT / "docs/provider-rate-limits.md"
+    assert reference.is_file()
+    rows = [
+        line.strip("|").split("|")
+        for line in reference.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `")
+    ]
+    names = [cells[0].strip().strip("`") for cells in rows]
+    assert set(names) == expected
+    assert len(rows) == len(expected) == 31
+    for name, product, mode, upstream, local, sources, checked in rows:
+        assert all(cell.strip() for cell in (product, mode, upstream, local)), name
+        assert re.search(r"\]\(https://[^)]+\)", sources), name
+        assert checked.strip() == "2026-11-19", name
+
+
+def test_example_input_limits_and_provider_rate_policies() -> None:
+    raw = load_toml(_ROOT / "config.example.toml")
+    assert raw.get("input_limits") == {
+        "llm_request_body_bytes": 131072,
+        "agent_prompt_bytes": 98304,
+    }
+    web = build_default_registry()
+    academic = build_default_academic_registry()
+    oa = build_default_oa_resolver_registry()
+    resolved = resolve_config(
+        raw, web, _stub_environment(raw), academic_registry=academic, oa_resolver_registry=oa
+    )
+    assert resolved.input_limits.llm_request_body_bytes == 131072
+    assert resolved.input_limits.agent_prompt_bytes == 98304
+    expected_windows = {
+        "anysearch": [(10, 1)],
+        "brave": [(50, 1)],
+        "brightdata": [(1000, 60)],
+        "core": [(1, 10)],
+        "crossref": [(1, 1)],
+        "doubao": [(10, 1)],
+        "exa": [(10, 1)],
+        "firecrawl": [(10, 60)],
+        "jina": [(20, 60)],
+        "keenable": [(10, 1)],
+        "linkup": [(10, 1)],
+        "openalex": [(30, 1)],
+        "parallel": [(600, 60)],
+        "semantic_scholar": [(1, 1)],
+        "serpapi": [(50, 3600)],
+        "tavily": [(100, 60)],
+        "tinyfish": [(30, 60), (500, 3600), (1000, 86400)],
+        "youcom": [(10, 1)],
+        "yuanbao": [(5, 1)],
+    }
+    intervals = {"arxiv": 3, "dblp": 2, "openalex": 0.5}
+    capacities = {"arxiv": 1, "crossref": 1, "scrape_do": 5, "scraperapi": 5, "scrapingant": 1}
+    providers: list[ResolvedWebProviderConfig | ResolvedAcademicProviderConfig] = [
+        *resolved.web.providers,
+        *resolved.academic.providers,
+    ]
+    for provider in providers:
+        policy = provider.rate_policy
+        assert [(w.requests, w.period_seconds) for w in policy.windows] == expected_windows.get(
+            provider.name, []
+        ), provider.name
+        assert policy.min_interval_seconds == intervals.get(provider.name), provider.name
+        assert provider.max_concurrency == capacities.get(provider.name, 3), provider.name
+        assert {"rate_limits", "min_interval_seconds", "max_concurrency"}.isdisjoint(
+            provider.options
+        )
+
+    openalex = next(p for p in resolved.academic.providers if p.name == "openalex")
+    assert openalex.api_key_env == "OPENALEX_API_KEY"
+    assert openalex.api_key is not None
+    assert resolved.oa_resolver is None
+    resolvers = raw["oa_resolvers"]
+    assert isinstance(resolvers, dict)
+    unpaywall = resolvers["unpaywall"]
+    assert unpaywall["enabled"] is False
+    unpaywall.update(enabled=True, contact_email_env="UNPAYWALL_CONTACT_EMAIL")
+    enabled = resolve_config(
+        raw, web, _stub_environment(raw), academic_registry=academic, oa_resolver_registry=oa
+    ).oa_resolver
+    assert enabled is not None
+    assert [(w.requests, w.period_seconds) for w in enabled.rate_policy.windows] == [
+        (100000, 86400)
+    ]
+    assert "rate_limits" not in enabled.options
 
 
 def test_agent_example_config_matches_documented_command() -> None:

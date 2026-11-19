@@ -28,7 +28,7 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
             "max_concurrency": 4,
         },
         "arxiv": {"enabled": False},
-        "openalex": {"enabled": True},
+        "openalex": {"enabled": True, "api_key_env": "ENV_A"},
     }
     resolved = resolve_config(
         raw,
@@ -64,6 +64,8 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
         "core",
         "openalex",
     ]
+    assert runtime.quotas.get_rate("academic", "arxiv") is None
+    assert runtime.quotas.get_rate("oa", "unpaywall") is None
     assert runtime.oa_resolver is None
     assert runtime.quotas.get_academic("core").limit == 4
     assert runtime.quotas.get_academic("openalex").limit == 2

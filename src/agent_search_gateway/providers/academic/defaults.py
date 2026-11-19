@@ -29,7 +29,7 @@ def build_default_academic_registry() -> AcademicProviderRegistry:
             "none",
         ),
         AcademicProviderRegistration(
-            "openalex", OpenAlexProvider, _ALLOWED_OPTIONS, "none", "optional"
+            "openalex", OpenAlexProvider, _ALLOWED_OPTIONS, "required", "optional"
         ),
         AcademicProviderRegistration("dblp", DblpProvider, _ALLOWED_OPTIONS, "none", "none"),
         AcademicProviderRegistration(

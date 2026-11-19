@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import signal
+import sys
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import dataclass
@@ -14,7 +15,8 @@ from tempfile import TemporaryDirectory
 
 from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
-from ...observability import log_event
+from ...input_limits import InputBudgetUnfit, PreparedInput, fit_messages_to_budget
+from ...observability import log_event, log_upstream_body_preview, make_input_preview_projector
 from ..contracts import ChatMessage
 from ..diagnostics import best_effort_diagnostics, safe_diagnostic_fields
 
@@ -64,7 +66,7 @@ def _reject_constant(value: str) -> None:
 
 
 def _decode_terminal_response(
-    stdout: bytes, returncode: int, *, diagnostics: dict[str, object] | None = None
+    stdout: bytes | bytearray, returncode: int, *, diagnostics: dict[str, object] | None = None
 ) -> str:
     if returncode != 0:
         raise _execution_failure("nonzero_exit")
@@ -117,6 +119,7 @@ def _terminal_error_fields(envelope: dict[str, object]) -> dict[str, object]:
 @dataclass(slots=True)
 class _ByteCount:
     observed: int = 0
+    eof: bool = False
 
 
 _STDOUT_LIMIT_BYTES = 4 * 1024 * 1024
@@ -124,19 +127,15 @@ _STDERR_LIMIT_BYTES = 256 * 1024
 
 
 async def _read_stream(
-    stream: asyncio.StreamReader, *, capture: bool, limit: int, counter: _ByteCount | None = None
-) -> bytes:
-    chunks: list[bytes] = []
-    size = 0
+    stream: asyncio.StreamReader, *, capture: bytearray | None, limit: int, counter: _ByteCount
+) -> None:
     while chunk := await stream.read(64 * 1024):
-        size += len(chunk)
-        if counter is not None:
-            counter.observed = size
-        if size > limit:
+        counter.observed += len(chunk)
+        if capture is not None:
+            capture.extend(chunk[: limit - len(capture)])
+        if counter.observed > limit:
             raise _execution_failure("output_limit")
-        if capture:
-            chunks.append(chunk)
-    return b"".join(chunks)
+    counter.eof = True
 
 
 _HARD_TIMEOUT_MARGIN_SECONDS = 5.0
@@ -188,7 +187,7 @@ async def _drain_and_reap(process: asyncio.subprocess.Process, timeout: float) -
 
 async def _cleanup_process(
     spawn: asyncio.Task[asyncio.subprocess.Process] | None,
-    tasks: Sequence[asyncio.Task[bytes] | asyncio.Task[int]],
+    tasks: Sequence[asyncio.Task[None] | asyncio.Task[int]],
 ) -> str | None:
     if spawn is None:
         return None
@@ -248,6 +247,62 @@ async def _finish_cleanup(task: asyncio.Task[str | None]) -> str | None:
         raise
 
 
+def _system_argument_limit() -> int | None:
+    if sys.platform != "linux":
+        return None
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+    if type(page_size) is not int or page_size <= 0:
+        return None
+    # Linux MAX_ARG_STRLEN includes the terminating NUL.
+    return 32 * page_size - 1
+
+
+def _prepare_prompt(messages: Sequence[ChatMessage], max_bytes: int) -> PreparedInput:
+    original_bytes: int | None = None
+
+    def encode(candidate: Sequence[ChatMessage]) -> bytes:
+        nonlocal original_bytes
+        content = "\n\n".join(
+            f"[{message['role'].upper()}]\n{message['content']}" for message in candidate
+        ).encode("utf-8")
+        if original_bytes is None:
+            original_bytes = len(content)
+        return content
+
+    system_limit: int | None = None
+    try:
+        prepared = fit_messages_to_budget(
+            messages,
+            max_bytes=max_bytes,
+            encode=encode,
+            preview_projector=make_input_preview_projector(logging.getLogger(__name__)),
+        )
+        system_limit = _system_argument_limit()
+        if system_limit is not None and len(prepared.content) > system_limit:
+            raise InputBudgetUnfit()
+        if b"\0" in prepared.content:
+            raise InputBudgetUnfit()
+        return prepared
+    except InputBudgetUnfit:
+        sizes = {"limit_bytes": max_bytes}
+        if system_limit is not None and system_limit < max_bytes:
+            sizes["system_limit_bytes"] = system_limit
+        if original_bytes is not None:
+            sizes["request_body_original_bytes"] = original_bytes
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "input_rejected",
+            exc_info=False,
+            reason="input_budget_unfit",
+            **sizes,
+        )
+    raise _execution_failure("input_budget_unfit")
+
+
 async def run_antigravity(
     model: str | None,
     messages: Sequence[ChatMessage],
@@ -257,10 +312,10 @@ async def run_antigravity(
     timeout_seconds: float,
     pass_env: Sequence[str],
     quota: CapacityGate,
+    prompt_max_bytes: int = 98304,
 ) -> str:
-    prompt = "\n\n".join(
-        f"[{message['role'].upper()}]\n{message['content']}" for message in messages
-    )
+    prepared = _prepare_prompt(messages, prompt_max_bytes)
+    prompt = prepared.content.decode("utf-8")
     timeout_argument = format(Decimal(str(timeout_seconds)), "f")
     if "." in timeout_argument:
         timeout_argument = timeout_argument.rstrip("0").rstrip(".")
@@ -278,7 +333,9 @@ async def run_antigravity(
     async with quota.lease():
         with TemporaryDirectory(prefix="agent-search-") as directory:
             spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
-            tasks: list[asyncio.Task[bytes] | asyncio.Task[int]] = []
+            spawn_attempted = False
+            stdout_capture = bytearray()
+            tasks: list[asyncio.Task[None] | asyncio.Task[int]] = []
             succeeded = False
             started = asyncio.get_running_loop().time()
             process: asyncio.subprocess.Process | None = None
@@ -340,11 +397,13 @@ async def run_antigravity(
 
             try:
                 async with asyncio.timeout(timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS):
+                    env = _curated_environment(pass_env)
+                    spawn_attempted = True
                     spawn = asyncio.create_task(
                         asyncio.create_subprocess_exec(
                             *argv,
                             cwd=directory,
-                            env=_curated_environment(pass_env),
+                            env=env,
                             start_new_session=True,
                             stdin=asyncio.subprocess.DEVNULL,
                             stdout=asyncio.subprocess.PIPE,
@@ -356,7 +415,7 @@ async def run_antigravity(
                     stdout = asyncio.create_task(
                         _read_stream(
                             process.stdout,
-                            capture=True,
+                            capture=stdout_capture,
                             limit=_STDOUT_LIMIT_BYTES,
                             counter=stdout_count,
                         )
@@ -364,7 +423,7 @@ async def run_antigravity(
                     stderr = asyncio.create_task(
                         _read_stream(
                             process.stderr,
-                            capture=False,
+                            capture=None,
                             limit=_STDERR_LIMIT_BYTES,
                             counter=stderr_count,
                         )
@@ -373,7 +432,7 @@ async def run_antigravity(
                     tasks.extend((stdout, stderr, wait))
                     await asyncio.gather(*tasks)
                     response = _decode_terminal_response(
-                        stdout.result(), wait.result(), diagnostics=diagnostics
+                        stdout_capture, wait.result(), diagnostics=diagnostics
                     )
                     succeeded = True
                     return response
@@ -392,6 +451,8 @@ async def run_antigravity(
                 failure = exc
                 raise
             finally:
+                # Cleanup can force EOF on a pipe that was still open at interruption.
+                stdout_incomplete = not stdout_count.eof
                 cleanup = asyncio.create_task(_cleanup_process(spawn, tasks))
                 try:
                     cleanup_reason = await _finish_cleanup(cleanup)
@@ -407,3 +468,17 @@ async def run_antigravity(
                     raise
                 finally:
                     best_effort_diagnostics(record_diagnostic)
+                    if spawn_attempted:
+                        with suppress(Exception):
+                            log_upstream_body_preview(
+                                logging.getLogger(__name__),
+                                provider=provider_name,
+                                stage="agent_process",
+                                endpoint=None,
+                                attempt=1,
+                                transport="agent_cli",
+                                prepared_body=prepared,
+                                response_body=lambda: bytes(stdout_capture),
+                                response_body_bytes=len(stdout_capture),
+                                response_incomplete=stdout_incomplete,
+                            )

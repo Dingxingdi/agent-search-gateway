@@ -47,10 +47,15 @@ def build_agent_acceptance(
             query = argv[1].split("[USER]\\n", 1)[1]
             with Path({str(evidence)!r}).open("a") as target:
                 target.write(json.dumps({{"alias": {alias!r}, "model": model, "pid": os.getpid(),
+                    "prompt_bytes": len(argv[1].encode()), "has_tail": query.endswith("END"),
+                    "clipped": "[... truncated ...]" in query,
+                    "dropped_middle": "DroppedMiddle" not in query,
                     "branch": "paper" if paper else "web"}}) + "\\n")
             if query == "failure":
                 sys.exit(3)
-            if query == "partial" and paper:
+            if query.startswith("EMPTY"):
+                response = {web_markdown(abstract="")!r}
+            elif query == "partial" and paper:
                 response = "invalid paper"
             elif paper:
                 response = {paper_markdown(pdf="https://example.test/metadata.pdf")!r}
@@ -89,6 +94,13 @@ api_key_env = "ENV_D"
 provider = "fetch"
 model = "fetch-model"
 
+[[search_llm.providers]]
+provider = "fetch"
+model = "lookup"
+[[search_llm.providers]]
+provider = "fetch"
+model = "unused"
+
 [fetch_llm.judge]
 [fetch_llm.safety]
 [fetch_llm.content_clean]
@@ -105,6 +117,17 @@ max_attempts = 1
         if request.url.host == "fetch.example.test":
             return httpx.Response(200, text="Full fetched article")
         payload = json.loads(request.content)
+        if payload["model"] == "lookup":
+            query = payload["messages"][1]["content"]
+            if query.startswith("EMPTY"):
+                output = web_markdown(abstract="")
+            else:
+                output = (
+                    paper_markdown()
+                    if "## Paper" in payload["messages"][0]["content"]
+                    else web_markdown()
+                )
+            return httpx.Response(200, json={"choices": [{"message": {"content": output}}]})
         assert payload["model"] == "fetch-model"
         content = (
             json.dumps({"ok": True})
@@ -239,6 +262,101 @@ async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, s
             assert len(http_calls) == before
         assert runtime.quotas.get_agent("a").in_use == 0
     assert not paths.socket_file.exists()
+
+
+@pytest.mark.parametrize("kind", ["llm", "agent"])
+@pytest.mark.parametrize(
+    "scope, empty", [("web", False), ("paper", False), ("all", False), ("web", True)]
+)
+async def test_large_search_preserves_selected_schema_and_empty_success(
+    tmp_path: Path, kind: str, scope: str, empty: bool
+) -> None:
+    paths, runtime, evidence, calls = build_agent_acceptance(
+        tmp_path, [("a", "selected"), ("b", "unused")]
+    )
+    cap, provider, model = (
+        (131072, "fetch", "lookup") if kind == "llm" else (98304, "a", "selected")
+    )
+    query = (
+        ("EMPTY" if empty else "LOOKUP") + "x" * cap + "DroppedMiddle" + "y" * (cap // 3) + "END"
+    )
+    async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
+        code, out, err = await invoke(
+            paths,
+            [f"{kind}-search", query, "--scope", scope, "--provider", provider, "--model", model],
+        )
+        assert code == 0 and err == ""
+        rows = [json.loads(line) for line in Path(out.strip()).read_text().splitlines()]
+    if empty:
+        assert rows == []
+    elif scope == "all":
+        assert [row["type"] for row in rows] == ["web", "paper"]
+        assert rows[1]["sources"] == [f"{kind}:{provider}"]
+    elif scope == "paper":
+        assert (
+            len(rows) == 1
+            and "type" not in rows[0]
+            and rows[0]["sources"] == [f"{kind}:{provider}"]
+        )
+    else:
+        assert len(rows) == 1 and set(rows[0]) == {"url", "abstract"}
+    count = 2 if scope == "all" else 1
+    if kind == "agent":
+        observed = [json.loads(line) for line in evidence.read_text().splitlines()]
+        assert len(observed) == count and not calls
+        assert all(
+            row["alias"] == provider
+            and row["model"] == model
+            and row["clipped"]
+            and row["has_tail"]
+            and row["dropped_middle"]
+            and row["prompt_bytes"] <= cap
+            for row in observed
+        )
+    else:
+        assert len(calls) == count and not evidence.exists()
+        for request in calls:
+            assert len(request.content) <= cap and b"DroppedMiddle" not in request.content
+            payload = json.loads(request.content)
+            assert payload["model"] == model
+            retained = payload["messages"][1]["content"]
+            assert "[... truncated ...]" in retained and retained.endswith("END")
+
+
+async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_search_gateway.providers.agent import antigravity_cli
+    from tests.providers.agent.test_antigravity_lifecycle import assert_clean, hanging_cli
+    from tests.runtime.test_agent_runtime_assembly import agent_config
+    from tests.runtime.test_runtime_assembly import _CountingAsyncClient, _environment
+    from tests.support.agent_cli import force_cleanup, wait_for_json
+
+    command, ready = hanging_cli(tmp_path, ignore_term=True)
+    paths = RuntimePaths.from_home(tmp_path)
+    runtime = Runtime.build(
+        resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
+        paths,
+        http_client_factory=_CountingAsyncClient,
+    )
+    monkeypatch.setattr(antigravity_cli, "_TERMINATE_GRACE_SECONDS", 0.05)
+    state: dict[str, object] = {}
+    task = asyncio.create_task(
+        runtime.search_orchestrator.agent_search("x" * 100000, request_id="abcd1234")
+    )
+    try:
+        state = await wait_for_json(ready)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert_clean(state, runtime.quotas.get_agent("primary"))
+        assert not list(paths.results_dir.glob("*.jsonl"))
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if state:
+            force_cleanup(state)
+        await runtime.aclose()
 
 
 async def test_agent_default_only_model_selector_starts_no_process(tmp_path: Path) -> None:

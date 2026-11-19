@@ -10,7 +10,11 @@ from ..errors import ExecutionFailure, ProtocolFailure
 from ..models import OAResolution, PaperRecord
 from ..observability import log_event
 from ..providers.contracts import OAResolver
-from ..providers.diagnostics import best_effort_diagnostics, diagnostic_fields_from_failure
+from ..providers.diagnostics import (
+    best_effort_diagnostics,
+    diagnostic_fields_from_failure,
+    safe_failure_reason,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -68,7 +72,11 @@ async def enrich_paper_records(
                     provider=resolver.name,
                     stage="oa_resolve",
                     category=_failure_category(exc),
-                    reason="resolver_failed",
+                    reason=(
+                        "rate_limit_wait_timeout"
+                        if safe_failure_reason(exc) == "rate_limit_wait_timeout"
+                        else "resolver_failed"
+                    ),
                     error_type=type(exc).__name__,
                     exc_info=False,
                     **diagnostic_fields_from_failure(exc),

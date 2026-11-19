@@ -49,7 +49,7 @@ When changing behavior:
 2. Update the README, example configuration, or public-interface documentation when users must act differently.
 3. Add a concise entry under `Unreleased` in `CHANGELOG.md` for user-visible changes.
 4. Preserve the no-network default test suite. Put live checks behind the existing explicit integration-test opt-in.
-5. For provider adapters, validate malformed and partial provider responses and ensure authentication values and request bodies are not logged.
+5. For provider adapters, validate malformed and partial provider responses. Never log authentication values or unredacted request/response bodies; use the shared DEBUG-only, redacted and bounded body-preview path when body diagnostics are needed.
 
 Conventional-style commit subjects such as `fix:`, `feat:`, `docs:`, and `chore:` are encouraged but not mechanically required.
 

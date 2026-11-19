@@ -404,3 +404,33 @@ def test_new_web_provider_rejects_unknown_key_even_when_disabled(
             client_factory,
         )
     assert client_factory.clients == []
+
+
+@pytest.mark.parametrize("name", _ADAPTERS)
+async def test_new_web_provider_builds_with_shared_rate_fields(
+    tmp_path: Path,
+    name: str,
+    client_factory: _ClientFactory,
+) -> None:
+    runtime = _build_runtime(
+        tmp_path,
+        {
+            name: _provider_config(
+                name,
+                rate_limits=[{"requests": 5, "period_seconds": 1}],
+                min_interval_seconds=0.1,
+            )
+        },
+        client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        [fetch] = runtime.web_fetch_providers
+        assert search is cast(object, fetch)
+        assert isinstance(search, _ADAPTERS[name])
+        assert runtime.quotas.get_web(name).limit == 7
+        gate = runtime.quotas.get_rate("web", name)
+        assert gate is not None
+        assert runtime._web_http_executors[0]._rate_gate is gate
+    finally:
+        await runtime.aclose()

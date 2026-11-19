@@ -14,7 +14,7 @@
 
 - 工作树：`/home/agent/agent-search-gateway/.worktrees/patch-rate-limits-logging-openalex-input-caps-20261118`。
 - 分支：`patch-rate-limits-logging-openalex-input-caps-20261118`。计划基线为设计提交 `3d5c481`；代码基线为 `edcc627`（v0.4.0）。
-- 规划日期：2026-11-18。当前仅完成规划；下面实施任务全部尚未执行，文中 PASS/FAIL 均是预期结果。
+- 规划日期：2026-11-18；实施日期：2026-11-19。Task 1–16 已完成，任务步骤中的 PASS/FAIL 描述预期验证，实际执行结果与保留限制见第 6 节。OpenRouter 大输入补测的最新结果见第 6.5 节末尾。
 - 已读取全局 `/home/agent/.codex/AGENTS.md`；项目根、工作树及其已检查子目录未发现 AGENTS.md、CLAUDE.md、GEMINI.md。后续实施若新增目录级指令，先加载再操作。
 - 沿用本工作树，不切换或重置其他分支，不修改用户实际配置、环境、运行中的 daemon、其他项目或共享交接文件。
 - 依据 `writing-plans`、其要求的 `test-driven-development` 及测试反模式参考组织任务；官方资料核验按 `documentation-lookup` 进行。当前没有 Context7 resolve/query 工具，因此使用官方网页及官方仓库核验。
@@ -263,7 +263,7 @@ Agent spawn 失败时 `request_body_sent_bytes` 表示准备交给 CLI 的 promp
 - Test: `tests/unit/test_config_academic_providers.py`
 - Test: `tests/runtime/test_new_web_runtime_assembly.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_web_provider_resolves_multiple_rate_windows_without_adapter_options`：以已有有效 Web 配置加入两个窗口和间隔，调用真实 resolver，断言得到 immutable policy，options 保持原 adapter 字段。依次追加：
 
@@ -277,7 +277,7 @@ Agent spawn 失败时 `request_body_sent_bytes` 表示准备交给 CLI 的 promp
 | provider 自带 options 与共享新键共存 | 新键不传给 factory，不修改 registry.allowed_config_keys |
 | 原构造调用未传 rate_policy | 仍可构建，旧配置保持无固定本地速率 |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_web_providers.py -k rate -v
@@ -285,7 +285,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_web_provid
 
 预期：断言速率 policy 尚未解析，或现有 options 校验拒绝新共享键；确认不是 fixture 缺 Key 造成的失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 新增 frozen ResolvedRateWindow / ResolvedRatePolicy
@@ -299,7 +299,7 @@ Web / Academic / OA resolved 对象末尾追加默认 rate_policy
 
 错误不插入原始 table、窗口对象或环境值。仅给字段路径、需要的类型/范围。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/runtime/test_new_web_runtime_assembly.py -v
@@ -307,7 +307,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_web_provid
 
 预期：新用例与三个文件已有用例全部 PASS；不同 adapter 不收到额外 kwargs。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅抽取三个配置组的重复 rate 解析；不重写整个 config 模块。重跑 Step 4，确认旧错误行为仍在。
 
@@ -325,7 +325,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_web_provid
 - Test: `tests/orchestrators/test_paper_search_pipeline.py`
 - Docs: `config.example.toml`（本任务仅添加使 enabled OpenAlex 可解析的环境变量名称，完整文档在 Task 15）
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_enabled_openalex_requires_api_key_environment_name`。用此前可启动的匿名 OpenAlex 配置，预期 CONFIG_ERROR 且 HTTP 调用数为零。随后分别覆盖缺失/空环境值、disabled 无 Key、合法 Key 和可选邮箱。
 
@@ -336,7 +336,7 @@ Adapter 用 MockTransport 捕获真实请求，断言：
 - 成功 fixture 的论文映射不变；非法 JSON/数据维持已有 ProtocolFailure。
 - 假 Key 不出现在异常、repr 或最终日志。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_academic_providers.py -k openalex -v
@@ -344,7 +344,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_academic_p
 
 预期：匿名 enabled 配置当前未拒绝；不是网络或环境依赖失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 将 OpenAlex registration.authentication 改成 required
@@ -358,7 +358,7 @@ params 仍只含搜索/页大小/可选邮箱
 
 必须迁移 registry exact tuple 断言，以及 runtime_assembly、academic_runtime_assembly、paper_search_pipeline 中的 enabled OpenAlex fixture；不通过禁用 OpenAlex 规避它们原本验证的行为。示例使用 `api_key_env` 引用名为 `OPENALEX_API_KEY` 的环境变量，不读取或写入真实 Key。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/academic/test_openalex.py tests/providers/academic/test_registry_defaults.py tests/unit/test_config_academic_providers.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_runtime_assembly.py tests/orchestrators/test_paper_search_pipeline.py tests/docs/test_documented_config.py -v
@@ -366,7 +366,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/academic/test_ope
 
 预期：required/disabled 分支和全部原映射 PASS；其余 Academic 成功结果不被单家认证失败删除。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅合并重复的假 Key fixture；继续通过既有 SecretValue 注册脱敏。重跑 Step 4，不改公开错误码。
 
@@ -380,13 +380,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/academic/test_ope
 - Test: `tests/unit/test_config_agent.py`
 - Test: `tests/observability/test_provider_diagnostics.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_input_limits_default_to_128_kib_llm_and_96_kib_agent`，调用真实 `resolve_config` 后读取默认输入预算。追加分别覆盖自定义一个字段、两个字段、非对象/未知键及 bool、0、负值、非整数。
 
 用真实 `ExecutionFailure(reason=...)` 检查 `safe_failure_reason` 保留 `input_budget_unfit` 和 `rate_limit_wait_timeout`，而未知 reason 仍被现有兜底规则过滤。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py -k input_limits -v
@@ -394,7 +394,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py -k 
 
 预期：配置尚未解析预算，行为断言失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 新增 ResolvedInputLimits，两个正整数默认值固定为 131072 / 98304
@@ -406,7 +406,7 @@ resolve_config 仅消费 input_limits 中两个约定键，未知键 ConfigFailu
 
 数值配置错误不要默默回退默认。输入拒绝使用已有 `ExecutionFailure`；不新建公开 ErrorCode。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py tests/unit/test_config_agent.py tests/observability/test_provider_diagnostics.py tests/doctor/test_config.py -v
@@ -414,7 +414,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py tes
 
 预期：默认、自定义和非法值 PASS，doctor 仍是无网络配置检查。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用已有正整数校验和安全 reason 机制；重跑 Step 4。不要引入模型 token 配置。
 
@@ -426,7 +426,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py tes
 - Create: `tests/runtime/test_rate_gate.py`
 - Modify if needed: `tests/support/controlled.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_rate_gate_waits_for_oldest_request_in_sliding_window`：注入可控 monotonic/sleep，1/1s 在 t=0 成功一次，第二个 coroutine 在 t<1 不完成，t=1 后完成。断言真实许可时间而不是“sleep mock 被调用过”。
 
@@ -444,7 +444,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_llm.py tes
 | 多次 next_available 查询 | 不登记、不推迟未来许可，返回非负值 |
 | 到期边界、早/迟唤醒、clock 从 0 开始 | 重查条件，last_sent 用 None 区分首次；预算 .5s、窗口 1s、迟到 1.2s 才唤醒仍必须超时，不能预约 |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py -k oldest_request -v
@@ -452,7 +452,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py -
 
 预期：缺少滑动窗口等待行为。新增符号先满足可收集要求，再确认发送时间断言为 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个窗口拥有 deque，保存成功预约的 monotonic 时刻；另有 last_sent=None
@@ -471,7 +471,7 @@ next_available 仅同步读取当前 event-loop 内状态、计算估计，不�
 
 所有可变状态仅在同一 event loop 使用，permit 的读写在锁内完成；同步 ready-in 方法不 await，不宣称线程安全。等待不持锁，取消直接传播。不要给 gate 添加退款接口；每个窗口只保留其必要历史。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py tests/runtime/test_quota_manager.py -v
@@ -479,7 +479,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py t
 
 预期：全部 PASS，没有真实分钟/小时 sleep，取消后没有 pending tasks。测试使用可控事件推进时钟，不能让多个 sleeper 叠加推动同一假时钟造成假通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 抽取同一份等待计算供 permit 和 ready-in 使用；保持只读查询无预约。重跑 Step 4。
 
@@ -499,7 +499,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py t
 - Test: `tests/providers/web/test_zhihu.py`
 - Test: `tests/academic/test_oa_enrichment.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_runtime_search_and_fetch_share_one_rate_gate`：真实 Runtime + MockTransport，Search 用完 1/1s 后 Fetch 不可提前发出，同时另一个 provider 能发送。
 
@@ -514,7 +514,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py t
 - 等待事件与网络事件单独计时；等待/获准分别断言 estimated_wait_ms/waited_ms，http_attempt_started 位于真正 send 前。动态 Header factory 在限速放行后才调用，确保 Zhihu X-Request-Timestamp 不因排队过期。
 - Task 6 到位后，scheduler 已等待 .4s、executor 再等待 .1s 时，获准/超时诊断累计约 .5s，HTTP elapsed_ms 不含排队。period_seconds=1e308 的诊断不得因秒数乘 1000 溢出而替代 rate_limit_wait_timeout。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_runtime_assembly.py -k share_one_rate_gate -v
@@ -522,7 +522,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_runtime_assemb
 
 预期：Fetch 当前可立即发送，时序断言失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 Runtime 为每个启用 Web/Academic/OA provider 建一个 RateGate
@@ -548,7 +548,7 @@ operation 在每次发送前：
 
 `enrich_paper_records` 继续捕获 resolver 的 ExecutionFailure 并保留论文；如果旧日志固定 `resolver_failed`，仅为新的安全 rate reason 透传 allowlist 值，不扩大异常文本输出。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/test_http_executor.py tests/providers/web/test_zhihu.py tests/providers/academic/test_openalex.py tests/academic/test_oa_enrichment.py tests/unit/test_retry.py -v
@@ -556,7 +556,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 
 预期：每次真实 HTTP 尝试计数，原 attempt 上限与错误分类 PASS；直接构建无 rate_gate executor 的旧测试不变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅抽取等待诊断的重复代码；不新增 adapter 自有 retry 或 rate loop。重跑 Step 4。
 
@@ -573,7 +573,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 - Test: `tests/orchestrators/test_url_fetch_singleflight.py`
 - Test: `tests/orchestrators/test_url_fetch_admission.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_fetch_prefers_rate_ready_provider_over_earlier_limited_provider`：A 有并发空位但需等 3600s，B 立即可发；B 成功时 A 的 HTTP 调用为零。随后逐项完成小 TDD 循环：
 
@@ -590,7 +590,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 | scheduler 等 .4s + executor 等 .1s | rate_limit_acquired/timeout 累计约 500ms，HTTP 网络 elapsed_ms 单独计时 |
 | 新用户请求再尝试之前失败 provider；纯等待 capacity | 失败集合/余额仅属本次 fetch，原纯并发等待语义保持 |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler/test_fetch_capacity.py -k rate_ready_provider -v
@@ -598,7 +598,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler/test_fetch_capaci
 
 预期：当前按 capacity 的选择先进入 A，无法立即通过 B 完成。其他时间线的 RED 分别证明实际多扣等待、候选耗尽不收尾或错误分类错误。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个本次 fetch 候选保存 remaining_seconds=T、waited_seconds=0
@@ -626,7 +626,7 @@ scheduler 的 `rate_limit_waiting` 带 provider、stage=fetch、预备 attempt=1
 
 无 rate gate 时 ready-in=0，不增加全 workflow timeout。取消原样传播；cheap_check/judge 语义拒绝继续 fallback，judge 执行异常按当前代码上抛。计时器用可注入 monotonic/sleep，不真实等待一分钟。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/orchestrators/test_url_fetch_admission.py tests/providers/test_http_executor.py -v
@@ -634,7 +634,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrato
 
 预期：实际限流等待有界，全候选耗尽明确结束；无空转、lease 泄漏、后台 waiter、URL 准入或 judge 分类回归。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只合并等待任务创建/清理与余额结算；scope 限于首发 rate，不扩展成通用 workflow deadline 框架。重跑 Step 4。
 
@@ -651,7 +651,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrato
 - Test: `tests/unit/test_llm_paper_stage.py`
 - Test: `tests/unit/test_agent_stages.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_truncate_utf8_preserves_head_tail_and_counts_marker`：ASCII 正文开头/中间/尾部放不同哨兵，设小预算，断言头尾保留、中间消失、marker 一次、字节数不超限且 metadata 正确。
 
@@ -667,7 +667,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrato
 - 普通 Mapping 的额外键原样保留；未标注内容不被猜测性裁剪。
 - 被裁正文的 BodySelection 使用原正文 Unicode 索引，与实际保留头尾准确对应；原文同名 marker 不构成切口。日志视图接口按 §1.2 保留默认 None，敏感跨度投影在 Task 11 的安全测试后接入。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py -k preserves_head_tail -v
@@ -675,7 +675,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py -
 
 预期：裁剪/字节预算行为尚未实现，正确断言 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 truncate_utf8_head_tail：
@@ -704,7 +704,7 @@ fit_messages_to_budget：
 
 `llm_search_messages`、`llm_paper_search_messages` 保留已有 `.strip()`；Focus 保留已有标准化，不额外改变语义。helper 不根据 model 猜 token，也不发送 HTTP。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py tests/unit/test_llm_stages.py tests/unit/test_llm_judge_stage.py tests/unit/test_llm_paper_stage.py tests/unit/test_agent_stages.py -v
@@ -712,7 +712,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py t
 
 预期：所有原 Prompt/Mapping 契约 PASS，head/tail 与保护段在边界用例中不丢失。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 保持 helper 纯函数及两种 transport 所需的最小共同接口；不引入通用模板语言。重跑 Step 4。
 
@@ -727,7 +727,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py t
 - Test: `tests/providers/test_http_executor.py`
 - Test: `tests/runtime/test_runtime_assembly.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_llm_sends_serialized_json_within_configured_body_limit`。真实 client + MockTransport，构造超过默认 128 KiB 的中文/emoji/JSON 特殊字符正文，捕获最终 `request.content` 并断言长度、可解析 JSON、头尾与 system 完整。
 
@@ -742,7 +742,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py t
 - 原普通 Web JSON 路径和 callable headers 每次尝试刷新仍通过。
 - 输入无法压缩时 HTTP 与 quota 内操作均未开始，reason 为 `input_budget_unfit`，没有假 preview。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/llm/test_openai_chat.py -k serialized_json_within -v
@@ -750,7 +750,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/llm/test_openai_c
 
 预期：当前真实 body 超出预算，长度断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 _validate_invocation 仍先检查 reserved extra_body keys
@@ -770,7 +770,7 @@ InputBudgetUnfit 写一次无正文 input_rejected（仅安全 bytes/limit/reaso
 
 不能用 `len(messages_content)`、单独 `json.dumps` 的不同参数或估算引号/escape 的开销替代实际编码。转换编码异常时给固定安全信息，不把可能包含正文的原异常 repr/链作为普通日志内容。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/llm/test_openai_chat.py tests/providers/test_http_executor.py tests/runtime/test_runtime_assembly.py tests/orchestrators/test_llm_search.py tests/orchestrators/test_scoped_llm_search.py -v
@@ -778,7 +778,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/llm/test_openai_c
 
 预期：MockTransport 看到的真实字节全部在 cap 内；原 response parser、模型筛选及 retry 次数保持。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只共享 text/json 的 body preparation；维持两层 retry 的原职责。重跑 Step 4。
 
@@ -793,13 +793,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/llm/test_openai_c
 - Test: `tests/runtime/test_agent_runtime_assembly.py`
 - Test: `tests/unit/test_agent_stages.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_agent_caps_complete_prompt_argument_before_spawn`：用现有假 CLI 或受控 spawn 边界捕获 argv，输入 120 KiB 混合正文，取 `-p` 后完整参数，断言 ≤98304 bytes、system/role/头尾保留。
 
 追加自定义小 cap、保护段太大不 spawn、最终 prompt 含 NUL 不 spawn、用户 cap 超过可确定系统单参数能力、系统能力无法可靠推导、E2BIG、普通 spawn error、timeout 和取消。禁止将实际 prompt 放进 pytest 参数 id/诊断 print。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_cli.py -k caps_complete_prompt -v
@@ -807,7 +807,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigr
 
 预期：当前 `-p` 参数超限，实际 argv 边界断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 为 run_antigravity 增加兼容默认值的 prompt_max_bytes 关键字参数
@@ -822,7 +822,7 @@ fit_messages_to_budget 得到 PreparedInput，decode 回单个 prompt 参数
 
 原过程 deadline、print timeout、process group、stdout/stderr 上限、临时 cwd、env allowlist 和 quota finally 保持。预览在 Task 13 添加。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/runtime/test_agent_runtime_assembly.py tests/unit/test_agent_stages.py tests/orchestrators/test_agent_search_deadline.py tests/daemon/test_agent_shutdown.py -v
@@ -830,7 +830,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/runti
 
 预期：无越界 prompt，无新增 retry；无因预检失败泄漏的 quota 或孤儿进程，原 double-cancel 用例通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅将既有 prompt 渲染提取为共享 encoder；保留原消息顺序。重跑 Step 4。
 
@@ -843,7 +843,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/runti
 - Test: `tests/daemon/test_daemon_debug.py`
 - Test: `tests/acceptance/test_debug_and_doctor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_formatter_uses_record_created_in_utc_milliseconds`：固定 LogRecord.created，设置与当前时区不同的环境，断言形如：
 
@@ -855,7 +855,7 @@ DEBUG time=2026-11-18T08:21:30.124Z request=0123abcd event=...
 
 补 `test_rotation_preserves_timestamp_and_request_id_at_default_boundary`：tmp_path 使用生产 5 MiB / 3 backups 设置，在边界前写入固定 created/request_id 的哨兵事件；有界预填充使下一条固定记录触发 rollover。分别解析 `.1` 与当前文件的对应事件，验证两侧 UTC 毫秒、request_id、单物理行完整。现有 220 字节测试只验证备份存在，不能作为此项证据；不要用数万次日志调用制造边界。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_logging.py -k record_created -v
@@ -863,7 +863,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 
 预期：当前 formatter 缺少 time。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 以 datetime.fromtimestamp(record.created, UTC) 生成 ISO8601 毫秒，+00:00 转 Z
@@ -875,7 +875,7 @@ time 由 formatter 保留，外部 gateway_fields 不能覆盖或产生重复 ti
 
 异常时间按现有安全 Handler 固定提示降级；不把日志格式化异常提升为业务失败。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_logging.py tests/daemon/test_daemon_debug.py tests/acceptance/test_debug_and_doctor.py -v
@@ -883,7 +883,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 
 预期：结构化和普通日志都有 time，原轮转、脱敏和 stdout 契约保持。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅提取小的时间格式化函数（确有重复才提取）；重跑 Step 4。
 
@@ -900,7 +900,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 - Test: `tests/unit/test_observability_logging.py`
 - Modify if needed: `tests/support/logging.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_body_preview_redacts_registered_secret_before_truncating`：将已登记假 Key 放在 8192 边界附近，使未经预脱敏的裁剪会留下半截 Key，检查最终物理日志不含完整或可识别的残片。
 
@@ -919,7 +919,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 | 已登记假 secret 分别跨 LLM/Agent 的输入 head/tail 切口 | 完整值和可识别残片不进最终日志，安全正文仍可见；不只测 8 KiB 日志切口 |
 | 投影失败、无安全 formatter、准备后 DEBUG 才开启 | 已截断输入请求侧为 null，实际发送/统计保持；无原文 fallback |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_preview.py -k before_truncating -v
@@ -927,7 +927,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 
 预期：缺少安全预览/预脱敏能力；有效 RED 不得通过直接删去所有正常正文来掩盖预览功能缺失。本任务以真实 fit/encoder、preview helper 与安全 formatter 验证纯管线；HTTP/Agent 自动发事件尚未接入，其完整日志测试分别留给 Task 12/13，不依赖后续任务才能通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 observability 暴露 log_upstream_body_preview(...)：
@@ -959,7 +959,7 @@ Formatter：
 
 日志 helper 仅捕获普通 Exception；CancelledError 必须继续传播。共享安全 API 不打印 redactor 注册表，不创建新的凭据持久化文件。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_preview.py tests/observability/test_redaction.py tests/unit/test_observability_logging.py tests/unit/test_input_limits.py -v
@@ -967,7 +967,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 
 预期：正文可在 DEBUG 安全预览，秘密哨兵在全部最终日志中缺席；INFO 无预览准备成本，sink 故障不改变业务。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用现有 URL 安全化/SecretRedactor，不另造全局密钥仓库。将字节裁剪复用 Task 7 的纯函数，但预览使用自己的最终日志渲染预算。重跑 Step 4。
 
@@ -985,7 +985,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 - Test: `tests/providers/llm/test_openai_chat.py`
 - Test: `tests/orchestrators/test_paper_search_pipeline.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_http_preview_pairs_each_retry_with_its_own_response`：POST 429→200，启用实际安全 formatter，解析两条 upstream_body_preview，验证同一 request_id、两个 attempt、各自响应、发送体与字节数准确。在 Task 8 三次真实发送的组合基础上，本任务新增日志断言：HTTP 429 → 200 协议非法 → 下一协议轮 200 合法的 (protocol_attempt, attempt) 依次为 (1,1)、(1,2)、(2,1)，对应响应准确且全部重发字节不变；两个并发 complete_* 的外层编号不串。其他 HTTP/Agent 不填该字段。
 
@@ -1003,7 +1003,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 | DEBUG 关闭、helper/formatter/sink 故障 | 0 或安全降级；业务结果不变 |
 | 连续 100 次小型 mock attempt | 每次一条，无跨 attempt 的 response 残留 |
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executor.py -k preview_pairs_each_retry -v
@@ -1011,7 +1011,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executo
 
 预期：当前没有这两条成对预览事件，事件计数 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 LLM client 在 fit 调用处仅当 DEBUG 时传入 Task 11 的 make_input_preview_projector
@@ -1037,7 +1037,7 @@ request_json 的 JSON decode 层不再次写 preview
 
 更新旧“整份 DEBUG 不出现任何普通正文”的断言：原事件和 INFO 仍不得携带正文，仅新增 preview 事件允许安全片段；全日志凭据、URL query、被输入裁掉的中段哨兵必须继续缺席。独立 LLM protocol logger 本身没有正文输出需求，不能顺带弱化其安全断言。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executor.py tests/providers/llm/test_openai_chat.py tests/observability tests/orchestrators/test_paper_search_pipeline.py -v
@@ -1045,7 +1045,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executo
 
 预期：所有矩阵事件数、原字节统计和最终物理行脱敏 PASS；失败分类、Retry-After 与 attempt 上限不变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 把 preview 维持在唯一发送边界，删除任何临时成功/异常分支重复 emit。重跑 Step 4。
 
@@ -1060,13 +1060,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executo
 - Test: `tests/observability/test_provider_diagnostics.py`
 - Modify if needed: `tests/support/agent_cli.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_agent_timeout_previews_captured_stdout_after_cleanup`：现有假 agy 先输出一个完整、可安全解析的合成 JSON envelope 再阻塞，触发 timeout，确认进程已清理、一条安全 preview 保留已捕获内容及真实字节数，并标明流尚未到 EOF。
 
 依次覆盖 SUCCESS、非零退出、非法 envelope、空 stdout、spawn error、E2BIG、输出超限、一次/两次取消及 input preflight rejection。另将 stdout 截在 token/cookie 字符串内部，验证保留 captured bytes 而预览为 null，不把残缺 JSON 当普通文本直接打印。检查 stderr 原文、env、完整 argv、秘密哨兵从未写入日志；输入被裁中段不出现。沿用 Task 11 跨输入切口 secret 用例，不能只遮蔽完整值而遗漏残片。普通模式事件为零。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigravity_lifecycle.py -k previews_captured_stdout -v
@@ -1074,7 +1074,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigr
 
 预期：当前 reader 异常后丢失局部 chunks，缺少所需安全 preview；原 timeout/清理本身仍正常。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 Agent 在 fit 调用处仅当 DEBUG 时传入 Task 11 的 make_input_preview_projector
@@ -1097,7 +1097,7 @@ stdout 完整成功内容仍交给原 `_decode_terminal_response`；8 KiB 是日
 
 不得调整原 shield、SIGTERM/SIGKILL、drain/reap、临时 cwd 清理和 quota finally 的顺序。预览同步且 best-effort，不吞 CancelledError，不增加第二次 spawn。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/observability/test_agent_event_logging.py tests/observability/test_provider_diagnostics.py tests/daemon/test_agent_shutdown.py tests/acceptance/test_agent_search_workflows.py -v
@@ -1105,7 +1105,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/obser
 
 预期：每次真实 CLI 调用或失败的 spawn 尝试一条预览，全部生命周期测试 PASS，无孤儿进程。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 有界缓冲只服务既有捕获与预览，不增 stderr 全文日志或新的流式协议。重跑 Step 4。
 
@@ -1122,7 +1122,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/obser
 - Create: `tests/integration/test_live_rate_limits_and_inputs.py`
 - Modify if needed: `tests/support/acceptance.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 优先写 `test_debug_gateway_rate_fallback_preserves_admitted_fetch_result`：本地 Runtime/daemon + Mock HTTP，Search 录入 URLStore；A 的 rate 被占、B 就绪；Fetch 经原 judge/clean/focus 返回合法结果，分别验证 Search 与 Fetch 的事件各自有稳定且不同的 request_id 及有效 time；Fetch 候选、LLM stage、HTTP preview 关联 Fetch ID。大正文触发 LLM cap，并在 preview 中仅看到最终出站体。
 
@@ -1134,7 +1134,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent tests/obser
 - 显式取消实际 asyncio workflow task，以及 daemon shutdown：rate waits、retry sleeps 和 Agent 子进程均结束，既有 singleflight 不重复发请求。当前服务端不会仅因客户端关闭 socket 就自动取消已开始的 dispatch；本次不新增断连监控，也不将该行为当成已有验收契约。
 - 预览 helper/sink 故障：成功结果仍成功，原业务失败仍原分类；不因日志错误改变路由。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance/test_gateway_workflows.py -k debug_gateway_rate_fallback -v
@@ -1142,7 +1142,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance/test_gateway_wor
 
 若前序任务已使新组合测试直接通过，记录它是回归验收，不伪造 RED 或改坏生产代码。只有发现未覆盖的组合缺陷才先保留其正确失败断言，再做最小修复。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 复用现有 acceptance 的本地 socket / Runtime 支撑
@@ -1161,7 +1161,7 @@ live 模块提供可通过 `-k` 单独执行的 `openalex`、`arxiv`、`semantic
 
 大输入必须来自 Task 7 的真实 Prompt builder，保证带可裁正文标注，实际默认 cap 生效。不把 live 连通性当作滑动窗口精度证明，不人为耗尽速率。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance tests/orchestrators tests/academic tests/daemon tests/integration/test_live_rate_limits_and_inputs.py -v -rs
@@ -1169,7 +1169,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance tests/orchestrat
 
 预期：本地验收 PASS；新增 live 用例全部因未 opt-in 而 SKIP；无外部网络。失败必须能归因于真实流程，不断言 mock 自己的行为。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只合并重复的合成 fixture 和安全指标输出，不扩大生产改动。重跑 Step 4。
 
@@ -1186,13 +1186,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/acceptance tests/orchestrat
 - Test: `tests/docs/test_documented_config.py`
 - Test: `tests/docs/test_open_source_contract.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先写 `test_documented_rate_reference_covers_registered_non_llm_providers`：从三个真实 default registry 取得 Web/Academic/OA 名称集合，对照新参考文档的完整表，验证无遗漏、无 LLM/Agent 混入、有来源/模式说明。不要锁死整段 prose。
 
 扩展示例 TOML 契约：使用已有 `_stub_environment` 为环境变量名称提供假值，经真实 `resolve_config` 解析，验证默认输入 cap、OpenAlex Key、实际存在 provider 的窗口/间隔/并发、未知值留空、共享字段不进 options。检查不能把美元、credits、月费用额度作为窗口配置。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/docs/test_documented_config.py -k "rate_reference or input_limits" -v
@@ -1200,7 +1200,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/docs/test_documented_config
 
 预期：完整文档或新示例值缺失，明确的公开配置合同失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 按第 2 节的 31 行和来源差异创建 `docs/provider-rate-limits.md`。每行说明当前 endpoint/product、认证/套餐条件、官方数字或未知、本地更保守策略、来源和核验日期。
 
@@ -1249,7 +1249,7 @@ README 与 public-interface 同步说明：
 
 CHANGELOG 记录新增行为、OpenAlex 迁移和 debug 内容变化；不在本任务擅自 bump version、创建 tag、发布版本。现有兼容性政策要求不兼容内容在未来小版本发布说明中明确，版本决定留给发布任务。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/docs tests/doctor/test_config.py tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py -v
@@ -1258,7 +1258,7 @@ uv run python scripts/build_docs.py
 
 预期：示例以假环境可真实加载，31/31 表完整，站点构建成功且入口无版本占位符。单独定向检查 README/public-interface 指向新参考文档的相对链接存在；build_docs.py 本身不证明全站无破链。不提交生成的 site 输出。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 README 保留使用入口和迁移步骤，完整来源集中在新参考页；避免三处维护不同数值表。重跑 Step 4，确保架构复核注记指向同一来源口径。
 
@@ -1275,13 +1275,13 @@ README 保留使用入口和迁移步骤，完整来源集中在新参考页；�
 - Verify: `tests/integration/test_live_new_web_providers.py`
 - Update evidence only: `docs/designs/plans/20261118-provider-rate-observability-openalex-input-truncation.md`
 
-- [ ] **Step 1: Write the failing test when a final check exposes a missing behavior**
+- [x] **Step 1: Write the failing test when a final check exposes a missing behavior**
 
 本任务先运行已有验证门槛，不为可逆文档编辑或测试命令本身新增镜像测试。若暴露实际缺陷，回到所属 Task 增加一个最小失败用例；记录正确 RED，再修实现。无需为了最终验收人为制造失败。
 
 先确认工作树/分支、仅本任务改动、没有真实配置/日志/Key 被暂存，并检查启用集和不兼容迁移说明。
 
-- [ ] **Step 2: Run the offline verification gates**
+- [x] **Step 2: Run the offline verification gates**
 
 逐条运行；任一步失败都记录命令和分类，不把后续未跑项写成 PASS。
 
@@ -1307,7 +1307,7 @@ env UV_TOOL_DIR="$PWD/.validation-rate-limits-20261118/tools" UV_TOOL_BIN_DIR="$
 
 只使用本任务新建且已确认未被其他工作占用的目录；不要替换用户已安装工具或改全局环境。生成的 build/site/验证目录不提交。
 
-- [ ] **Step 3: Run controlled live smoke after offline checks pass**
+- [x] **Step 3: Run controlled live smoke after offline checks pass**
 
 用户已说明现有各家环境变量已设置。直接复用实际配置对应的凭据，不打印值、不自动开通产品或更改用户 daemon。计划编写阶段不执行这些命令；实现阶段用明确 opt-in 逐项运行。
 
@@ -1339,13 +1339,13 @@ env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_rate_
 
 LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有网页。已有凭据但权限/余额/服务故障导致失败时如实报 FAIL；缺安装或缺必要变量才 SKIP。不能将“31 家来源已调查”写成“31 家均已实测”。
 
-- [ ] **Step 4: Record passing checks and remaining limitations**
+- [x] **Step 4: Record passing checks and remaining limitations**
 
 记录实际命令、时间、Python/OS、通过/失败/跳过数、source coverage 与真实 smoke coverage；不把实际 body、环境、Header、完整 URL query 或凭据加入提交。若 smoke 暴露代码缺陷，先回到对应最小 RED 修复，再只重跑受影响检查及最终必要门槛。
 
 源码或测试有新改动后重跑最终格式/lint/mypy/离线 suite；只补充结果文字时不用反复跑全套测试。
 
-- [ ] **Step 5: Refactor only if an actual defect or duplication remains**
+- [x] **Step 5: Refactor only if an actual defect or duplication remains**
 
 完成有依据的修复后复核 diff、文档和退出标准。所有授权实施任务完成则停止实施，进入用户后续指定的 review/PR 流程；本计划不授权在实现前推送、发 PR、合并或发布。
 
@@ -1384,15 +1384,17 @@ LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有
 
 ### 4.2 退出标准
 
-- [ ] 任务 1–15 的新行为测试和既有相关测试通过，未实现项没有勾选。
-- [ ] Spec 覆盖矩阵每行均有实际实现与测试证据；没有用简单计数代替传输边界验证。
-- [ ] RateGate、Scheduler、HTTP retry、Agent 清理无无限等待、重复预约或任务/lease 泄漏。
-- [ ] HTTP 与 Agent 的真实发送内容符合字节 cap；system/Focus 保留，预检失败无伪造调用日志。
-- [ ] DEBUG 安全预览、timestamp、secret/URL 脱敏、单行与轮转通过；普通模式无 Body 成本。
-- [ ] 31 服务参考表、产品条件、来源差异与配置示例一致；不含费用额度管理。
-- [ ] 最终离线 CI 对应门槛通过；跨平台/远程 CI 未运行部分明确标记。
-- [ ] Live smoke 只记录真实执行的 PASS/FAIL/SKIP，不把未测或账号问题隐藏。
-- [ ] 最终改动仅属于本工作树与本任务；无真实密钥、用户配置、原始调试日志或生成输出进入提交。
+以下勾选表示本计划的实现和验收步骤已完成；真实 smoke 的失败/跳过见 6.5，既有 Agent 清理测试的历史偶发失败与未确证原因见 6.1，不表示所有上游及所有平台均已验证通过。
+
+- [x] 任务 1–15 的新行为测试和既有相关测试通过，未实现项没有勾选。
+- [x] Spec 覆盖矩阵每行均有实际实现与测试证据；没有用简单计数代替传输边界验证。
+- [x] RateGate、Scheduler、HTTP retry、Agent 清理无无限等待、重复预约或任务/lease 泄漏。
+- [x] HTTP 与 Agent 的真实发送内容符合字节 cap；system/Focus 保留，预检失败无伪造调用日志。
+- [x] DEBUG 安全预览、timestamp、secret/URL 脱敏、单行与轮转通过；普通模式无 Body 成本。
+- [x] 31 服务参考表、产品条件、来源差异与配置示例一致；不含费用额度管理。
+- [x] 最终离线 CI 对应门槛通过；跨平台/远程 CI 未运行部分明确标记。
+- [x] Live smoke 只记录真实执行的 PASS/FAIL/SKIP，不把未测或账号问题隐藏。
+- [x] 最终改动仅属于本工作树与本任务；无真实密钥、用户配置、原始调试日志或生成输出进入提交。
 
 ## 5. 规划阶段记录
 
@@ -1410,3 +1412,122 @@ LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有
 - 修正 FetchScheduler 的实际限流等待余额、全候选耗尽、judge 分类、waiter 清理与累计等待诊断，复用既有 timeout 配置。
 - 增加输入裁剪切口的敏感跨度投影、LLM 两层重试关联、默认 5 MiB 轮转边界完整性测试。
 - 已完成三项只读复核及主代理的覆盖/接口自检；本轮只修改实施计划，未执行补丁、测试、真实 API 冒烟或服务操作。
+
+## 6. 实施验证记录（2026-11-19）
+
+本节仅记录已执行结果；未完成任务仍保持未勾选。完整离线 suite 使用 `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q`，与计划 `-v` 的测试选择相同。
+
+| Task | 状态 | 定向验证 | 完整离线 suite | 静态检查与自审 |
+|---|---|---|---|---|
+| 1 | 完成 | 三个相关测试文件 507 passed；已观察共享字段、结构及数值溢出的有效 RED | 3104 passed / 12 live skipped | 四文件 ruff check、format --check、strict mypy 通过；共享配置与 adapter options 隔离复核通过 |
+| 2 | 完成（原写入阻塞已解除） | 原三失败用例 3 passed；计划七文件 275 passed | 3115 passed / 12 live skipped（13.47s） | 八个相关 Python 文件 ruff check、format --check、strict mypy 通过；required/Bearer、无匿名回退、配置精确引用自审通过 |
+| 3 | 完成 | 四个相关测试文件 333 passed；默认/覆盖/未知键/安全原因合计 9 个有效 RED | 3150 passed / 12 live skipped（13.27s） | 五个修改文件 ruff check、format --check、strict mypy 通过；旧构造与 frozen、预算隔离和安全错误自审通过 |
+| 4 | 完成 | RateGate/quota 相关 22 passed；滑窗、三窗口、间隔、期限/迟醒等取得有效 RED，25 协程竞争与取消回归通过 | 3166 passed / 12 live skipped（13.51s） | 三文件 ruff check、format --check、strict mypy 通过；锁内原子登记、锁外等待、只读查询与零余额自审通过 |
+| 5 | 完成 | Runtime/HTTP/Zhihu/OA 等相关 384 passed；共享发送时序、namespace、提前 start、超时与 OA reason 的有效 RED | 3185 passed / 12 live skipped（14.09s） | 11 文件 ruff check、format --check、strict mypy 通过；每 attempt 预约、独立网络计时、Header 放行后刷新及 1e308 诊断自审通过 |
+| 6 | 完成 | Scheduler/URL/HTTP/RateGate 相关 199 passed；优先候选、全部受限、预算竞态和定时器迟启动取得有效 RED，500ms 累计与 125ms 网络耗时分别验证 | 3206 passed / 12 live skipped（14.29s） | 八文件 ruff check、format --check、strict mypy 通过；候选耗尽、task/gate scope、暂停计时、retry 与 waiter/lease 清理自审通过 |
+| 7 | 完成 | 输入 helper 与 stages 相关 40 passed；头尾裁剪及六 builder 取得有效 RED，2 MiB、多正文真实编码成本/Unicode 索引与投影隔离通过 | 3230 passed / 12 live skipped（13.89s） | 三文件 ruff check、format --check、strict mypy 通过；纯 helper、受保护模板、可行最小候选与无原文持久引用自审通过 |
+| 8 | 完成 | LLM/HTTP/Runtime/orchestrator 相关 204 passed；256277-byte 超限、body 互斥与 Content-Type 的有效 RED；六 stage、1400-byte 配置和两层 retry 同字节通过 | 3248 passed / 12 live skipped（14.00s） | 六文件 ruff check、format --check、strict mypy 通过；真实 HTTPX 编码、quota 前拒绝、元数据隔离与无缩小重发自审通过 |
+| 9 | 完成 | Agent/Runtime/stages/deadline/shutdown/诊断 136 passed；122927>98304、8424>4096、系统上界及预检原因的有效 RED，double-cancel/E2BIG 回归通过 | 3259 passed / 12 live skipped（14.45s） | 五文件 ruff check、format --check、strict mypy 通过；完整参数预算、Linux 实际上界、NUL/UTF-8 预检与原清理顺序自审通过 |
+| 10 | 完成 | 日志/daemon/acceptance 相关 38 passed；缺失 time 与伪造 time 重复字段的有效 RED；UTC 跨日、五类非法 created、默认 5 MiB/3 backups 轮转两侧验证通过 | 3269 passed / 12 live skipped（14.04s） | 四文件 ruff check、format --check、strict mypy 通过；record.created 来源、level/time/request 顺序及原安全日志流程自审通过 |
+| 11 | 完成（独立复核修复已回归） | 初验 117 passed；独立复核补修后 132 passed，四类凭据泄露、两类安全正文可见性及未加引号 JSON 凭据均经有效 RED→GREEN | 初验 3325 passed / 12 skipped；补修后 3340 passed / 12 skipped（14.31s） | 初验六文件 ruff check、format --check、strict mypy 通过；补修范围纳入 Task 12 最终静态检查；真实输入投影与双重 8 KiB 约束保留 |
+| 12 | 完成 | HTTP/LLM/观测/相关旧合同 533 passed；2 send/0 preview、protocol 编号缺失取得 RED；组合 (1,1)/(1,2)/(2,1)、100 attempts、取消、rate timeout 和独立 logger 投影通过 | 3365 passed / 12 live skipped（15.79s） | 19 文件 ruff check、format --check、strict mypy 通过（含独立复核共享修复）；唯一 send finally、响应隔离、原全日志敏感哨兵与调用局部编号自审通过 |
+| 13 | 完成（保留既有偶发测试问题） | Agent/观测/daemon/acceptance 422 passed；真实 timeout 缺预览 RED→GREEN；完整/部分捕获、清理期首字节、取消与 INFO 验证通过 | 最终原始全量 3377 passed / 12 skipped（15.72s）；一次中间回归 3376 passed / 1 failed / 12 skipped，见 6.1 | 四文件 ruff check、format --check、strict mypy 通过；stdout 有界保留、清理前 EOF 快照、唯一 emit 与原清理顺序自审通过 |
+| 14 | 完成 | acceptance/orchestrators/academic/daemon 与新增 live 入口 376 passed / 6 skipped；新增 19 个本地验收、扩展论文链路，六个 opt-in 入口分别可选 | 3396 passed / 18 live skipped（16.76s） | 五文件 ruff check、format --check、strict mypy 通过；真实 Runtime/socket/HTTP/CLI、取消与 shutdown、日志故障隔离自审通过；live 的实际参数计量、预览标记和代理透传三项只读复核问题已修复；本任务未真实联网 |
+| 15 | 完成 | docs/doctor/config 定向 507 passed；参考页缺失与 input_limits 缺失取得两个有效 RED；31 家覆盖、四个可选 TOML 表经实际 resolver 与假环境验证 | 3398 passed / 18 live skipped（16.57s） | 三测试文件 ruff check、format --check、strict mypy 通过；文档构建、两条相对入口和版本占位符检查通过。首次构建缺 pdoc，使用已有 docs 依赖组解决后原命令复跑通过，未改依赖/锁；九文件自审完成，保留启用状态/省略表与历史记录 |
+| 16 | 完成（真实 smoke 保留三失败一跳过） | 七类最终状态 3 PASS / 3 FAIL / 1 SKIP，详见 6.5；Agent 合法单 JSON 围栏被误拒取得 RED，Agent 专属验收修正与新增 14 条持久化离线回归通过 | 最终 3412 passed / 18 live skipped（16.58s） | format 225 文件、Ruff lint、strict mypy 223 文件通过；锁定依赖、文档/分发构建、隔离安装与两 help、wheel 新模块检查通过；真实 OpenAlex/Bearer 和 Agent 98304-byte cap 验证通过。生产实现未因 smoke 改动；历史失败与未执行 CI 项均保留 |
+
+### 6.1 已观察的验证环境问题
+
+- 完整 `pytest -v` 两次在 LocalHost 120000-byte 输出截断附近返回 exit 143（SIGTERM），没有完整 pytest 汇总；同范围 `-q` 成功结束，因此后续完整回归采用低输出模式。这是观察与工作方式调整，不将被终止的执行记为 PASS。
+- Task 1 中间两轮完整 suite 分别在既有 `test_terminal_exit_cleans_remaining_descendants` 的 `terminal_status_failure`、`nonzero_exit` 参数发生子进程存活清理断言失败（各 1 failed / 2839 passed / 12 skipped）。单独 Agent 目录 63 passed，后续最终全量 3104 passed / 12 skipped。未改无关生命周期代码；在后续 Agent 任务和最终门槛继续核查。
+- Task 13 一次原始全量又命中既有 `test_terminal_exit_cleans_remaining_descendants[nonzero-nonzero_exit]` 即时存活断言（3376 passed / 1 failed / 12 skipped）。8 个新 pytest 进程共 32 例及两轮完整只读探针回归均未复现，未取得能区分瞬态状态与持续泄漏的证据；不宣称原因已确认。临时探针仅进程内生效，原清理顺序与即时断言未改。最终原始完整回归 3377 passed / 12 skipped；此后 PASS 不抹去前述失败记录，Task 16 继续必要最终门槛。
+
+### 6.2 Task 2 曾遇的写入阻塞（已解除）
+
+LocalHost `edit` 对三个不含真实凭据的环境变量名称引用修改返回 `INVALID_ARGUMENT: Secret-looking content is blocked from edit. Use placeholders such as [REDACTED_SECRET] in handoff files.` 受阻文件为 `config.example.toml`、`tests/runtime/test_academic_runtime_assembly.py`、`tests/runtime/test_runtime_assembly.py`。前者需补齐 OpenAlex 的 Key 环境变量名称，后两者可复用测试已有的 ENV_A 假值。没有通过 shell、字符串拼接或其他通道规避内容检查。
+
+当时失败用例仅为 `test_runtime_instantiates_only_enabled_academic_providers_in_configured_order`、`test_runtime_assembles_all_academic_providers_resolver_and_closes_once`、`test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_help`。随后用户明确授权通过 LocalHost Bash 写入同一工作树，并说明已设置 OPENALEX_API_KEY。实现者先核对三文件最新 SHA-256 和旧片段唯一性，再原位完成无凭据名称引用修改；原三失败全部转绿，Task 2 已完成。Task 3 开始实施，其余任务继续按序执行。真实上游 smoke 留在 Task 16；当前改动尚未提交。
+
+### 6.3 实施期间的官方来源只读复核
+
+两项独立只读复核覆盖全部 31 个非 LLM/Agent 服务，2026-11-19 的主要技术频率与第 2 节一致。Task 15 后续应纳入以下更准确的来源表述：
+
+- TinyFish 必须保留 30/60、500/3600、1000/86400 三个共享窗口；[官方定价](https://www.tinyfish.ai/pricing)明确每日上限及不扣 Wallet，但没有核实固定日重置算法。因此不能把“固定日重置”写成已证实事实，应说明本地采用滚动 24 小时的保守窗口。
+- Doubao 默认账号 Custom Search 10 QPS 与 Fetch 控制台阈值的结论成立；[官方错误码](https://docs.volcengine.com/docs/networked-search/error-description?lang=zh)另列未开通付费调用账号的免费限频而未给固定数值，不能保证所有免费-only 账号都拥有 10 QPS。
+- Decodo 的旧 `/v2/scrape` Basic 认证与 10 req/s 使用条件保留；主链接使用小写 [当前产品页](https://decodo.com/scraping/web)，并可补充[官方 legacy 说明](https://help.decodo.com/docs/web-scraping-api-introduction)和[旧端点示例](https://decodo.com/scraping/web/rss-scraper-api)。
+- OpenAlex 官方还为特定宽 topic/concept OR filter 和 semantic search 规定 1 RPS；当前 adapter 不发送这两类请求，不将其限值误套进当前普通/Boolean Search。鉴权仍是项目主动要求 Key，官方基础匿名查询并非全面禁用。
+
+来源覆盖不等同于 31 家真实 API 全部实测通过；本阶段只做官方网页和仓库复核。
+
+### 6.4 安全预览独立复核（已修复并回归）
+
+Task 11 初验后独立静态复核发现四类凭据边界：跨嵌入 JSON 的明文凭据、URL 路径单引号、外层 URL 编辑覆盖已登记敏感跨度、表单 client_secret；另发现 JSON 字符串局部过度遮蔽和日期标签误判 JSON 两类安全正文可见性问题。Task 12 实施者先修共享 helper，再继续 HTTP 接线。前四类先以真实 LogRecord 断言复现为 9 failed / 2 passed；随后全部六类及未加引号 JSON 凭据补充用例均获有效 RED→GREEN。修复后定向 132 passed，完整离线 3340 passed / 12 skipped（14.31s）。共享修复的最终静态检查与后续传输回归一并记录于 Task 12。
+
+### 6.5 Task 16 最终门槛与真实 smoke（2026-11-19）
+
+本地环境为 uv 0.12.1、CPython 3.12.3、Linux 6.6.87.2-microsoft-standard-WSL2、x86_64。命令时间按执行日志的 UTC 记录；07:35–07:55 UTC 对应客户端日本时间 16:35–16:55。使用的工作树分支为 `patch-rate-limits-logging-openalex-input-caps-20261118`，HEAD 为 `8e0b3d6`。
+
+#### 离线和安装门槛
+
+| 实际命令或检查 | 结果 |
+|---|---|
+| `uv sync --locked --all-groups` | exit 0；检查 23 个包 |
+| `uv run ruff format --check src tests scripts` | 最终 exit 0，225 个文件 |
+| `uv run ruff check .` | 最终 exit 0 |
+| `uv run mypy src tests scripts` | 最终 exit 0，strict mypy 223 个文件 |
+| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q` | 最终 exit 0；3412 passed / 18 skipped，16.58 秒 |
+| `uv run python scripts/build_docs.py` | exit 0；site 首页/API 入口存在，首页没有版本占位符 |
+| `uv build` | exit 0；生成 0.4.0 wheel 和 sdist |
+| 专用 UV_TOOL_DIR / UV_TOOL_BIN_DIR 中安装 wheel | exit 0；安装 0.4.0，未替换用户工具 |
+| 安装后的主命令和 `start --help` | 两次 exit 0 |
+| 隔离安装分发的三个新增生产模块 | `body_preview.py`、`input_limits.py`、`rate_limit.py` 均在 wheel 中 |
+| 临时安装目录清理 | 核对本任务创建时的设备号、inode 与内容后清理；没有遗留安装目录 |
+
+初次最终门槛在 07:35:53–07:37:33 UTC 完成，原始完整测试为 3398 passed / 18 skipped（16.42 秒）。之后的 smoke helper 修订仅改测试；已再次运行最终格式、lint、strict mypy 和完整离线 suite，以上表中 3412 / 18 为最后结果。生产 parser、prompt、CLI 和依赖清单没有因 smoke 改动。证据文字更新后未无目的重复全量测试。
+
+#### 低调用量真实 smoke
+
+所有请求均显式 opt-in，只在对应命令临时恢复代理。下表的请求/响应预览标志分别对应 `request_preview_truncated` / `response_preview_truncated`；原始/发送长度对应 `request_body_original_bytes` / `request_body_sent_bytes`，输入裁剪标志对应 `request_input_truncated`。响应字节对应 `response_body_bytes`，Agent 记录的是捕获 stdout envelope 的字节数。
+
+| UTC 开始 | 测试项 | 实际结果 | 调用与安全证据 |
+|---|---|---|---|
+| 07:39:00 | OpenAlex | PASS，exit 0 | Bearer Header；query 无 Key。1 次发送，HTTP 200，非空论文均有 title/source_id；本地等待 0 ms，1 条 UTC preview，Key 未出现在日志。请求 0 B、响应 201680 B，预览标志 false/true |
+| 07:39:24 | arXiv | PASS，exit 0 | 匿名，1 次发送，HTTP 200，非空论文映射；本地等待 0 ms，1 条 UTC preview。请求 0 B、响应 21510 B，预览标志 false/true |
+| 07:39:29 | Semantic Scholar | FAIL，exit 1 | Key 模式，1 次发送，HTTP 429，安全类别 http_status；未重试。本地等待 0 ms，1 条 UTC preview，Key 未出现在日志；响应 174 B，预览标志 false/false |
+| 07:39:34 | LLM 大输入 | SKIP，exit 0 | 缺少 OPENAI_API_KEY；0 次发送，没有真实发送字节或预览。离线真实 HTTP 编码与 cap 用例仍通过 |
+| 07:39:37 | Agent 大输入初验 | FAIL，exit 1 | 1 次 spawn，102590→98304 B，首尾保留/中段移除；1 条 UTC preview，输入裁剪 true，预览标志 true/false，响应 417 B。原 helper 类别 unexpected；该轮回复形态未保留，不能倒推 |
+| 07:40:15 | Unpaywall | FAIL，exit 1 | 使用已配置 contact，1 次发送尝试，未取得 HTTP 状态，安全类别 all_providers_failed。本地等待 0 ms，1 条 UTC preview，contact 未出现在日志；响应 0 B，预览标志 false/false |
+| 07:41:00 | Tavily Search | FAIL，exit 1 | 1 条逻辑 Search；原用例实际发生 3 次物理发送尝试，均未取得 HTTP 状态。没有可验证响应；本轮未采集 preview |
+| 07:47:36 | Agent 定位复验 | FAIL，exit 1 | 1 次 spawn，CLI exit 0、成功终态和非空 text；102590→98304 B；1 条 UTC preview，响应 361 B。完整单个 Markdown JSON 围栏内对象及布尔 ok 合格，原裸 JSON 断言误报 invalid_json；子进程回收、进程组消失 |
+| 07:54:31 | Agent 修正后复验 | PASS，exit 0 | 1 passed / 5 deselected，14.56 秒。1 次 spawn，CLI 成功终态、非空 text、完整单 JSON 围栏及布尔 ok 合格；102590→98304 B，首尾保留/中段移除，输入裁剪 true。1 个诊断和 1 条 UTC preview，日志计量与实参一致；响应 378 B，预览标志 true/false，子进程回收且进程组消失 |
+
+按七类测试的最后状态：3 PASS（OpenAlex、arXiv、Agent），3 FAIL（Semantic Scholar、Unpaywall、Tavily），1 SKIP（LLM）。按全部九次逻辑 smoke 记录计：3 PASS / 5 FAIL / 1 SKIP，包含 Agent 三次调用及前两次失败。网关共观察到 7 次 HTTP 发送尝试和 3 次 CLI spawn；不把 CLI 内部不可见的网络活动计作已知调用数。没有追加 Fetch、其他提供商或限额压力测试。
+
+Agent 的公共输出允许 Markdown，计划要求短结构化回复而非裸 JSON。第二次调用确认了验收假阴性后，先用合法单围栏合成输入复现 RED，再仅修 Agent live helper：允许裸 JSON 或完整单个 JSON 围栏，继续严格拒绝额外 prose、多围栏、非法 JSON/NaN、非对象、缺失/非布尔 ok。新增 `tests/unit/test_live_smoke_validation.py` 的 14 条默认离线回归全部通过；LLM 路径与生产实现不变。初次 417 B 回复的精确形态未留存，不能用第二次的围栏证据解释初次回复。
+
+Unpaywall 和 Tavily 未留存传输异常具体子类；现有证据只能确定尝试后未取得 HTTP 状态，不能归因 DNS、连接超时、TLS、服务宕机或凭据错误。Semantic Scholar 的 429 是实际失败，没有按限流“验收通过”处理。上述结果不会与 [31 服务官方来源覆盖](../../provider-rate-limits.md) 混用。
+
+#### 最终范围和未运行门槛
+
+- 最后工作树为 62 个已跟踪修改、9 个未跟踪任务文件，暂存区为空；仅属于本计划，没有写入实际 Key、用户配置或原始日志。示例启用状态保持不变。
+- Task 16 的代码变更仅为 live 测试 helper 和新增合成回归；没有修改生产实现，没有提交、推送、发布或操作用户 daemon。
+- 既有 Agent 即时存活清理断言在最终全量未复现；6.1 中的失败历史和未确证原因仍保留。
+- 本机仅执行上述 CPython 3.12.3 / Linux 门槛；Ubuntu 其他 Python 版本、macOS matrix、dependency audit、GitHub event 敏感 URL 检查、TruffleHog secret scan 和远端 CI 汇总均未在本地执行，未标记为 PASS。
+
+#### 2026-11-19 补测：OpenRouter 免费 LLM 大输入
+
+- 上述 `07:39:34` 的 LLM SKIP 是历史记录：当时 live helper 只读取 `OPENAI_API_KEY`，而用户实际配置的是 `OPENROUTER_API_KEY`；不将 SKIP 当作验证通过。
+- LocalHost 确认可读取 `OPENROUTER_API_KEY`。首次补测仅在单条 pytest 命令里将它映射到原 helper 的 `OPENAI_API_KEY`，并将 base URL 设为 `https://openrouter.ai/api`、model 设为 `openrouter/free`；`WEB_SEARCH_RUN_INTEGRATION=1` 仅对该次命令生效。一次 HTTP 请求，返回 200，模型输出满足 `ok` 布尔契约，pytest `1 passed / 5 deselected`，约 7.4 秒。
+- 实际 LLM 请求由 135398 B 截断到 131072 B，头尾与省略标记保留、中段移除。1 条 DEBUG request/response 预览，原始和发送长度匹配、UTC 时间存在、环境 Key 未泄露，结果 `category=success`。不以此证明所有 OpenRouter 免费模型或所有其他模型都接受同样的输入。
+- 修正 live helper：优先使用可用的 `OPENROUTER_API_KEY`、可选的 `OPENROUTER_MODEL`/`OPENROUTER_BASE_URL`，默认 `openrouter/free`；未配置 OpenRouter Key 时保留 `OPENAI_API_KEY`/`OPENAI_MODEL`/`OPENAI_BASE_URL`（或 `OPENAI_API_URL`）路径。新增 3 条离线环境选择回归，17 条 helper 单测通过；完整离线 suite `3415 passed / 18 skipped`，Ruff 检查、格式检查与 mypy（223 source files）均通过。
+- 最新验收状态：LLM 大输入由历史 SKIP 更新为真实 PASS。保留旧记录便于审计；本补测未修改生产实现、用户配置、凭据文件，也未额外发送压力测试请求。
+
+### 6.6 贡献者提交前复核（2026-11-19）
+
+- 在本工作树完成两路只读代码审查，并复核 31 项官方速率来源；现有参考表的数值、认证和端点条件保持成立。
+- 修复五项可复现边界：补齐外来 JSON/文本凭据字段遮蔽；清洗协议相对链接及跨裁剪投影；按实际编码细化正文预算，避免轻微 JSON 转义溢出造成正文减半；阻止注入 HTTP 客户端的自动重定向绕过实际发送限流；从 HTTP 完成及后续失败/重试耗时中排除新增预览处理开销。
+- 输入/日志新增 8 个参数用例，HTTP 新增 5 个回归，均取得有效 RED→GREEN。原输入复现从 131073 B 裁至 131072 B；原输入/日志审查者按最终文件独立复核，37 项定向测试通过，三项发现全部关闭。HTTP 定向及相关目录 1764 项通过。
+- 最终完整检查：`uv run ruff format --check src tests scripts`（225 个文件）、`uv run ruff check .`、`uv run mypy src tests scripts`（223 个文件）、`env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q`（3428 passed / 18 skipped，16.71 秒）、`uv run python scripts/build_docs.py` 均 exit 0。18 个跳过仍为显式 opt-in 的真实联网测试。
+- 同步修正设计/计划的实施状态与贡献指南的 DEBUG 安全预览说明。此轮使用合成输入、MockTransport 和本地编码验证；没有追加真实上游请求，沿用第 6.5 节的真实结果与限制。按七类最新状态，OpenAlex、arXiv、Agent 和 OpenRouter LLM 为 PASS；Semantic Scholar、Unpaywall、Tavily 的三项失败记录保留。
+- 提交目标已确认：贡献者 `Dingxingdi-coder/agent-search-gateway` 的当前任务分支，合入 `Dingxingdi/agent-search-gateway:main`。创建草稿 PR 后，以 GitHub 上对应提交的 CI 结果补充跨平台、依赖审计、打包及秘密扫描证据。
+
