@@ -115,23 +115,38 @@ ProviderQuotaManager.get_rate(
 
 `permit` 只在成功原子登记后返回；内部使用专用 `RateLimitWaitTimeout`（只含安全时间数值），由 HTTP 边界翻译成 `ExecutionFailure(ALL_PROVIDERS_FAILED, reason="rate_limit_wait_timeout")`。无 policy 可快速返回 0。直接构建旧 executor/scheduler 的测试允许没有 gate。
 
+Fetch 首发传递统一使用 `InitialRateBudget(remaining_seconds: float, waited_seconds: float)`、`initial_rate_budget(gate, *, remaining_seconds, waited_seconds)` 上下文管理器，以及 `consume_initial_rate_budget(gate) -> InitialRateBudget | None`。只在同一 task、同一 gate 的首个 executor 进入许可等待时消费一次；ContextVar scope 退出后 reset。remaining_seconds 是实际 rate 等待的余额，不是绝对时刻；waited_seconds 是调度器已发生的 rate 等待，不含纯 capacity 等待或另一 provider 的执行。详情见 Task 6。
+
 ### 1.2 输入与 HTTP 合同
 
 ~~~python
 # input_limits.py
 TextTruncation(text: str, original_bytes: int, sent_bytes: int, truncated: bool)
-PreparedInput(content: bytes, original_bytes: int, input_truncated: bool)
+BodySelection(message_index: int, head_end: int, tail_start: int)
+PreparedPreview(content: bytes | None)
+PreparedInput(
+    content: bytes,
+    original_bytes: int,
+    input_truncated: bool,
+    preview_body: PreparedPreview | None = None,
+)
 
 truncate_utf8_head_tail(text: str, max_bytes: int) -> TextTruncation
 
 # 只读 Mapping，外部键仍只有 role/content；内部元数据绝不进入 HTTP JSON
 TruncatableMessage(protected_prefix: str, body: str, protected_suffix: str = "")
 
+PreviewProjector = Callable[
+    [Sequence[ChatMessage], Sequence[ChatMessage], tuple[BodySelection, ...]],
+    Sequence[ChatMessage] | None,
+]
+
 fit_messages_to_budget(
     messages: Sequence[ChatMessage],
     *,
     max_bytes: int,
     encode: Callable[[Sequence[ChatMessage]], bytes],
+    preview_projector: PreviewProjector | None = None,
 ) -> PreparedInput
 ~~~
 
@@ -139,12 +154,17 @@ fit_messages_to_budget(
 
 `fit_messages_to_budget` 先编码原输入，保留其总字节数；超限时从原始可裁正文构造候选，预留 marker，确定性分配正文预算，先验证最小可行候选，再用真实 encoder 寻找并保留满足 cap 的候选；不要求未经证明的全局最大。当前各 builder 只有一段正文；多个已标注消息也必须共享总预算，不能每段单独取满上限。所有候选都从原文生成，不能反复裁已经带 marker 的候选。
 
+BodySelection 只描述被裁正文在原字符串中的 Unicode 索引，head_end 为头部保留区间右开边界，tail_start 为尾部保留区间左边界；只在准备输入时短暂使用。Task 11 的 DEBUG 专用 preview_projector 接收原 messages、实际选中 candidate messages 和这些索引，把原文敏感跨度投影到同一保留区间，再交同一 encode 生成日志专用视图。不能先把原文替换成不同长度字符串再按旧索引切，也不能搜索省略 marker 猜截断位置。普通模式不传 projector、不额外扫描或编码预览。
+
+PreparedInput.content 始终是唯一实际传输体，所有尺寸/截断统计来自它；日志视图不能再次参与 fit 或发送。preview_body=None 表示未准备特殊视图，PreparedPreview(content=None) 表示安全准备失败、必须省略这一侧正文。输入已截断而特殊视图缺失时也省略请求预览，覆盖准备时 DEBUG 关闭而发送时开启的情况。两种对象的正文成员设 repr=False，不直接写入 LogRecord；只保留已选中内容的安全视图，不保留原 messages、被裁中段或捕获原文的 callback。
+
 ~~~python
 # HttpJsonExecutor.__init__ 新增可选关键字
 rate_gate: RateGate | None = None
 
 # request_json / request_text / _request_response 新增可选关键字
 prepared_body: PreparedInput | None = None
+protocol_attempt: int | None = None
 ~~~
 
 `prepared_body` 与非空 `json_body` 互斥；预先编码的 JSON 以 `content=prepared_body.content` 发送，并保持 `Content-Type: application/json`。其他 provider 继续通过 `json_body=` 构建。每次 attempt 使用 `AsyncClient.build_request` 保留 client 默认配置、动态 Header、params 与显式 timeout；最终发送同一个已构造 request，并以其 `content` 为日志和测试依据。
@@ -158,6 +178,7 @@ prepared_body: PreparedInput | None = None
 | 字段 | 类型/含义 |
 |---|---|
 | `provider`、`stage`、`endpoint`、`attempt`、`transport` | 现有安全关联信息；endpoint 去 userinfo/query/fragment，Agent 无 HTTP endpoint 用 null |
+| `protocol_attempt` | 可选 int；LLM 外层协议重试编号，与原 HTTP attempt 配对区分同一逻辑调用内的发送；其他 transport 不填 |
 | `request_body_preview` | string 或 null；实际发送内容经脱敏和 8 KiB 预览 |
 | `request_body_original_bytes` | int；输入裁剪前完整传输体字节数 |
 | `request_body_sent_bytes` | int；HTTP 实际 request.content / 已准备 Agent prompt 的长度 |
@@ -171,21 +192,21 @@ Agent spawn 失败时 `request_body_sent_bytes` 表示准备交给 CLI 的 promp
 
 ## 2. 官方来源复核与示例输入（31/31）
 
-日期 2026-11-18。下表用于 Task 15 的文档/示例更新；没有数值不代表无限。所有推荐策略仅为匹配列示产品/认证条件的本地示例，实际账号更低时仍以账号规则为准。并发只保留原配置或明确技术并发建议；不从费用配额换算 RPM。
+初次调查 2026-11-18；官方来源复核 2026-11-19。下表用于 Task 15 的文档/示例更新；没有数值不代表无限。所有推荐策略仅为匹配列示产品/认证条件的本地示例，实际账号更低时仍以账号规则为准。并发只保留原配置或明确技术并发建议；不从费用配额换算 RPM。
 
 `N/T` 表示 `{ requests = N, period_seconds = T }`，T 单位秒；`I=x` 表示 `min_interval_seconds=x`；`C=x` 表示 `max_concurrency=x`。
 
 | # | 类型 / 名称 | 官方事实与当前模式 | 示例策略 / 不确定性 | 官方来源 |
 |---|---|---|---|---|
 | 1 | Web / tavily | Development Key 100 RPM | 100/60 | [Rate Limits](https://help.tavily.com/articles/3240802908-rate-limits) |
-| 2 | Web / firecrawl | Free search/scrape 各 10 RPM | 共享 10/60 | [官方文档仓库](https://github.com/firecrawl/firecrawl-docs/blob/main/rate-limits.mdx) |
-| 3 | Web / exa | Free 普通 search 10 QPS；当前未选择 deep search | 共享 10/1；不要套 deep 模式 | [Billing](https://exa.ai/docs/admin/billing) |
-| 4 | Web / linkup | 未确认统一免费固定速率 | 留空，不从赠送查询数推算 | [Pricing](https://www.linkup.so/pricing) |
+| 2 | Web / firecrawl | 已认证 Free search/scrape 各 10 RPM；另有 2 个并发浏览器、超出页面任务进入服务端队列 | 共享 10/60；浏览器 worker 不直接等同在途 HTTP 请求数，见下方说明 | [官方文档仓库](https://github.com/firecrawl/firecrawl-docs/blob/main/rate-limits.mdx) |
+| 3 | Web / exa | Free 普通 /search 10 QPS、/contents 100 QPS；当前两者均使用，未选择 deep search | 共享取严格的 10/1；deep 的 5 QPS 不用于当前模式 | [Billing](https://exa.ai/docs/admin/billing) |
+| 4 | Web / linkup | 当前 Key 模式 Search/Fetch 每组织 10 QPS；x402 才按 IP 计数 | 共享 10/1，不从赠送查询数推算 | [Rate Limits](https://docs.linkup.so/pages/documentation/platform/rate-limits.md) |
 | 5 | Web / brave | Search Prepaid 产品（含免费 credits）50 RPS | 50/1；非 Answers，非旧 Free 方案保证 | [Pricing](https://api-dashboard.search.brave.com/documentation/pricing) |
-| 6 | Web / anysearch | 当前 Bearer 模式，公开文档无固定值 | 留空；不声称已证实某种动态算法 | [Auth](https://www.anysearch.com/docs/auth) |
+| 6 | Web / anysearch | 注册 Free 最高 10 QPS；Key 认证不代表 Pro；Pro 最高 20 QPS | Free 示例 10/1；每日免费 calls 属可消耗额度，不纳入 gate | [Pricing](https://www.anysearch.com/pricing)、[Auth](https://www.anysearch.com/docs/auth) |
 | 7 | Web / tinyfish | Search 30/min + 500/hour；Fetch 150 URLs/min + 1000/day；当前一次 Fetch 一个 URL | 共享 30/60 + 500/3600；日上限的处理见下方来源差异说明 | [Pricing](https://www.tinyfish.ai/pricing) |
 | 8 | Web / parallel | 当前 keyed Build API search/extract 各 600/min；免费 Launch MCP 为 variable | 条件化 600/60，仅适用于 Build API（含免费使用量） | [Pricing](https://parallel.ai/pricing) |
-| 9 | Web / brightdata | 当前 SERP/Fetch zones 未确认统一免费固定值 | 留空，不套其他产品 | [SERP](https://brightdata.com/products/serp-api) |
+| 9 | Web / brightdata | 未充值 Free Tier 的 SERP/Web Unlocker/Proxy 默认共享 1000 RPM；充值后移除此限制 | 当前 Search/Fetch zone 对应 SERP/Web Unlocker 时共享 1000/60，保留账号/zone 条件 | [Free Tier](https://docs.brightdata.com/general/account/billing-and-pricing/free-tier) |
 | 10 | Web / scrape_do | Free 主同步 API 5 并发；当前不是 Async 队列 API | C=5；无 RPM 数字 | [Pricing](https://scrape.do/pricing/) |
 | 11 | Web / zenrows | Free 5 并发 | C=5 | [Pricing](https://www.zenrows.com/pricing) |
 | 12 | Web / decodo | 免费 10 req/s；当前是 Basic 的旧 /v2/scrape 兼容接口 | 10/1，明确旧产品/账号条件，不改 endpoint | [旧集成说明](https://decodo.com/Scraping/web)、[旧端点示例](https://decodo.com/scraping/web/rss-scraper-api) |
@@ -195,16 +216,16 @@ Agent spawn 失败时 `request_body_sent_bytes` 表示准备交给 CLI 的 promp
 | 16 | Web / scrapingant | Free 单 active request | C=1 | [v2 Errors](https://docs.scrapingant.com/errors) |
 | 17 | Web / serpapi | Free throughput 50/hour | 50/3600，本地全部尝试计数；不宣称官方小时只计成功 | [Pricing](https://serpapi.com/pricing) |
 | 18 | Web / jina | 当前无 Key Reader 20 RPM；Key 模式是另一档 | 20/60，维持当前匿名 Reader | [Reader](https://jina.ai/reader/) |
-| 19 | Web / yuanbao | SearchPro 官方频率列为“-” | 留空 | [API 概览](https://cloud.tencent.com/document/product/1806/121821) |
-| 20 | Web / zhihu | quota 页面本次无法取得可读固定值 | 留空；注明无法核实 | [Quota](https://developer.zhihu.com/docs) |
+| 19 | Web / yuanbao | 产品 FAQ：极速/标准 20 QPS、旗舰 5 QPS；当前服务 Key 兼容请求只发 Query，版本由已开通账号决定 | 账号版本未知时保守 5/1；确认极速/标准可用 20/1；不新增版本配置 | [产品 FAQ](https://cloud.tencent.com/document/product/1806/121804) |
+| 20 | Web / zhihu | 官方有账号配额和超频错误说明，未确认统一公开请求频率 | 固定频率留空；限免日额度不纳入 gate | [Quota](https://developer.zhihu.com/docs?key=quota) |
 | 21 | Web / doubao | Custom Search 默认账号 10 QPS；Fetch 数值按控制台 | 10/1 只作为已知 Search 约束的共享示例；不能保证覆盖未知 Fetch 更低值 | [Custom](https://docs.volcengine.com/docs/networked-search/networked-search?lang=zh)、[Fetch](https://docs.volcengine.com/docs/networked-search/doubao-search-web-analysis-fetch?lang=zh) |
 | 22 | Web / youcom | Self-serve search/contents 各 10 RPS | 共享 10/1 | [Rate limits](https://you.com/docs/rate-limits) |
-| 23 | Web / keenable | 当前 Key 模式，keyless 的 10 RPS、1000/hour/IP 不适用 | 留空，不改匿名模式 | [官方项目](https://github.com/keenableai/dsh-keenable) |
+| 23 | Web / keenable | 认证组织默认 10 RPS，组织所有 Key 与 Search/Fetch 共享；Key 解除小时上限 | 共享 10/1，不添加匿名入口的 1000/hour/IP | [Rate limits](https://docs.keenable.ai/rate-limits) |
 | 24 | Web / open_websearch | 自托管；外部引擎策略不同 | 留空，不增加子引擎调度 | [官方项目](https://github.com/Aas-ee/open-webSearch) |
 | 25 | Academic / arxiv | legacy API 每 3 秒一次、单连接 | I=3，C=1 | [API ToU](https://info.arxiv.org/help/api/tou.html) |
 | 26 | Academic / semantic_scholar | Key 初始 1 RPS；匿名共享池无独享保证 | 1/1；标清 Key 模式，匿名时仅为本地保守值 | [API](https://webflow.semanticscholar.org/product/api) |
 | 27 | Academic / openalex | Free Key 普通请求 30 RPS；>5 Boolean operators 搜索 2 RPS 且不允许突发 | 普通 30/1；复杂查询需 I=0.5，见下方说明 | [Authentication](https://help.openalex.org/api/authentication/) |
-| 28 | Academic / dblp | 未公开固定阈值 | 留空；礼貌访问建议不写成硬性官方值 | [FAQ](https://dblp.org/faq/How%2Bto%2Buse%2Bthe%2Bdblp%2Bsearch%2BAPI.html) |
+| 28 | Academic / dblp | 未公开固定硬阈值；官方建议相邻请求间隔 1–2 秒并遵守 Retry-After | 固定窗口留空；可另注 I=2 的礼貌访问建议，不写成官方硬上限 | [Search API](https://dblp.org/faq/How%2Bto%2Buse%2Bthe%2Bdblp%2Bsearch%2BAPI.html)、[爬取建议](https://dblp.org/faq/Am%2BI%2Ballowed%2Bto%2Bcrawl%2Bthe%2Bdblp%2Bwebsite.html) |
 | 29 | Academic / crossref | Public /works list 1 RPS/1并发；有 mailto 的 polite 3 RPS/3并发 | 保守 1/1，C=1 | [官方调整](https://www.crossref.org/blog/announcing-changes-to-rest-api-rate-limits/) |
 | 30 | Academic / core | 10秒5 single 或1 batch；/search/works 分类仍待确认 | 1/10 是本地最保守示例，不声称该端点官方确定值 | [API](https://core.ac.uk/services/api) |
 | 31 | OA / unpaywall | /v2/:doi，100000 calls/day 技术要求，email 必需 | 可选 100000/86400；保留 disabled 状态 | [API](https://unpaywall.org/api)、[新版说明](https://data.unpaywall.org/products/api) |
@@ -213,12 +234,14 @@ Agent spawn 失败时 `request_body_sent_bytes` 表示准备交给 CLI 的 promp
 
 本轮不改已提交的三份 spec；Task 15 在用户文档和配置说明中落实来源纠正，并在架构调查节注明复核结果，不改产品架构。
 
+- **Linkup / Keenable / AnySearch / Bright Data / 元宝：**2026-11-19 补查官方限流专页、免费层说明及产品 FAQ，五项由“未知”纠正为上表的条件化确定值。Task 15 必须同步来源表和现有 provider 的示例字段，不再将它们归入未知集合。元宝请求 Mode 是返回类型，不是极速/标准/旗舰选择器；不新增未设计的产品版本参数。
+- **Firecrawl / Exa：**Firecrawl 的 2 个浏览器表示服务端并行处理页面的容量，超出任务排队，不能声称本地 max_concurrency=2 精确管理其内部 worker；本次保留请求级 CapacityGate，不新增远端 job 配额控制。Exa /contents 的 100 QPS 与普通 /search 的 10 QPS 合并为同 provider 10/1。
 - **Scrape.do：**补充已核实的同步 API 免费 C=5；Async 的独立 C=2 不适用于现有 adapter。
 - **TinyFish：**原表遗漏 Fetch 的 1000 URLs/day。官方明确 TinySearch/TinyFetch 不扣 Wallet，且把这些约束描述为免费检索的 rate/daily limits。因此完整调查必须列出；本计划把它作为请求次数上限，可用第三个共享窗口 `1000/86400` 保守覆盖，和 Unpaywall 的日请求窗口同类，不引入付费余额管理。固定日重置与本地滑动日窗口不同，本地更保守。这项是配置示例补全，不能说原先 500/hour 已涵盖日上限。[官方说明](https://www.tinyfish.ai/pricing)
 - **Parallel / Brave / Decodo：**数值须绑定当前 API 产品与认证条件。附有免费用量的 API 方案与完全免费的 MCP 方案不混写；不将赠送调用额度、credits、月度使用量或美元等费用配额加入 RateGate；官方明确的请求频率、技术并发及日请求上限按本节处理。
 - **Doubao：**明确 Fetch 的固定值未公开核实。同时启用 Search/Fetch 须使用可调用 Fetch 的按量后付费 API Key，Search 的订阅套餐 Key 不支持 Fetch。若同一账号控制台给出更低值，用户应调整同一共享策略；本次不增加账号探测或每端点 gate。示例注释标明此证据限制，不能宣称对未知端点完全保证。
 - **OpenAlex：**Gateway 将原 query 送入 works search，可能包含复杂 Boolean。完整说明保留普通查询 30/1，并提供 `min_interval_seconds=0.5` 的共享保守配置来覆盖当前接口可表达的 >5 operator 查询；示例默认采用该间隔以符合“采用更严格要求”的既定规则。不调用 semantic search、不添加宽 topic filter，也不将其专属限制引入当前 adapter；不处理新账号美元预算节奏。[官方请求限制](https://help.openalex.org/api/authentication/)
-- **SerpApi / CORE / AnySearch：**分别区分“hour throughput”与成功计费统计、本地保守值与端点确定值、未知固定值与算法推断。
+- **SerpApi / CORE：**分别区分 hour throughput 与成功计费统计、本地保守值与端点确定值。知乎、dblp、自托管 open_websearch 仍没有可确认的统一固定请求频率；豆包 Fetch 和 CORE /search/works 分类继续明确证据边界。
 
 以上调查覆盖 31 个服务，不等于 31 家真实调用都已测试，也不等于每家都有可公开确认的固定免费数值。
 
@@ -327,7 +350,8 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_config_academic_p
 将 OpenAlex registration.authentication 改成 required
 复用 config 的 required SecretValue 路径；保留 contact_email optional
 OpenAlexProvider.__init__ 增加 keyword-only required api_key: SecretValue
-search 使用 Authorization Bearer，params 仍只含搜索/页大小/可选邮箱
+仅在 Header 构造处调用 api_key.reveal() 取得真实值并发送 Bearer；不能把 SecretValue.__str__ 的 <redacted> 当 Key
+params 仍只含搜索/页大小/可选邮箱
 沿用 runtime 对 academic factory 已有的 api_key 注入，不写 OpenAlex 特判
 更新已有匿名构造 fixture 为假 SecretValue / 假 environ
 ~~~
@@ -488,6 +512,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_rate_gate.py t
 - 等待窗口需一小时、timeout=.5：无 HTTP、无 http_attempt_started、无 body preview，终态 reason 为 rate_limit_wait_timeout，max_attempts 不被本地等待重新启动。
 - 许可前取消不发送，许可后 transport 取消保留计数；原 retry sleep 取消行为不变。
 - 等待事件与网络事件单独计时；等待/获准分别断言 estimated_wait_ms/waited_ms，http_attempt_started 位于真正 send 前。动态 Header factory 在限速放行后才调用，确保 Zhihu X-Request-Timestamp 不因排队过期。
+- Task 6 到位后，scheduler 已等待 .4s、executor 再等待 .1s 时，获准/超时诊断累计约 .5s，HTTP elapsed_ms 不含排队。period_seconds=1e308 的诊断不得因秒数乘 1000 溢出而替代 rate_limit_wait_timeout。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -508,17 +533,18 @@ HttpJsonExecutor 的 before_attempt 仅更新当前 attempt 序号
 将原 client.request 等价拆成 client.build_request + client.send，保留原 json_body 通道
 operation 先构建本次 body 与静态 Header；动态 Header factory 暂不执行
 operation 在每次发送前：
-  记录 rate 等待开始；必要时写 rate_limit_waiting 的安全元数据
-  await gate.permit(timeout_seconds=当前等待预算)
-  超时转非 retryable ExecutionFailure，并写 rate_limit_wait_timeout
-  成功写 rate_limit_acquired(waited_ms)
+  消费匹配 gate 的 InitialRateBudget；没有时用完整 request_timeout_seconds 与 waited_seconds=0
+  记录本段 rate 等待开始；必要时写 rate_limit_waiting 安全元数据
+  await gate.permit(timeout_seconds=remaining_seconds)
+  超时转非 retryable ExecutionFailure，rate_limit_wait_timeout 记录先前与本段实际等待之和
+  成功写 rate_limit_acquired，waited_ms 同样采用两处实际 rate 等待累计值
   此时才调用动态 header factory 并更新本次 request 的 headers
   重新设 attempt_started=monotonic，写 http_attempt_started
   执行原 HTTP 请求（真正网络 timeout 使用完整 request_timeout_seconds）
 按既有 inspector/status/retry 路径处理响应
 ~~~
 
-不能把异步 gate 放进 `retry_async.before_attempt`：该回调同步且异常会被压制。local gate timeout 不能归入 transport failure，不能由 retry controller 再等一次。保留动态 headers、allowlisted diagnostics、Retry-After、jitter 和状态分类。
+不能把异步 gate 放进 `retry_async.before_attempt`：该回调同步且异常会被压制。local gate timeout 不能归入 transport failure，不能由 retry controller 再等一次。保留动态 headers、allowlisted diagnostics、Retry-After、jitter 和状态分类。日志秒转毫秒提取复用当前 on_retry 对超大有限数值的安全分支（先转整数再乘），不能对 1e308 直接 int(seconds * 1000)；estimated_wait_ms、累计 waited_ms 与 timeout 诊断采用同一规则。
 
 `enrich_paper_records` 继续捕获 resolver 的 ExecutionFailure 并保留论文；如果旧日志固定 `resolver_failed`，仅为新的安全 rate reason 透传 allowlist 值，不扩大异常文本输出。
 
@@ -539,8 +565,8 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 **Files:**
 
 - Modify: `src/agent_search_gateway/scheduler/fetch.py`
-- Modify: `src/agent_search_gateway/rate_limit.py`（首发等待预算的 task-local scope）
-- Modify: `src/agent_search_gateway/providers/http.py`（消费首发预算）
+- Modify: `src/agent_search_gateway/rate_limit.py`（首发等待余额的 task-local scope）
+- Modify: `src/agent_search_gateway/providers/http.py`（消费首发余额并累计诊断）
 - Modify: `src/agent_search_gateway/runtime.py`（注入现有 request timeout）
 - Test: `tests/scheduler/test_fetch_capacity.py`
 - Test: `tests/scheduler/test_fetch_outcomes.py`
@@ -549,17 +575,20 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 
 - [ ] **Step 1: Write the failing test**
 
-先写 `test_fetch_prefers_rate_ready_provider_over_earlier_limited_provider`：A 有并发空位但需等 3600s，B 立即可发；B 成功时 A 的 HTTP 调用为零。随后覆盖：
+先写 `test_fetch_prefers_rate_ready_provider_over_earlier_limited_provider`：A 有并发空位但需等 3600s，B 立即可发；B 成功时 A 的 HTTP 调用为零。随后逐项完成小 TDD 循环：
 
 | 场景 | 预期 |
 |---|---|
-| A rate ready 但 capacity 满，B capacity 空但 rate 等待 | 等 A capacity 事件或 B rate timer 的较早者，不被 B 的空闲 capacity 反复唤醒 |
-| 所有候选 rate 等待超过 .5s（含 event loop 迟唤醒） | 超时优先于当前 ready 判断，移出本次候选；零 HTTP 开始/preview，保留 rate_limit_wait_timeout 与 ExecutionFailure.reason |
-| scheduler 已等 .4s，剩余 .1s 内 ready 被竞争者抢走 | 首发 HTTP permit 只余 .1s，不能再得到完整 .5s |
-| 候选 rate ready 的顺序变化 | 醒来重新按配置优先级选择；Executor 原子预约最终裁决 |
-| 取消、普通失败、judge/cheap_check 失败 | 所有 wait tasks cancel+await，CapacityLease 一次释放，原 fallback 保持 |
-| 新用户请求再尝试之前失败 provider | 失败集合仅属于本次 fetch，不永久禁用 provider |
-| 纯等待 capacity | 保留原并发等待语义，不额外套全 workflow timeout |
+| A rate ready 但 capacity 满，B capacity 空但 rate 等待 | 等 A capacity 事件或 B rate timer 的较早者，不被 B 空闲 capacity 反复唤醒 |
+| 所有候选实际等 rate 超过 .5s（含 event loop 迟唤醒） | 先判该段等待超时再看当前 ready；候选耗尽明确结束，零 HTTP/preview，failures 保留 rate_limit_wait_timeout |
+| scheduler 已实际等 .4s，剩余 .1s 内 ready 被竞争者抢走 | 首发 HTTP permit 只余 .1s，不能再得到完整 .5s |
+| A 在 t=.1 被观察为 rate ready，之后只等 capacity 到 t=.8；预算 .5 | 只扣 .1s，仍可发送，不能套首次受限以来的永久截止 |
+| A 受限而 B 立即选中，B 执行 HTTP/judge .8s 后失败，A 此时 ready | A 不因 B 的执行耗时报 rate timeout |
+| 先有 cheap_check/judge 语义拒绝，其余候选全 rate timeout | 明确耗尽并保留原 semantic_failure 优先终态，同时保留限流 failures |
+| judge 调用抛 ExecutionFailure，与 judge 返回拒绝分别测试 | 前者沿原边界向上传播，后者继续 fallback，不合并为一种失败 |
+| 取消、普通 provider 失败、候选耗尽 | 所有内部 wait tasks cancel 后 await，CapacityLease 一次释放，无空集合忙循环 |
+| scheduler 等 .4s + executor 等 .1s | rate_limit_acquired/timeout 累计约 500ms，HTTP 网络 elapsed_ms 单独计时 |
+| 新用户请求再尝试之前失败 provider；纯等待 capacity | 失败集合/余额仅属本次 fetch，原纯并发等待语义保持 |
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -567,27 +596,35 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/tes
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler/test_fetch_capacity.py -k rate_ready_provider -v
 ~~~
 
-预期：当前按 capacity 的选择会先进入 A，无法立即通过 B 完成。
+预期：当前按 capacity 的选择先进入 A，无法立即通过 B 完成。其他时间线的 RED 分别证明实际多扣等待、候选耗尽不收尾或错误分类错误。
 
 - [ ] **Step 3: Describe the minimal implementation**
 
 ~~~text
-为本次 fetch 的候选记录首次开始等 rate 时的绝对截止时间
-曾开始等 rate 且 now > 其截止时间的候选先判超时，即使迟唤醒时已经 rate ready
-ready-in == 0 且未超过 rate 等待截止的候选才尝试拿 capacity lease
-拿到 lease 后在一个 task-local 首发 rate-deadline scope 内执行 provider.fetch
-仍受 rate 限制者不占 capacity，不提前预约 rate
-若无可选者：
-  只为 rate ready 但 capacity 满的候选等待 capacity 状态改变
-  对受 rate 限制者等待最早 ready timer / 最早截止时间
-  FIRST_COMPLETED 后取消并 await 其余 wait tasks，再重新评估
-已等待候选超过截止，或恰好截止仍未 ready：写安全 rate_limit_wait_timeout 事件，
-将带 reason 的 ExecutionFailure 追加到本次 failures，并从本次候选集中移除该 provider
+每个本次 fetch 候选保存 remaining_seconds=T、waited_seconds=0
+每轮查询非预约 ready-in，按配置顺序给 rate ready 候选尝试 capacity lease
+有可选者立即返回 provider、lease、它的 InitialRateBudget，不为其他候选启动计时
+没有可选者时：
+  remaining 已空则明确返回耗尽；外层合并 selector 收集的 failures 后 break
+  快照 blocked={当前 ready-in>0 的候选} 和本轮实际挂起起点 s
+  对 blocked 创建最早 rate-ready/余额截止 timer，写安全 rate_limit_waiting
+  只对 rate ready 但 capacity 满者创建 capacity 状态 waiter
+  await FIRST_COMPLETED；所有退出路径 finally cancel 并 gather 全部内部任务
+  醒来 t：仅对本轮 blocked 扣 t-s，累计 waited_seconds
+  先淘汰 t>s+本轮余额者，即使迟唤醒时已 ready；恰好截止仍受限也淘汰
+  生成带 reason 的 ExecutionFailure、写累计等待诊断、从本次 remaining 移除
+  重新评估；观察到 ready 后的纯 capacity 等待不再扣 rate 余额
+选中 provider.fetch/judge 执行期间，所有未选候选均没有活动中的 rate 等待片段
+outer 保留原 accepted / semantic_failure_seen / execution_failure 汇总顺序
 ~~~
 
-首发预算传递采用 `rate_limit.py` 中窄的 ContextVar scope（绑定 gate identity + deadline），不改所有 `provider.fetch(url)` 协议。定义 `initial_rate_deadline(gate, deadline)` 上下文管理器和 `consume_initial_rate_deadline(gate) -> float | None`；executor 一次取走；继承 deadline 已逾期则直接本地超时，不能用零预算立即 probe 重新放行；未逾期的首个 attempt 用 `max(0, deadline-now)`，后续实际 HTTP retry 使用新的完整等待预算。scope finally reset，隔离不同任务、provider 及后续请求；不得在共享 gate 上存每个请求的 deadline。
+内部 selector 返回协议必须显式表达“选中”或“耗尽”，并携带本轮收集的 failures，可用小结果类型或等价明确元组。不能仍按旧接口无条件解包 `(provider, lease)`，也不能移除最后候选后调用空列表 waiter 或 `asyncio.wait([])`。现有 `wait_until_any_web_available` 对空集合立即返回、取消分支只 cancel 子任务；本任务直接为需要的 CapacityGate 建可用性 waiter，并在同一 finally 中 cancel+gather，避免未清理的嵌套等待者。
 
-没有 rate gate 时 ready-in=0，保留旧行为。计时器使用与 gate 同源的可注入 monotonic/sleep；permit 的首次调用可接收内部剩余预算 0，恰好截止时只允许无需等待的原子许可，否则立即超时。调度器自行淘汰的候选没有 executor 可代为写日志，必须自行写限速超时事件；attempt 仅表示预备首发序号，不表示已实际发送。不因没有许可而登记一次 HTTP attempt。
+首发预算只采用 §1.1 的 `initial_rate_budget(gate, *, remaining_seconds, waited_seconds)` 与 `consume_initial_rate_budget(gate)`。取得 lease 后包住该 provider 调用；executor 进入匹配 gate 的首个许可等待时消费一次，以与 gate 同源的 monotonic 建立本段截止。传秒数余额，不传先前已暂停的绝对 deadline。余额为零时只允许无需等待的原子许可，不能重给完整 T。后续实际 HTTP retry 使用新的完整等待预算；Retry-After 不计入本地 rate 等待。scope finally reset，不在共享 gate 上存请求余额。
+
+scheduler 的 `rate_limit_waiting` 带 provider、stage=fetch、预备 attempt=1、安全 estimated_wait_ms。获准事件由 executor 唯一输出，waited_ms 为 scheduler 与本段 executor 等待之和，不能把两条累计值重复相加。scheduler 直接淘汰的候选没有 executor，须自行写累计 rate_limit_wait_timeout。数字转换复用 Task 5 的安全毫秒逻辑；没有实际发送不写 http_attempt_started 或 Body preview。
+
+无 rate gate 时 ready-in=0，不增加全 workflow timeout。取消原样传播；cheap_check/judge 语义拒绝继续 fallback，judge 执行异常按当前代码上抛。计时器用可注入 monotonic/sleep，不真实等待一分钟。
 
 - [ ] **Step 4: Run test to verify it passes (and full suite)**
 
@@ -595,11 +632,11 @@ ready-in == 0 且未超过 rate 等待截止的候选才尝试拿 capacity lease
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/orchestrators/test_url_fetch_admission.py tests/providers/test_http_executor.py -v
 ~~~
 
-预期：所有受限候选在已有预算内结束；无空转、lease 泄漏、后台 waiter、URL 准入回归。
+预期：实际限流等待有界，全候选耗尽明确结束；无空转、lease 泄漏、后台 waiter、URL 准入或 judge 分类回归。
 
 - [ ] **Step 5: Refactor (keep tests green)**
 
-仅合并调度器等待任务的创建/清理；把 deadline scope 限于首发 rate 等待，不扩展成通用 deadline 框架。重跑 Step 4。
+只合并等待任务创建/清理与余额结算；scope 限于首发 rate，不扩展成通用 workflow deadline 框架。重跑 Step 4。
 
 
 ### Task 7: UTF-8 首尾裁剪与显式 Prompt 分段
@@ -628,6 +665,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/scheduler tests/orchestrato
 - 六个 builder 对未裁输入 `dict(message)` 的 role/content 与现有文本完全相同。
 - Focus 值本身、固定 `Candidate content:`、`Final content:`、`Page content:` 等模板被保护；正文包含这些字符串不会改变分段。
 - 普通 Mapping 的额外键原样保留；未标注内容不被猜测性裁剪。
+- 被裁正文的 BodySelection 使用原正文 Unicode 索引，与实际保留头尾准确对应；原文同名 marker 不构成切口。日志视图接口按 §1.2 保留默认 None，敏感跨度投影在 Task 11 的安全测试后接入。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -659,7 +697,9 @@ fit_messages_to_budget：
   从原文确定性分配预算，以相同 encoder 验证每个候选并保存最近可行值
   多段从 marker 切回原文可能非单调；不能用未经证明的二分谓词宣告无解
   搜索次数有界，找不到更好候选时返回已验证可行值
-  返回最终 bytes / original_bytes / input_truncated，不携带被裁原文
+  固定最终候选及 BodySelection，记录真实 bytes / original_bytes / input_truncated
+  Task 11 接入的可选 projector 只作用于日志视图，不再次 fit、不改变 transport bytes
+  返回 PreparedInput，不携带原 messages、被裁原文或 callback
 ~~~
 
 `llm_search_messages`、`llm_paper_search_messages` 保留已有 `.strip()`；Focus 保留已有标准化，不额外改变语义。helper 不根据 model 猜 token，也不发送 HTTP。
@@ -696,6 +736,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_input_limits.py t
 补充重试行为：
 
 - protocol retry 与 HTTP retry 均复用同一个已准备 body，字节完全一致，不二次裁剪。
+- 同一 complete_* 模拟 HTTP 429 → HTTP 200 但协议内容非法 → 下一协议轮 HTTP 200 合法；本任务先断言三次真实传输的 prepared bytes 完全一致。protocol_attempt 编号和 preview 配对由 Task 12 在日志功能存在后新增测试，不能在本任务要求尚未实施的预览事件。
 - 已在 byte cap 内但服务端返回 context-length HTTP 400，仍按原失败分类，仅一次，不自动缩短重发。
 - `prepared_body` 与 `json_body` 同时指定是明确的内部参数错误。
 - 原普通 Web JSON 路径和 callable headers 每次尝试刷新仍通过。
@@ -812,6 +853,8 @@ DEBUG time=2026-11-18T08:21:30.124Z request=0123abcd event=...
 
 分别覆盖普通非 gateway_event 日志、毫秒/跨日边界、request_id、单物理行、原 elapsed_ms、不合法 created 的安全降级。已有两个写死 `DEBUG request=` 的测试更新预期顺序，不只检查字符串包含 time。
 
+补 `test_rotation_preserves_timestamp_and_request_id_at_default_boundary`：tmp_path 使用生产 5 MiB / 3 backups 设置，在边界前写入固定 created/request_id 的哨兵事件；有界预填充使下一条固定记录触发 rollover。分别解析 `.1` 与当前文件的对应事件，验证两侧 UTC 毫秒、request_id、单物理行完整。现有 220 字节测试只验证备份存在，不能作为此项证据；不要用数万次日志调用制造边界。
+
 - [ ] **Step 2: Run test to verify it fails**
 
 ~~~bash
@@ -850,6 +893,8 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 
 - Create: `src/agent_search_gateway/body_preview.py`
 - Modify: `src/agent_search_gateway/observability.py`
+- Modify: `src/agent_search_gateway/input_limits.py`（DEBUG 候选投影与特殊视图）
+- Test: `tests/unit/test_input_limits.py`（两种实际 encoder 的投影边界）
 - Create: `tests/observability/test_body_preview.py`
 - Test: `tests/observability/test_redaction.py`
 - Test: `tests/unit/test_observability_logging.py`
@@ -871,6 +916,8 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 | debug=false | 不调用 body decode、结构扫描、preview encoder，事件为零 |
 | helper、Formatter、Handler 或磁盘写入失败 | 业务结果不变，固定安全降级；无原文 traceback |
 | 正文原含 marker 与两个截断标记 | input_truncated 与 preview_truncated 独立，不能由字符串猜状态 |
+| 已登记假 secret 分别跨 LLM/Agent 的输入 head/tail 切口 | 完整值和可识别残片不进最终日志，安全正文仍可见；不只测 8 KiB 日志切口 |
+| 投影失败、无安全 formatter、准备后 DEBUG 才开启 | 已截断输入请求侧为 null，实际发送/统计保持；无原文 fallback |
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -878,7 +925,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_observability_log
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_preview.py -k before_truncating -v
 ~~~
 
-预期：缺少安全预览/预脱敏能力；有效 RED 不得通过直接删去所有正常正文来掩盖预览功能缺失。
+预期：缺少安全预览/预脱敏能力；有效 RED 不得通过直接删去所有正常正文来掩盖预览功能缺失。本任务以真实 fit/encoder、preview helper 与安全 formatter 验证纯管线；HTTP/Agent 自动发事件尚未接入，其完整日志测试分别留给 Task 12/13，不依赖后续任务才能通过。
 
 - [ ] **Step 3: Describe the minimal implementation**
 
@@ -895,11 +942,18 @@ body_preview：
   使用同一个活跃 redactor 在裁剪前遮蔽已登记秘密
   80/20 头尾 + marker，按 UTF-8 和最终字段转义尺寸验证
   对不可安全处理输入 fail closed，不输出原始 fallback
+输入截断的特殊日志视图：
+  observability.make_input_preview_projector(logger) 仅在 DEBUG 下取得有效安全 redactor
+  projector 在原正文识别已登记秘密、敏感结构、凭据/URL 跨度
+  按 BodySelection 与实际保留头尾求交，在同一候选上只遮蔽交集
+  保护前后缀、marker、消息顺序与保留区间保持，不恢复已丢中段
+  fit 用同一个 encode 编码投影消息，保存 PreparedPreview，绝不替换实际 content
+  投影/额外编码的普通异常只令 PreparedPreview.content=None，不影响请求
 Formatter：
   保留最终 SecretRedactor 全行兜底，仍按 _render_string 输出单物理行
 ~~~
 
-为 formatter 提供窄的只读 `redact_for_preview(text)` 方法供 helper 复用，只遍历实际生效的 logger/parent handler，并遵守 propagate=false 的停止边界；相同 redactor 不重复处理。若无已配置的安全 formatter，Body 值降级为 null，仍可输出安全计数，不能假定任意 handler 会替自己脱敏。不把原始 bytes、headers、argv 或环境放进 LogRecord 字段等待稍后处理。
+为 formatter 提供窄的只读 `redact_for_preview(text)` 方法供 helper 复用，只遍历实际生效的 logger/parent handler，并遵守 propagate=false 的停止边界；相同 redactor 不重复处理。若无已配置的安全 formatter，Body 值降级为 null，仍可输出安全计数，不能假定任意 handler 会替自己脱敏。为原正文投影提供只读 `sensitive_spans(text)`，返回敏感区间、不导出秘密注册表；先求交再替换，避免替换长度改变裁剪坐标。特殊视图仍过统一结构脱敏与 8 KiB helper，正文成员 repr=False，不假定投影识别了一切未知敏感值。不把原始 bytes、headers、argv 或环境放进 LogRecord 字段等待稍后处理。
 
 8 KiB 使用保守计量：预览文本自身 UTF-8 ≤8192，按现有 `_render_string` 等价 JSON escaping 的字段值也 ≤8192；整行含两侧和其他元数据自然可能超过 8 KiB。marker、引号与 escape 所占空间不可漏算。不要通过裁剪 JSON 原始 bytes 再期待结构化 redaction 成功。
 
@@ -908,7 +962,7 @@ Formatter：
 - [ ] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
-env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_preview.py tests/observability/test_redaction.py tests/unit/test_observability_logging.py -v
+env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_preview.py tests/observability/test_redaction.py tests/unit/test_observability_logging.py tests/unit/test_input_limits.py -v
 ~~~
 
 预期：正文可在 DEBUG 安全预览，秘密哨兵在全部最终日志中缺席；INFO 无预览准备成本，sink 故障不改变业务。
@@ -923,6 +977,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 **Files:**
 
 - Modify: `src/agent_search_gateway/providers/http.py`
+- Modify: `src/agent_search_gateway/providers/llm/openai_chat.py`（日志视图与协议尝试关联）
 - Test: `tests/providers/test_http_executor.py`
 - Test: `tests/observability/test_provider_event_logging.py`
 - Test: `tests/observability/test_provider_diagnostics.py`
@@ -932,7 +987,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 
 - [ ] **Step 1: Write the failing test**
 
-先写 `test_http_preview_pairs_each_retry_with_its_own_response`：POST 429→200，启用实际安全 formatter，解析两条 upstream_body_preview，验证同一 request_id、两个 attempt、各自响应、发送体与字节数准确。
+先写 `test_http_preview_pairs_each_retry_with_its_own_response`：POST 429→200，启用实际安全 formatter，解析两条 upstream_body_preview，验证同一 request_id、两个 attempt、各自响应、发送体与字节数准确。在 Task 8 三次真实发送的组合基础上，本任务新增日志断言：HTTP 429 → 200 协议非法 → 下一协议轮 200 合法的 (protocol_attempt, attempt) 依次为 (1,1)、(1,2)、(2,1)，对应响应准确且全部重发字节不变；两个并发 complete_* 的外层编号不串。其他 HTTP/Agent 不填该字段。
 
 逐项覆盖：
 
@@ -944,7 +999,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/observability/test_body_pre
 | TransportError / timeout / 发送期间取消 | 每次 1；无响应为 null、0、false |
 | 一次真实请求后 retry 的本地 rate wait 超时 | 只保留第一次预览；不制造第二条 |
 | 首次 rate wait timeout / LLM input rejection | 0 HTTP preview |
-| 输入已裁 / 仅 preview 裁 / 两者都裁 / 都不裁 | 两个标记分别正确，原 bytes ≥ sent bytes |
+| 输入已裁 / 仅 preview 裁 / 两者都裁 / 都不裁 | 标记分别正确，原 bytes ≥ sent bytes；输入切口秘密残片经投影视图遮蔽 |
 | DEBUG 关闭、helper/formatter/sink 故障 | 0 或安全降级；业务结果不变 |
 | 连续 100 次小型 mock attempt | 每次一条，无跨 attempt 的 response 残留 |
 
@@ -959,6 +1014,9 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executo
 - [ ] **Step 3: Describe the minimal implementation**
 
 ~~~text
+LLM client 在 fit 调用处仅当 DEBUG 时传入 Task 11 的 make_input_preview_projector
+各 complete_* 的 before_attempt 局部闭包捕获 protocol_attempt，同时保留原协议日志
+该编号随本轮 _request_once 传 executor，不存共享 client 实例字段
 operation 内每次独立构建 request，初始化 response=None
 rate permit 已通过后、紧邻 send：
   写 http_attempt_started，记录网络开始时间
@@ -966,16 +1024,16 @@ rate permit 已通过后、紧邻 send：
     response = await client.send(request)
   finally:
     log_upstream_body_preview(
-      实际 request.content,
+      已截断输入使用已验证 preview_body.content，缺失/失败则 None；普通请求用实际 request.content,
       response.content 若可得否则 None,
-      prepared_body 的 original_bytes/input_truncated 或普通默认,
-      本次 provider/stage/attempt/安全 endpoint
+      bytes 统计取实际 request.content，original_bytes/input_truncated 取 prepared_body 或普通默认,
+      本次 provider/stage/protocol_attempt/attempt/安全 endpoint
     )
 之后保留原 diagnostics、inspector、status/retry 与 completed/failed 流程
 request_json 的 JSON decode 层不再次写 preview
 ~~~
 
-不打印 Header、完整 Request 对象、repr(response)、原始 exceptions 或 URL query。输入裁掉的中段不再进入 helper，仅传 metadata 与最终 bytes。原 `provider_failed` 终态仍由 owner 写一次，预览不替代它。
+不打印 Header、完整 Request 对象、repr(response)、原始 exceptions 或 URL query。输入裁掉的中段不再进入 helper；仅传发送内容的安全视图和统计，特殊视图缺失时不能用裸 bytes 兜底。同一 LLM 外层 protocol_attempt 在 HTTP started/completed/retrying/failed/preview 统一透传；原 attempt 含义与次数保持。原 `provider_failed` 终态仍由 owner 写一次，预览不替代它。
 
 更新旧“整份 DEBUG 不出现任何普通正文”的断言：原事件和 INFO 仍不得携带正文，仅新增 preview 事件允许安全片段；全日志凭据、URL query、被输入裁掉的中段哨兵必须继续缺席。独立 LLM protocol logger 本身没有正文输出需求，不能顺带弱化其安全断言。
 
@@ -1006,7 +1064,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_http_executo
 
 先写 `test_agent_timeout_previews_captured_stdout_after_cleanup`：现有假 agy 先输出一个完整、可安全解析的合成 JSON envelope 再阻塞，触发 timeout，确认进程已清理、一条安全 preview 保留已捕获内容及真实字节数，并标明流尚未到 EOF。
 
-依次覆盖 SUCCESS、非零退出、非法 envelope、空 stdout、spawn error、E2BIG、输出超限、一次/两次取消及 input preflight rejection。另将 stdout 截在 token/cookie 字符串内部，验证保留 captured bytes 而预览为 null，不把残缺 JSON 当普通文本直接打印。检查 stderr 原文、env、完整 argv、秘密哨兵从未写入日志；输入被裁中段不出现。普通模式事件为零。
+依次覆盖 SUCCESS、非零退出、非法 envelope、空 stdout、spawn error、E2BIG、输出超限、一次/两次取消及 input preflight rejection。另将 stdout 截在 token/cookie 字符串内部，验证保留 captured bytes 而预览为 null，不把残缺 JSON 当普通文本直接打印。检查 stderr 原文、env、完整 argv、秘密哨兵从未写入日志；输入被裁中段不出现。沿用 Task 11 跨输入切口 secret 用例，不能只遮蔽完整值而遗漏残片。普通模式事件为零。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1019,6 +1077,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/agent/test_antigr
 - [ ] **Step 3: Describe the minimal implementation**
 
 ~~~text
+Agent 在 fit 调用处仅当 DEBUG 时传入 Task 11 的 make_input_preview_projector
 stdout reader 将已捕获 bytes 交给调用方拥有的有界缓冲
 保留 stdout 4MiB / stderr 256KiB 原硬上限与观测总计数
 超限/取消不把不完整 stdout 当成功输出
@@ -1026,7 +1085,8 @@ stdout reader 将已捕获 bytes 交给调用方拥有的有界缓冲
 在现有 cleanup 最内 finally：
   保留 agent_process_diagnostic
   若 spawn_attempted，emit 一条 transport=agent_cli / attempt=1 的 preview
-  Request 来自 PreparedInput 的最终 prompt，Response 来自捕获 stdout
+  Request 来自同一最终 prompt 的安全日志视图；已裁且视图缺失时 null；统计仍取真实 -p bytes
+  Response 来自捕获 stdout
   无 stdout 则 null、0、false；部分捕获不得伪称完整终态 envelope
   超限/timeout/cancel 未到 EOF 时标记 incomplete；仅可安全处理内容给非 null preview
   不可安全脱敏的残缺 JSON 给 null，并保留原 captured bytes 与 incomplete 标志
@@ -1152,7 +1212,7 @@ llm_request_body_bytes = 131072
 agent_prompt_bytes = 98304
 ~~~
 
-在现有 provider 表原位加入已证实的共享速率字段；不改变 enable flags、不重复 TOML table。保留模板原本省略的 ZenRows、Decodo、ScrapingDog、ScrapeGraphAI 选择，它们的完整可复制配置建议放在新参考文档，不为覆盖率而突然启用更多服务。
+在现有 provider 表原位加入已证实的共享速率字段；不改变 enable flags、不重复 TOML table。明确新增 Linkup/AnySearch/Keenable 的 10/1、适用免费账号的 Bright Data 1000/60、元宝版本未知时的 5/1；认证/zone/产品条件必须随注释写入，不能只复制数字。保留模板原本省略的 ZenRows、Decodo、ScrapingDog、ScrapeGraphAI 选择，它们的完整可复制配置建议放在新参考文档，不为覆盖率而突然启用更多服务。
 
 关键样例：
 
@@ -1298,14 +1358,14 @@ LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有
 | Web Search/Fetch/内部多请求/重试共用 | 5 | 实际 MockTransport 发送时序、Zhihu 双分支 |
 | Academic/OA 与同名 LLM/Agent 隔离 | 5 | namespace 隔离及 OA 保留结果 |
 | 长等待有限、取消不耗许可、已预约不退款 | 4、5、6 | deadline/取消用例，无悬挂任务 |
-| Fetch 优先可发候选、避免忙等、不重复给等待预算 | 6 | capacity/rate 混合与竞争丢许可测试 |
-| 全日志 UTC 毫秒、request_id、elapsed_ms/轮转保留 | 10、14 | 固定 LogRecord.created、daemon 与现有轮转测试 |
+| Fetch 优先可发候选、避免忙等、不重复给等待预算 | 6 | 实际 rate 片段计时、capacity/其他候选耗时不扣、耗尽与取消测试 |
+| 全日志 UTC 毫秒、request_id、elapsed_ms/轮转保留 | 10、14 | 固定 LogRecord.created、daemon、默认 5 MiB 边界两侧事件完整性 |
 | OpenAlex required/disabled/Bearer/不匿名回退 | 2、5、14 | 配置零发送、真实 Mock Header、401/403 |
 | 128 KiB LLM / 96 KiB Agent、保护模板/Focus、80/20 | 3、7、8、9 | 最终 request.content / 单个 -p 的字节断言 |
 | 不可压缩、Unicode/JSON escape/系统上限、E2BIG | 7、8、9 | input_budget_unfit、argument_limit、不 spawn/send |
-| DEBUG 每 HTTP attempt/Agent 调用一条双向 preview | 11、12、13 | success/error/retry/decode/cancel 矩阵 |
+| DEBUG 每 HTTP attempt/Agent 调用一条双向 preview | 11、12、13 | success/error/retry/decode/cancel、LLM (protocol_attempt, attempt) 配对矩阵 |
 | 8 KiB、先脱敏、两个截断标记、无响应 null | 11、12、13 | 8191/8192/8193、escape、秘密边界哨兵 |
-| 不记录输入裁掉的中段、不输出 Header/env/argv/stderr | 8、9、11、12、13 | 全最终物理日志安全哨兵 |
+| 不记录输入裁掉的中段、不输出 Header/env/argv/stderr | 8、9、11、12、13 | 跨输入 head/tail 的秘密投影、原中段缺席、最终物理日志哨兵 |
 | debug=false 不准备 Body、日志失败不改业务 | 11、14 | spy 与 helper/formatter/sink 故障注入 |
 | URL admission、provider fallback、论文合并、结果模式 | 6、14 | acceptance/orchestrator 原合同 |
 | 离线门槛与低调用量真实 smoke 分开报告 | 14、16 | 默认 SKIP、最终命令和范围记录 |
@@ -1314,10 +1374,10 @@ LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有
 
 - 所有配置消费者统一使用 `.rate_policy.windows`、`.min_interval_seconds`、`.input_limits.llm_request_body_bytes`、`.input_limits.agent_prompt_bytes`。
 - 命名空间固定为 `web` / `academic` / `oa`；LLM/Agent 不登记 rate。
-- `RateGate.permit(timeout_seconds=...)` 返回等待秒数；`next_available_in_seconds()` 同步只读。Task 6 的绝对 deadline 在 executor 内转换剩余秒数，不把 deadline 数值误当 duration。
-- `PreparedInput.content` 为真实 bytes，`original_bytes` 为完整未裁传输体大小；`input_truncated` 只反映输入变化。
+- `RateGate.permit(timeout_seconds=...)` 返回本段等待秒数；ready-in 同步只读。Task 6 统一用 InitialRateBudget、initial_rate_budget、consume_initial_rate_budget，传 remaining_seconds/waited_seconds；executor 从余额建立本段截止。纯 capacity/其他候选执行不扣余额，累计诊断只相加一次。
+- `PreparedInput.content` 为真实 bytes，original_bytes 为完整未裁体大小，input_truncated 只反映输入变化。preview_body 三态与 PreparedPreview.content 仅供 DEBUG；BodySelection 是原正文 Unicode 索引，PreviewProjector 投影同一获选候选，不改发送/统计、不保留原文闭包。
 - `TruncatableMessage` 对外只暴露 Mapping 的 role/content；`ChatMessage`、LLMClient 和 AgentTextRunner 签名保持。
-- `HttpJsonExecutor.prepared_body` 在三个相关方法同名；普通 `json_body` 路径保持，二者不能同时生效。
+- HttpJsonExecutor 的 prepared_body 与可选 protocol_attempt 在三个相关方法同名；普通 json_body 路径保持，与 prepared_body 互斥。外层编号属于每次 complete_* 局部闭包，HTTP attempt 仍每个 executor 调用从 1 开始。
 - reason 固定为 `rate_limit_wait_timeout` / `input_budget_unfit`，通过现有 diagnostics 白名单；保留原 `argument_limit`。
 - 所有预览事件使用第 1.3 节同一套字段，不混用 input_sent_bytes、body_size 等第二套日志名称。live 报告可展示更短列名，但必须明确来源映射。
 - 新配置 dataclass 末尾字段有默认值，现有直接构造测试不会因缺新参数全部失效。
@@ -1342,3 +1402,11 @@ LLM/Agent 输入使用纯合成正文且只略超过各自 cap，不使用私有
 - 计划中的来源补全与保守示例调整已在第 2.1 节列明，实施时不得把已知不确定项写成保证。
 - 规划阶段未启动上游 smoke、未修改业务代码、未更新用户配置或运行中的服务。
 - 自检已完成：按第 4 节核对 spec 覆盖和类型一致性；三项只读独立审查分别核对限流/调度、输入/日志、官方来源。已修正迟唤醒期限、两次请求 ID、取消契约、动态 Header 时机、多正文预算、安全不完整输出和 live 报告边界等问题。
+
+### 5.1 2026-11-19 复核修订
+
+- 复核基线：计划提交 `e0def89`。沿用已有 16 项实施顺序，三份已确认 spec 不作改写。
+- 根据官方专页补全 Linkup、AnySearch、Bright Data、元宝、Keenable 的速率，补齐 Exa 端点差异、Firecrawl 浏览器并发单位及 dblp 礼貌间隔；31 个注册服务全部覆盖。
+- 修正 FetchScheduler 的实际限流等待余额、全候选耗尽、judge 分类、waiter 清理与累计等待诊断，复用既有 timeout 配置。
+- 增加输入裁剪切口的敏感跨度投影、LLM 两层重试关联、默认 5 MiB 轮转边界完整性测试。
+- 已完成三项只读复核及主代理的覆盖/接口自检；本轮只修改实施计划，未执行补丁、测试、真实 API 冒烟或服务操作。
