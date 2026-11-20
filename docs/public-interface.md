@@ -1,10 +1,10 @@
 # Public interface and compatibility policy
 
-`agent-search-gateway` is pre-1.0 alpha software. This document distinguishes supported user-facing interfaces from implementation details so contributors and users can judge compatibility risk.
+`agent-search-gateway` retains its alpha development status. Starting with `1.0.0`, the project commits to compatibility for its documented user-facing interfaces.
 
 ## Supported user-facing interfaces
 
-The following interfaces are public for the current `0.x` line:
+The `1.x` compatibility policy covers these public interfaces.
 
 - the `agent-search-gateway` executable and the commands documented in the README and `--help` output;
 - the configuration path and documented TOML fields, including supported provider settings omitted from the selected examples in `config.example.toml`;
@@ -15,7 +15,7 @@ The following interfaces are public for the current `0.x` line:
 
 The top-level `--version` and `-v` flags print `agent-search-gateway <version>` using the installed CLI package version and exit successfully without reading configuration or contacting a daemon. They are not subcommand-local flags.
 
-Changes to those interfaces require tests, documentation, and a changelog entry. A patch release should not intentionally break them.
+Changes to those interfaces require tests, documentation, and a changelog entry.
 
 The request-scoped `--provider` flag on `keyword-search`, `paper-search`, and `llm-search`, and the independent `--model` flag on `llm-search`, are supported CLI interfaces. Selection is exact and case-sensitive within the enabled search-provider or configured search-invocation namespace; LLM providers are configuration aliases, not protocol names. Both LLM filters select their intersection. Omitted filters preserve default behavior, and invalid selections fail without falling back to unselected backends. Filters do not apply to `url-fetch` or change normal post-search processing.
 
@@ -100,7 +100,7 @@ adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 ## Diagnostic interfaces
 
-`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve during the `0.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
+`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `1.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
 DEBUG diagnostics cover Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations.
 HTTP attempts, received responses, scheduled retries, and terminal HTTP failures are
@@ -128,7 +128,7 @@ DEBUG output can contain private text and URL paths. Review it before sharing. T
 
 ## Internal interfaces
 
-Unless explicitly documented otherwise, the following are implementation details and may change without deprecation during the `0.x` series:
+The following implementation details may change without deprecation unless explicitly documented otherwise.
 
 - imports from `agent_search_gateway` Python modules other than `__version__`;
 - provider adapter classes and registries;
@@ -141,12 +141,12 @@ The package is currently distributed as a CLI application, not as a stable Pytho
 
 ## Versioning
 
-The project follows Semantic Versioning once tagged releases begin:
+Tagged releases follow Semantic Versioning for the supported public interfaces.
 
-- patch releases contain backward-compatible fixes;
-- minor `0.x` releases may contain breaking changes, which must be called out in release notes;
-- a stable compatibility commitment begins at `1.0.0`.
+- Patch releases contain backward-compatible fixes.
+- Minor releases add backward-compatible functionality.
+- Breaking changes require a major release and must be called out in its release notes.
 
-Deprecation periods before `1.0.0` are best effort. Security fixes may remove unsafe behavior without a full deprecation cycle.
+Security fixes may remove unsafe behavior without a full deprecation cycle.
 
 See [CHANGELOG.md](../CHANGELOG.md) for changes and [RELEASING.md](../RELEASING.md) for the release process.

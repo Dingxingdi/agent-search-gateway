@@ -25,6 +25,7 @@ def build() -> None:
     """Create a self-contained Pages artifact under ``site/``."""
     shutil.rmtree(SITE_DIR, ignore_errors=True)
     API_DIR.mkdir(parents=True)
+    version = project_version()
 
     subprocess.run(
         [
@@ -37,7 +38,7 @@ def build() -> None:
             "--docformat",
             "markdown",
             "--footer-text",
-            "agent-search-gateway 0.x internal API reference",
+            f"agent-search-gateway {version} internal API reference",
             "--edit-url",
             (
                 "agent_search_gateway="
@@ -49,9 +50,7 @@ def build() -> None:
         check=True,
     )
 
-    landing = LANDING_TEMPLATE.read_text(encoding="utf-8").replace(
-        "{{PROJECT_VERSION}}", project_version()
-    )
+    landing = LANDING_TEMPLATE.read_text(encoding="utf-8").replace("{{PROJECT_VERSION}}", version)
     (SITE_DIR / "index.html").write_text(landing, encoding="utf-8")
     (SITE_DIR / ".nojekyll").write_text("", encoding="utf-8")
 
