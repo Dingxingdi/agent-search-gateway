@@ -141,3 +141,14 @@ def test_redacted_url_credentials_do_not_hide_the_remaining_signed_query() -> No
     assert "FRAGMENT_PRIVATE_DATA" not in rendered
     assert "<redacted-url>" in rendered
     assert "upstream_message_truncated=false" in rendered
+
+
+def test_registered_spans_cover_overlapping_and_json_escaped_values() -> None:
+    from agent_search_gateway.observability import SecretRedactor
+
+    redactor = SecretRedactor([SecretValue("ABABA"), SecretValue("BAZ"), SecretValue("XY\nZ")])
+    raw = "ABABABAZ\n" + r"XY\nZ"
+    spans = redactor.sensitive_spans(raw)
+    covered = {index for start, end in spans for index in range(start, end)}
+    assert covered == set(range(8)) | set(range(9, len(raw)))
+    assert all(isinstance(point, int) for span in spans for point in span)

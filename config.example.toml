@@ -1,43 +1,63 @@
+# Match the example policy to your account. See docs/provider-rate-limits.md for sources.
+# rate_limits counts attempts across Search, Fetch and retries for the same provider.
 [web_providers]
 default_max_concurrency = 3
 
 [web_providers.tavily]
+# Development key.
+rate_limits = [{ requests = 100, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.tavily.com"
 api_key_env = "TAVILY_API_KEY"
 
 [web_providers.firecrawl]
+# Authenticated Free Search and Scrape, each 10/min. Browser workers use a separate queue.
+rate_limits = [{ requests = 10, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.firecrawl.dev"
 api_key_env = "FIRECRAWL_API_KEY"
 
 [web_providers.exa]
+# Free ordinary Search is stricter than Contents. Both share this window.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.exa.ai"
 api_key_env = "EXA_API_KEY"
 
 [web_providers.linkup]
+# API-key Search and Fetch share an organization limit.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.linkup.so"
 api_key_env = "LINKUP_API_KEY"
 
 [web_providers.brave]
+# Search Prepaid, including free credits. Other Search plans may differ.
+rate_limits = [{ requests = 50, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
 api_url = "https://api.search.brave.com"
 api_key_env = "BRAVE_API_KEY"
 
 [web_providers.anysearch]
+# Registered Free with API key, up to 10 QPS. Check your plan.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
 api_url = "https://api.anysearch.com"
 api_key_env = "ANYSEARCH_API_KEY"
 
 [web_providers.tinyfish]
+# Free Search and single-URL Fetch. The third window counts a rolling day locally.
+rate_limits = [
+  { requests = 30, period_seconds = 60 },
+  { requests = 500, period_seconds = 3600 },
+  { requests = 1000, period_seconds = 86400 },
+]
 enable_search = true
 enable_fetch = true
 search_api_url = "https://api.search.tinyfish.ai"
@@ -45,6 +65,8 @@ fetch_api_url = "https://api.fetch.tinyfish.ai"
 api_key_env = "TINYFISH_API_KEY"
 
 [web_providers.parallel]
+# Keyed Build API Search and Extract. Launch MCP has a different policy.
+rate_limits = [{ requests = 600, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.parallel.ai"
@@ -62,6 +84,8 @@ timeout_seconds = 30
 disable_cache_fallback = true
 
 [web_providers.brightdata]
+# Unfunded Free Tier sharing the SERP and Web Unlocker zones. Check your account.
+rate_limits = [{ requests = 1000, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
 api_url = "https://api.brightdata.com"
@@ -70,6 +94,8 @@ search_zone = "example_serp_zone"
 fetch_zone = "example_unlocker_zone"
 
 [web_providers.scrape_do]
+# Free synchronous API.
+max_concurrency = 5
 # Search may return google.com/goto wrappers instead of destination URLs (issue #74).
 # See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
@@ -78,6 +104,8 @@ api_url = "https://api.scrape.do"
 api_key_env = "SCRAPE_DO_API_KEY"
 
 [web_providers.scraperapi]
+# Free concurrent connections.
+max_concurrency = 5
 # Search may return google.com/goto wrappers instead of destination URLs (issue #74).
 # See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
@@ -86,36 +114,49 @@ api_url = "https://api.scraperapi.com"
 api_key_env = "SCRAPER_API_KEY"
 
 [web_providers.scrapingant]
+# Free active request limit.
+max_concurrency = 1
 enable_search = false
 enable_fetch = true
 api_url = "https://api.scrapingant.com"
 api_key_env = "SCRAPINGANT_API_KEY"
 
 [web_providers.serpapi]
+# Free hourly throughput. Each local attempt counts.
+rate_limits = [{ requests = 50, period_seconds = 3600 }]
 enable_search = true
 enable_fetch = false
 api_url = "https://serpapi.com"
 api_key_env = "SERP_API_KEY"
 
 [web_providers.jina]
+# Anonymous Reader.
+rate_limits = [{ requests = 20, period_seconds = 60 }]
 enable_search = false
 enable_fetch = true
 api_url = "https://r.jina.ai"
 
 # New providers are opt-in; enable Search and Fetch independently.
 [web_providers.doubao]
+# Default Custom Search account only. The free-only fixed rate is unpublished.
+# Fetch needs a pay-as-you-go key and has a console-specific limit. Lower this if needed.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = false
 enable_fetch = false
 api_url = "https://open.feedcoopapi.com/search_api"
 api_key_env = "DOUBAO_API_KEY"
 
 [web_providers.youcom]
+# Self-serve Search and Contents.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = false
 enable_fetch = false
 api_url = "https://ydc-index.io"
 api_key_env = "YDC_API_KEY"
 
 [web_providers.keenable]
+# Authenticated organization, shared by all keys and both endpoints.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = false
 enable_fetch = false
 api_url = "https://api.keenable.ai"
@@ -133,6 +174,8 @@ engines = [
 ]
 
 [web_providers.yuanbao]
+# Unknown provisioned edition: Flagship allows 5 QPS, Fast and Standard allow 20.
+rate_limits = [{ requests = 5, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
 api_url = "https://api.wsa.cloud.tencent.com"
@@ -148,41 +191,64 @@ api_key_env = "ZHIHU_ACCESS_SECRET"
 default_max_concurrency = 3
 
 [academic_providers.arxiv]
+# Legacy API courtesy rules: one connection and three seconds between requests.
+max_concurrency = 1
+min_interval_seconds = 3
 enabled = true
 api_url = "https://export.arxiv.org/api/query"
 
 [academic_providers.semantic_scholar]
+# Initial keyed rate. Anonymous use shares a pool and has no dedicated allowance.
+rate_limits = [{ requests = 1, period_seconds = 1 }]
 enabled = true
 api_url = "https://api.semanticscholar.org/graph/v1"
 # Optional:
 # api_key_env = "SEMANTIC_SCHOLAR_API_KEY"
 
 [academic_providers.openalex]
+# Free key and ordinary works search. Space all attempts for complex Boolean queries.
+rate_limits = [{ requests = 30, period_seconds = 1 }]
+min_interval_seconds = 0.5
 enabled = true
+api_key_env = "OPENALEX_API_KEY"
 api_url = "https://api.openalex.org"
 # Optional:
 # contact_email_env = "OPENALEX_CONTACT_EMAIL"
 
 [academic_providers.dblp]
+# Courtesy interval. No published fixed window.
+min_interval_seconds = 2
 enabled = true
 api_url = "https://dblp.org/search/publ/api"
 
 [academic_providers.crossref]
+# Conservative public works-list settings, including when contact email is supplied.
+rate_limits = [{ requests = 1, period_seconds = 1 }]
+max_concurrency = 1
 enabled = true
 api_url = "https://api.crossref.org"
 # Optional:
 # contact_email_env = "CROSSREF_CONTACT_EMAIL"
 
 [academic_providers.core]
+# The single/batch classification of /search/works is unknown. Conservative local policy.
+rate_limits = [{ requests = 1, period_seconds = 10 }]
 enabled = true
 api_url = "https://api.core.ac.uk/v3"
 api_key_env = "CORE_API_KEY"
 
 [oa_resolvers.unpaywall]
+# Technical daily request limit, applied only when enabled.
+rate_limits = [{ requests = 100000, period_seconds = 86400 }]
 enabled = false
 api_url = "https://api.unpaywall.org/v2"
 # Required when enabled = true:
 # contact_email_env = "UNPAYWALL_CONTACT_EMAIL"
+
+[input_limits]
+# UTF-8 bytes of the complete serialized request body or single prompt argument.
+llm_request_body_bytes = 131072
+agent_prompt_bytes = 98304
 
 [llm_providers]
 default_max_concurrency = 2

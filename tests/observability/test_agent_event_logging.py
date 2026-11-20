@@ -1,6 +1,7 @@
 import asyncio
 import errno
 import json
+import logging
 import shlex
 from collections.abc import Sequence
 from functools import partial
@@ -23,7 +24,7 @@ from tests.support.agent_search import (
     paper_markdown,
     web_markdown,
 )
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 async def test_agent_failure_logs_allowlisted_reason_without_payload(
@@ -68,14 +69,10 @@ async def test_agent_failure_logs_allowlisted_reason_without_payload(
         "reason=terminal_status_failure",
     ):
         assert field in failed
-    for sentinel in (
-        "STDERR_SENTINEL",
-        "ENV_VALUE_SENTINEL",
-        "RESPONSE_SENTINEL",
-        "ERROR_SENTINEL",
-        "PROMPT_SENTINEL",
-    ):
+    for sentinel in ("STDERR_SENTINEL", "ENV_VALUE_SENTINEL", "AGENT_PRIVATE", "--print-timeout"):
         assert sentinel not in combined
+    for body in ("RESPONSE_SENTINEL", "ERROR_SENTINEL", "PROMPT_SENTINEL"):
+        assert body not in without_debug_body_previews(combined)
     assert "llm_stage_" not in combined
 
 
@@ -170,10 +167,16 @@ async def test_agent_spawn_os_error_is_safe_and_releases_resources(
     monkeypatch: pytest.MonkeyPatch,
     error_number: int,
     reason: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=adapter.__name__)
     invocation_directories: list[Path] = []
+    prompt_sizes: list[int] = []
 
     async def fail_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        prompt = args[args.index("-p") + 1]
+        assert isinstance(prompt, str)
+        prompt_sizes.append(len(prompt.encode()))
         directory = kwargs["cwd"]
         assert isinstance(directory, str)
         invocation_directories.append(Path(directory))
@@ -199,6 +202,14 @@ async def test_agent_spawn_os_error_is_safe_and_releases_resources(
 
     assert f"reason={reason}" in stream.getvalue()
     assert "SENTINEL" not in stream.getvalue() + str(caught.value)
+    [preview] = [
+        r for r in caplog.records if getattr(r, "gateway_event", None) == "upstream_body_preview"
+    ]
+    fields = getattr(preview, "gateway_fields", {})
+    assert prompt_sizes == [fields["request_body_sent_bytes"]]
+    assert fields["request_body_original_bytes"] == prompt_sizes[0] > 0
+    assert fields["response_body_preview"] is None and fields["response_body_bytes"] == 0
+    assert fields["response_preview_truncated"] is False
     assert len(invocation_directories) == 1
     assert not invocation_directories[0].exists()
     assert gate.in_use == 0
@@ -300,7 +311,10 @@ async def test_agent_terminal_diagnostic_preserves_safe_status_and_byte_counts(
     assert caught.value.diagnostics["stdout_bytes"] == len(stdout)
     assert caught.value.diagnostics["stderr_bytes"] == len(stderr_text.encode())
     combined = stream.getvalue() + (tmp_path / "diagnostic.log").read_text()
-    assert "SENTINEL" not in combined + str(caught.value) + repr(caught.value.diagnostics)
+    assert "STDERR_SENTINEL" not in combined and "ENV_VALUE_SENTINEL" not in combined
+    assert "SENTINEL" not in (
+        without_debug_body_previews(combined) + str(caught.value) + repr(caught.value.diagnostics)
+    )
     assert "event=provider_completed" not in combined
     assert "event=provider_failed" not in combined
 
@@ -338,7 +352,12 @@ async def test_agent_success_diagnostic_follows_cleanup(tmp_path: Path) -> None:
         "stderr_bytes=0",
     ):
         assert field in lines[0]
-    assert "SENTINEL" not in stream.getvalue()
+    assert "SENTINEL" not in without_debug_body_previews(stream.getvalue())
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert "RESPONSE_SENTINEL" in preview
+    assert "response_preview_truncated=false" in preview
     assert "event=provider_" not in stream.getvalue()
 
 
@@ -405,7 +424,16 @@ async def test_agent_process_failure_diagnostics_preserve_priority(
     if status is not None:
         assert f"upstream_status={status}" in lines[0]
     assert caught.value.diagnostics["exit_code"] == exit_code
-    assert "SENTINEL" not in stream.getvalue() + repr(caught.value.diagnostics)
+    assert "STDERR_SENTINEL" not in stream.getvalue()
+    assert "SENTINEL" not in without_debug_body_previews(stream.getvalue()) + repr(
+        caught.value.diagnostics
+    )
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert f"response_body_bytes={len(stdout)}" in preview
+    assert "response_preview_truncated=false" in preview
+    assert ("response_body_preview=null" in preview) is (not stdout)
 
 
 @pytest.mark.parametrize("case", ["timeout", "output_limit"])
@@ -457,6 +485,12 @@ async def test_agent_interrupted_process_diagnostics_use_only_observed_facts(
     ):
         assert field in lines[0]
     assert "upstream_status=" not in lines[0]
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert f"response_body_bytes={len(stdout)}" in preview
+    assert "response_preview_truncated=true" in preview
+    assert "response_body_preview=null" in preview
     assert "SENTINEL" not in stream.getvalue() + repr(caught.value.diagnostics)
     assert gate.in_use == 0
 
@@ -505,7 +539,7 @@ async def test_agent_cleanup_failure_never_emits_process_success(
 
     async def failed_cleanup(
         spawn: asyncio.Task[asyncio.subprocess.Process] | None,
-        tasks: Sequence[asyncio.Task[bytes] | asyncio.Task[int]],
+        tasks: Sequence[asyncio.Task[None] | asyncio.Task[int]],
     ) -> str | None:
         nonlocal cleaned
         assert await original_cleanup(spawn, tasks) is None
@@ -547,7 +581,8 @@ async def test_agent_cleanup_failure_never_emits_process_success(
     ):
         assert field in lines[0]
     assert "semantic_result=success" not in stream.getvalue()
-    assert "SENTINEL" not in stream.getvalue()
+    assert "CLEANUP_SENTINEL" not in stream.getvalue()
+    assert "SENTINEL" not in without_debug_body_previews(stream.getvalue())
 
 
 @pytest.mark.parametrize(
@@ -584,7 +619,7 @@ async def test_agent_unknown_error_shapes_are_not_interpreted(
     assert "category=unknown" in line
     assert "upstream_status=ERROR" in line
     assert "upstream_code=" not in line and "upstream_message=" not in line
-    assert "SENTINEL" not in stream.getvalue()
+    assert "SENTINEL" not in without_debug_body_previews(stream.getvalue())
 
 
 async def test_agent_selected_error_text_is_redacted_before_bounding(tmp_path: Path) -> None:
@@ -622,7 +657,10 @@ async def test_agent_selected_error_text_is_redacted_before_bounding(tmp_path: P
             )
     finally:
         session.close()
-    logged = stream.getvalue()
+    full_log = stream.getvalue() + (tmp_path / "bounded.log").read_text()
+    assert all(fragment not in full_log for fragment in credential.splitlines() if fragment)
+    assert "QUERY_SENTINEL" not in full_log and "FRAGMENT_SENTINEL" not in full_log
+    logged = without_debug_body_previews(stream.getvalue())
     assert len(logged.splitlines()) == 1
     assert "upstream_status=" + "s" * 120 in logged
     assert "upstream_code=" + "c" * 120 in logged
@@ -640,6 +678,47 @@ async def test_agent_selected_error_text_is_redacted_before_bounding(tmp_path: P
         ("upstream_message", 512),
     ):
         assert len(fields[field]) <= limit
+
+
+@pytest.mark.parametrize("outcome", ["success", "nonzero_exit", "cancel_preview"])
+async def test_agent_preview_helper_failure_preserves_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    def broken(*args: object, **kwargs: object) -> None:
+        if outcome == "cancel_preview":
+            raise asyncio.CancelledError("cancelled during preview")
+        raise RuntimeError("unavailable preview")
+
+    monkeypatch.setattr(adapter, "log_upstream_body_preview", broken)
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        print(json.dumps({{"status": "SUCCESS", "response": "ok"}}))
+        sys.exit({int(outcome == "nonzero_exit")})
+        """,
+    )
+    gate = CapacityGate(1)
+    operation = adapter.run_antigravity(
+        None,
+        [],
+        provider_name="agy",
+        command=str(command),
+        timeout_seconds=2,
+        pass_env=(),
+        quota=gate,
+    )
+    if outcome == "cancel_preview":
+        with pytest.raises(asyncio.CancelledError, match="cancelled during preview"):
+            await operation
+    elif outcome == "nonzero_exit":
+        with pytest.raises(ExecutionFailure) as caught:
+            await operation
+        assert caught.value.reason == outcome
+    else:
+        assert await operation == "ok"
+    assert gate.in_use == 0
 
 
 async def test_agent_unexpected_spawn_error_is_diagnosed_after_cleanup(
@@ -664,7 +743,7 @@ async def test_agent_unexpected_spawn_error_is_diagnosed_after_cleanup(
 
     async def capture_cleanup(
         spawn: asyncio.Task[asyncio.subprocess.Process] | None,
-        tasks: Sequence[asyncio.Task[bytes] | asyncio.Task[int]],
+        tasks: Sequence[asyncio.Task[None] | asyncio.Task[int]],
     ) -> str | None:
         nonlocal cleaned
         result = await original_cleanup(spawn, tasks)
@@ -680,9 +759,9 @@ async def test_agent_unexpected_spawn_error_is_diagnosed_after_cleanup(
         with pytest.raises(ValueError) as caught:
             await adapter.run_antigravity(
                 "pin",
-                [{"role": "user", "content": "PROMPT_SENTINEL\x00TAIL_SENTINEL"}],
+                [{"role": "user", "content": "PROMPT_SENTINEL"}],
                 provider_name="alias",
-                command=str(command),
+                command=str(command) + "\x00",
                 timeout_seconds=5,
                 pass_env=(),
                 quota=gate,
@@ -711,5 +790,6 @@ async def test_agent_unexpected_spawn_error_is_diagnosed_after_cleanup(
         assert field in lines[0]
     assert "exit_code=" not in lines[0] and "upstream_status=" not in lines[0]
     combined = stream.getvalue() + (tmp_path / "unexpected.log").read_text()
-    assert "SENTINEL" not in combined and "embedded null byte" not in combined
+    assert "SENTINEL" not in without_debug_body_previews(combined)
+    assert "embedded null byte" not in combined
     assert "event=provider_" not in combined and "traceback=" not in combined

@@ -1,3 +1,7 @@
+import asyncio
+import json
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import httpx
@@ -5,12 +9,21 @@ import pytest
 
 from agent_search_gateway.config import resolve_config
 from agent_search_gateway.errors import ConfigFailure
+from agent_search_gateway.llm.prompts import (
+    content_clean_messages,
+    focus_summary_messages,
+    judge_messages,
+    llm_paper_search_messages,
+    llm_search_messages,
+    safety_messages,
+)
+from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.academic.defaults import (
     build_default_academic_registry,
     build_default_oa_resolver_registry,
 )
-from agent_search_gateway.providers.contracts import ProviderCapabilities
+from agent_search_gateway.providers.contracts import ChatMessage, ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.registry import WebProviderRegistration
@@ -19,7 +32,12 @@ from agent_search_gateway.providers.web.jina import JinaReaderAdapter
 from agent_search_gateway.providers.web.parallel import ParallelAdapter
 from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
 from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.runtime import Runtime
+from agent_search_gateway.url_normalization import normalize_url
+from tests.support.agent_cli import write_fake_cli
+from tests.support.agent_search import web_markdown
+from tests.support.controlled import ManualClock
 from tests.support.logging import structured_test_logger
 
 
@@ -116,6 +134,155 @@ def _environment() -> dict[str, str]:
         "ENV_E": "x",
         "ENV_F": "PARALLEL_CREDENTIAL_SENTINEL",
     }
+
+
+@pytest.mark.parametrize(
+    "build_messages",
+    [
+        content_clean_messages,
+        judge_messages,
+        safety_messages,
+        partial(focus_summary_messages, focus="完整🙂 focus"),
+        llm_search_messages,
+        llm_paper_search_messages,
+    ],
+)
+async def test_runtime_llm_caps_each_stage_request(
+    tmp_path: Path, build_messages: Callable[[str], tuple[ChatMessage, ...]]
+) -> None:
+    cap = 1400
+    raw = _config()
+    raw["input_limits"] = {"llm_request_body_bytes": cap}
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    registry = build_default_registry()
+    runtime = Runtime.build(
+        resolve_config(raw, registry, _environment()),
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    body = "HEAD" + "前🙂" * 2000 + "OMITTED" + "后" * 2000 + "TAIL"
+    messages = build_messages(body)
+    instruction, separator, _ = messages[1]["content"].partition(body)
+    assert separator
+    try:
+        for name, client in runtime.llm_clients.items():
+            await client.complete_text(LLMInvocation(name, "model", {"temperature": 0.2}), messages)
+    finally:
+        await runtime.aclose()
+
+    assert len(requests) == 2
+    for request in requests:
+        sent_bytes = len(request.content)
+        assert sent_bytes <= cap
+        payload = json.loads(request.content)
+        assert set(payload) == {"model", "messages", "temperature"}
+        system, user = payload["messages"]
+        assert system == messages[0]
+        assert set(user) == {"role", "content"} and user["role"] == "user"
+        assert user["content"].startswith(instruction + "HEAD")
+        assert user["content"].endswith("TAIL")
+        assert "[... truncated ...]" in user["content"]
+        assert "OMITTED" not in user["content"]
+
+
+async def test_runtime_search_and_fetch_share_one_rate_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    monkeypatch.setattr(
+        "agent_search_gateway.runtime.RateGate",
+        partial(RateGate, monotonic=clock.monotonic, sleep=clock.sleep),
+    )
+    raw = _config()
+    web = raw["web_providers"]
+    assert isinstance(web, dict)
+    web["tavily"]["rate_limits"] = [{"requests": 1, "period_seconds": 1}]
+    target = normalize_url("https://example.test/paper")
+    sends: list[tuple[str, float]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        sends.append((path, clock.now))
+        if path == "/extract":
+            return httpx.Response(
+                200, json={"results": [{"url": str(target), "raw_content": "ok"}]}
+            )
+        return httpx.Response(200, json={"results": [], "web": {"results": []}})
+
+    registry = build_default_registry()
+    runtime = Runtime.build(
+        resolve_config(raw, registry, _environment()),
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    try:
+        tavily, brave, _ = runtime.web_search_providers
+        assert await tavily.search("query") == []
+        fetch = asyncio.create_task(runtime.web_fetch_providers[0].fetch(target))
+        try:
+            await asyncio.sleep(0)
+            assert await brave.search("query") == []
+            assert sends == [("/search", 0), ("/res/v1/web/search", 0)]
+            await clock.advance_to(1)
+            assert (await asyncio.wait_for(fetch, 1)).raw_content == "ok"
+            assert sends[-1] == ("/extract", 1)
+        finally:
+            fetch.cancel()
+            await asyncio.gather(fetch, return_exceptions=True)
+    finally:
+        await runtime.aclose()
+
+
+async def test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent(tmp_path: Path) -> None:
+    raw = _config()
+    web = raw["web_providers"]
+    llm = raw["llm_providers"]
+    assert isinstance(web, dict) and isinstance(llm, dict)
+    web["tavily"]["min_interval_seconds"] = 3600
+    llm["tavily"] = llm.pop("primary")
+    raw["global_default_llm"] = {"provider": "tavily", "model": "global"}
+    command = write_fake_cli(
+        tmp_path,
+        f'print(json.dumps({{"status": "SUCCESS", "response": {web_markdown()!r}}}))',
+    )
+    raw["agent_providers"] = {"tavily": {"harness": "antigravity", "command": str(command)}}
+    raw["search_agent"] = {"providers": [{"provider": "tavily"}]}
+    registry = build_default_registry()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/search":
+            return httpx.Response(200, json={"results": []})
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    runtime = Runtime.build(
+        resolve_config(raw, registry, _environment()),
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    try:
+        await runtime.web_search_providers[0].search("query")
+        async with asyncio.timeout(3):
+            assert (
+                await runtime.llm_clients["tavily"].complete_text(LLMInvocation("tavily", "m"), [])
+                == "ok"
+            )
+            result = await runtime.search_orchestrator.agent_search(
+                "q", request_id="11111111", provider="tavily"
+            )
+            assert Path(result).is_file()
+        gate = runtime.quotas.get_rate("web", "tavily")
+        assert gate is not None and gate.next_available_in_seconds() > 0
+    finally:
+        await runtime.aclose()
 
 
 async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_closes_clients(
@@ -514,7 +681,7 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
         "default_max_concurrency": 2,
         "arxiv": {"enabled": True},
         "semantic_scholar": {"enabled": True},
-        "openalex": {"enabled": True},
+        "openalex": {"enabled": True, "api_key_env": "ENV_A"},
         "dblp": {"enabled": True},
         "crossref": {"enabled": True},
         "core": {
@@ -569,6 +736,15 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
     assert runtime.paper_search_orchestrator.providers == runtime.academic_search_providers
     assert runtime.paper_search_orchestrator.resolver is runtime.oa_resolver
     assert runtime.paper_search_orchestrator.store is runtime.store
+    for provider, executor in zip(
+        runtime.academic_search_providers, runtime._academic_http_executors[:-1], strict=True
+    ):
+        gate = runtime.quotas.get_rate("academic", provider.name)
+        assert gate is not None
+        assert executor._rate_gate is gate
+    resolver_gate = runtime.quotas.get_rate("oa", "unpaywall")
+    assert resolver_gate is not None
+    assert runtime._academic_http_executors[-1]._rate_gate is resolver_gate
     assert runtime.quotas.get_academic("arxiv").limit == 2
     assert runtime.quotas.get_academic("core").limit == 4
     assert "[REDACTED_SECRET]" not in repr(runtime)

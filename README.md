@@ -56,6 +56,16 @@ Runtime files are stored under:
 
 The results directory is created by the daemon as needed. The debug log is created only by `agent-search-gateway start --debug`; ordinary `start` does not create or append it.
 
+### Provider rate limits and input sizes
+
+For each Web provider, academic provider or OA resolver, set `rate_limits` to an array of `{ requests = N, period_seconds = T }` windows. All configured windows and any `min_interval_seconds` between starts must permit the attempt. Search, Fetch and their retries share the same provider's allowance within the daemon. `max_concurrency` independently limits in-flight work. Omitted windows and spacing impose no local frequency policy.
+
+Local rate waiting is bounded by `[retry].request_timeout_seconds` per attempt. Fetch can use another provider with both rate and concurrency available. If a candidate exhausts its rate-wait budget, Fetch can fall back to the remaining candidates. Waiting solely for concurrency, running another candidate, and server-directed `Retry-After` sleeps are outside that local budget.
+
+The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 31 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
+
+Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the complete serialized LLM JSON body, and `agent_prompt_bytes` defaults to **98304** for the single serialized Agent prompt argument. Both measure UTF-8 bytes. Token counts depend on the model. For oversized input the gateway keeps approximately 80% of the retained variable text from its head and 20% from its tail, with an omission marker. It preserves the system instructions, template and protected user focus. If the protected content and required framing cannot fit, preparation fails with `input_budget_unfit` before any send or spawn.
+
 ### Web provider capabilities
 
 | Provider | Keyword search | URL fetch |
@@ -412,7 +422,7 @@ Agent used tools or accessed the cited sources.
 The gateway requests JSON output and uses stdin from `DEVNULL`. It does not add
 automatic approval flags or manage Harness tools, MCP servers, or permissions.
 The serialized prompt is passed as the `-p` argument and may be visible to local
-process inspection. OS limits apply to individual arguments and the combined
+process inspection. The configured byte cap applies first. If the fitted prompt exceeds a known Linux single-argument limit or contains a NUL byte, preflight fails with `input_budget_unfit`. OS limits also apply to individual arguments and the combined
 arguments/environment; an `E2BIG` rejection is reported with the safe diagnostic
 `argument_limit`, not `spawn_failure`. The protocol's 1 MiB request-frame ceiling
 does not guarantee that an external Harness can accept an equally large prompt.
@@ -424,9 +434,10 @@ The child environment keeps `PATH`, `HOME`, standard XDG config/cache/data/state
 paths, temporary-directory variables, and locale variables, plus explicitly named
 `pass_env` entries that exist in the daemon environment. It does not copy arbitrary
 gateway credentials. Use `pass_env` only for variables your Harness needs; configuration
-contains names, not secret values. Debug events record alias, configured model
-(`null` when omitted), stage, timing, counts, and fixed failure classifications;
-they do not record prompts, responses, raw stderr, or environment values.
+contains names, not secret values. DEBUG events record alias, configured model
+(`null` when omitted), stage, timing, counts and failure classifications. A spawn
+attempt can also record bounded previews of the prepared prompt and captured stdout.
+See [DEBUG tracing](#debug-tracing) for the content and redaction rules.
 
 ## Academic paper search
 
@@ -455,6 +466,7 @@ api_url = "https://api.semanticscholar.org/graph/v1"
 
 [academic_providers.openalex]
 enabled = true
+api_key_env = "OPENALEX_API_KEY"
 api_url = "https://api.openalex.org"
 
 [academic_providers.dblp]
@@ -476,6 +488,8 @@ api_url = "https://api.unpaywall.org/v2"
 ```
 
 arXiv and dblp require no credentials. Semantic Scholar may set `api_key_env`; omitting it selects unauthenticated mode and there is no authentication fallback after a configured credential is rejected. CORE requires `api_key_env`, and the named environment variable must exist. OpenAlex and Crossref may set `contact_email_env`. Unpaywall is disabled by default; enabling it requires `contact_email_env`, and the named environment variable must exist. Configuration values reference environment-variable names rather than embedding API keys or contact values in TOML.
+
+**OpenAlex migration.** Enabled OpenAlex now requires an API key. In your existing table add the environment-variable name shown above, then supply that variable from your credential store to the daemon and restart it. Alternatively, set `enabled = false` to skip OpenAlex. An optional contact email cannot satisfy the key requirement. The gateway sends the key as a Bearer credential and never falls back to anonymous access. For an offline configuration check, a dummy value such as `OPENALEX_API_KEY=example-for-doctor-only` can satisfy the presence check. Live calls require a valid key. This is a gateway requirement even though OpenAlex still permits some basic anonymous queries.
 
 `paper-search` writes `paper-<request-id>.jsonl`. Each row uses the paper schema directly and has no `type` discriminator. Fields are `title`, `authors`, `abstract`, `identifiers`, `published_date`, `updated_date`, `url`, `pdf_url`, `venue`, `topics`, `citation_counts`, `is_open_access`, `oa_status`, `license`, and `sources`. `identifiers` contains `doi`, `arxiv_id`, `semantic_scholar_id`, `openalex_id`, `dblp_key`, and `core_id`.
 
@@ -535,7 +549,11 @@ Candidate summaries keep adapter parsing (`phase=adapter`) separate from keyword
 
 Events retain request ID, provider, stage, model, timing, scheduler/quota decisions, and safe URL components. Target URL path/query/fragment values are filtered before logging: paths may remain, while query and fragment are omitted. URI userinfo is stripped from logged URLs; HTTP transport endpoint fields follow the same rule. Upstream error text is redacted before sanitizing and truncating: code/status/type fields are capped at 128 characters and messages at 512. Message length and truncation metadata can explain omitted detail.
 
-The implementation does not intentionally log full response payloads, query/prompt/page/model-response bodies, Agent stdout/stderr content, or authentication values. Central secret redaction is also applied to final rendered messages and debug tracebacks as defense in depth. DEBUG mode is diagnostic rather than a raw payload/TRACE mode. Treat debug files as sensitive local artifacts and review them before sharing; URL paths and operational metadata can still be private. Normal business-command stdout/stderr contracts are unchanged.
+Ordinary mode emits no body previews. In DEBUG mode each actual HTTP send (including each retry) and each Agent spawn attempt produces one `upstream_body_preview` with request and response sides. The response side shows the HTTP body or captured Agent stdout. A missing response has a null preview. A preparation failure or rate wait that prevents the call produces no preview event.
+
+For each side, both the redacted preview text and its final JSON-escaped field value fit within 8192 UTF-8 bytes, including any omission marker. The complete event contains both fields and metadata. `request_input_truncated` means the outbound input was shortened to fit its configured cap. `request_preview_truncated` and `response_preview_truncated` describe incomplete log views. The event excludes headers, stderr content, environment values, full argument lists, authentication values and the discarded input middle. `time` is UTC wall-clock time with milliseconds and a trailing `Z`. `elapsed_ms` measures duration.
+
+Treat DEBUG logs as sensitive local artifacts. A preview can contain private text even after redaction. Review it before sharing. The CLI keeps its final-output-only stdout and existing result and error schemas.
 
 Transport retry (`http_retrying`) and terminal failure (`http_failed`) events include a `transport_type` field such as `ReadTimeout`, `ConnectTimeout`, or `ConnectError`. Only the concrete exception class name is recorded, not its message. HTTP status and JSON decode failures do not carry this field.
 

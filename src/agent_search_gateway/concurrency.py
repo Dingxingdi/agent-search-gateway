@@ -5,12 +5,14 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from .observability import log_event
+from .rate_limit import RateGate
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable)
+RateNamespace = Literal["web", "academic", "oa"]
 
 
 class CapacityLease:
@@ -133,6 +135,7 @@ class ProviderQuotaManager:
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
+        self._rates: dict[tuple[RateNamespace, str], RateGate] = {}
         event_logger = logger or logging.getLogger(__name__)
         self._web = {
             name: CapacityGate(
@@ -175,6 +178,12 @@ class ProviderQuotaManager:
             )
             for name, limit in (agent_limits or {}).items()
         }
+
+    def register_rate(self, namespace: RateNamespace, name: str, gate: RateGate) -> None:
+        self._rates[namespace, name] = gate
+
+    def get_rate(self, namespace: RateNamespace, name: str) -> RateGate | None:
+        return self._rates.get((namespace, name))
 
     def get_agent(self, name: str) -> CapacityGate:
         return self._agent[name]

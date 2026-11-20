@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import suppress
 from datetime import UTC
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -15,14 +16,29 @@ from typing import Any
 import httpx
 
 from ..errors import ErrorCode, ExecutionFailure, ProtocolFailure
+from ..input_limits import PreparedInput, PreviewProjector
 from ..models import RetryPolicy
-from ..observability import elapsed_ms, http_endpoint_for_log, log_event
+from ..observability import (
+    elapsed_ms,
+    http_endpoint_for_log,
+    log_event,
+    log_upstream_body_preview,
+    make_input_preview_projector,
+)
+from ..rate_limit import RateGate, RateLimitWaitTimeout, consume_initial_rate_budget
 from ..retry import retry_async
 from .diagnostics import (
     best_effort_diagnostics,
     diagnostic_fields_from_failure,
     safe_diagnostic_fields,
 )
+
+
+def seconds_to_ms(seconds: float) -> int:
+    """Convert finite durations to milliseconds, including very large rate windows."""
+    if seconds >= sys.float_info.max / 1000:
+        return int(seconds) * 1000
+    return max(0, int(seconds * 1000))
 
 
 def is_retryable_http_status(status_code: int) -> bool:
@@ -129,16 +145,22 @@ class HttpJsonExecutor:
         retry_policy: RetryPolicy,
         *,
         provider_name: str,
+        rate_gate: RateGate | None = None,
         logger: logging.Logger | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
+        self._rate_gate = rate_gate
         self._retry_policy = retry_policy
         self._provider_name = provider_name
         self._logger = logger or logging.getLogger(__name__)
         self._sleep = sleep
         self._monotonic = monotonic
+
+    def input_preview_projector(self) -> PreviewProjector | None:
+        """Prepare input previews with the same redactor that will log the transport."""
+        return make_input_preview_projector(self._logger)
 
     async def request_json(
         self,
@@ -149,6 +171,8 @@ class HttpJsonExecutor:
         headers: RequestHeaders | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        prepared_body: PreparedInput | None = None,
+        protocol_attempt: int | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> object:
@@ -159,6 +183,8 @@ class HttpJsonExecutor:
             headers=headers,
             params=params,
             json_body=json_body,
+            prepared_body=prepared_body,
+            protocol_attempt=protocol_attempt,
             response_inspector=response_inspector,
             response_diagnostics=response_diagnostics,
         )
@@ -171,6 +197,7 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "decode",
+                protocol_attempt=protocol_attempt,
                 diagnostics=diagnostics,
             )
             raise ProtocolFailure(
@@ -188,6 +215,8 @@ class HttpJsonExecutor:
         headers: Mapping[str, str] | None = None,
         params: Mapping[str, Any] | None = None,
         json_body: object | None = None,
+        prepared_body: PreparedInput | None = None,
+        protocol_attempt: int | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> str:
         def text_diagnostics(response: httpx.Response) -> Mapping[str, object]:
@@ -212,6 +241,8 @@ class HttpJsonExecutor:
             headers=headers,
             params=params,
             json_body=json_body,
+            prepared_body=prepared_body,
+            protocol_attempt=protocol_attempt,
             response_diagnostics=text_diagnostics,
         )
         return response.text
@@ -225,34 +256,27 @@ class HttpJsonExecutor:
         headers: RequestHeaders | None,
         params: Mapping[str, Any] | None,
         json_body: object | None,
+        prepared_body: PreparedInput | None = None,
+        protocol_attempt: int | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
     ) -> tuple[httpx.Response, int, float, dict[str, object]]:
+        if json_body is not None and prepared_body is not None:
+            raise ValueError("json_body and prepared_body are mutually exclusive")
         attempt = 0
         attempt_started = self._monotonic()
         log_endpoint = http_endpoint_for_log(url)
+        protocol_fields = (
+            {"protocol_attempt": protocol_attempt} if protocol_attempt is not None else {}
+        )
         response_fields: dict[str, object] = {}
 
         def before_attempt(current_attempt: int) -> None:
-            nonlocal attempt, attempt_started
+            nonlocal attempt
             attempt = current_attempt
-            attempt_started = self._monotonic()
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "http_attempt_started",
-                provider=self._provider_name,
-                stage=stage,
-                endpoint=log_endpoint,
-                attempt=attempt,
-            )
 
         def on_retry(current_attempt: int, exc: BaseException, delay: float) -> None:
-            # At this magnitude floats have no fractional seconds; scale as an integer.
-            delay_ms = max(
-                0,
-                int(delay) * 1000 if delay >= sys.float_info.max / 1000 else int(delay * 1000),
-            )
+            delay_ms = seconds_to_ms(delay)
             attempt_elapsed_ms = elapsed_ms(self._monotonic, attempt_started)
             if isinstance(exc, ProviderResponseFailure):
                 details = dict(response_fields)
@@ -266,6 +290,7 @@ class HttpJsonExecutor:
                     stage=stage,
                     endpoint=log_endpoint,
                     attempt=current_attempt,
+                    **protocol_fields,
                     delay_ms=delay_ms,
                     delay_source="backoff",
                     elapsed_ms=attempt_elapsed_ms,
@@ -286,6 +311,7 @@ class HttpJsonExecutor:
                     stage=stage,
                     endpoint=log_endpoint,
                     attempt=current_attempt,
+                    **protocol_fields,
                     delay_ms=delay_ms,
                     delay_source=(
                         "retry_after" if exc.retry_after_seconds is not None else "backoff"
@@ -304,23 +330,77 @@ class HttpJsonExecutor:
                 stage=stage,
                 endpoint=log_endpoint,
                 attempt=current_attempt,
+                **protocol_fields,
                 delay_ms=delay_ms,
                 delay_source="backoff",
                 elapsed_ms=attempt_elapsed_ms,
                 category="transport",
                 transport_type=type(exc).__name__,
+                exc_info=False,
             )
 
         async def operation() -> httpx.Response:
-            nonlocal response_fields
-            response = await self._client.request(
+            nonlocal attempt_started, response_fields
+            request = self._client.build_request(
                 method,
                 url,
-                headers=headers() if callable(headers) else headers,
+                headers=None if callable(headers) else headers,
                 params=params,
                 json=json_body,
+                content=prepared_body.content if prepared_body is not None else None,
                 timeout=self._retry_policy.request_timeout_seconds,
             )
+
+            def start_attempt() -> None:
+                nonlocal attempt_started
+                if callable(headers):
+                    request.headers.update(headers())
+                if prepared_body is not None:
+                    request.headers["Content-Type"] = "application/json"
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "http_attempt_started",
+                    provider=self._provider_name,
+                    stage=stage,
+                    endpoint=log_endpoint,
+                    attempt=attempt,
+                    exc_info=False,
+                    **protocol_fields,
+                )
+                attempt_started = self._monotonic()
+
+            if self._rate_gate is None:
+                start_attempt()
+            else:
+                await self._wait_for_rate(self._rate_gate, stage, attempt, start_attempt)
+            response = None
+            try:
+                response = await self._client.send(request, follow_redirects=False)
+            finally:
+                transport_finished = self._monotonic()
+                attempt_elapsed_ms = elapsed_ms(lambda: transport_finished, attempt_started)
+                if self._logger.isEnabledFor(logging.DEBUG):
+                    with suppress(Exception):
+                        log_upstream_body_preview(
+                            self._logger,
+                            provider=self._provider_name,
+                            stage=stage,
+                            endpoint=log_endpoint,
+                            attempt=attempt,
+                            transport="http",
+                            protocol_attempt=protocol_attempt,
+                            request_body=lambda: request.content,
+                            prepared_body=prepared_body,
+                            request_body_sent_bytes=len(request.content),
+                            response_body=lambda: response.content if response is not None else b"",
+                            response_body_bytes=len(response.content)
+                            if response is not None
+                            else 0,
+                        )
+                    # Exclude preview work from later failure/retry/decode timings,
+                    # while retaining the existing response-processing duration.
+                    attempt_started += self._monotonic() - transport_finished
             response_fields = safe_diagnostic_fields(
                 {
                     "status": response.status_code,
@@ -331,11 +411,12 @@ class HttpJsonExecutor:
             )
             context: dict[str, object] = {
                 **response_fields,
+                **protocol_fields,
                 "provider": self._provider_name,
                 "stage": stage,
                 "endpoint": log_endpoint,
                 "attempt": attempt,
-                "elapsed_ms": elapsed_ms(self._monotonic, attempt_started),
+                "elapsed_ms": attempt_elapsed_ms,
             }
             log_event(
                 self._logger, logging.DEBUG, "http_attempt_completed", exc_info=False, **context
@@ -411,6 +492,7 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "provider_header",
+                protocol_attempt=protocol_attempt,
                 provider_failure=terminal,
             )
             raise terminal from exc
@@ -421,6 +503,7 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "status",
+                protocol_attempt=protocol_attempt,
                 diagnostics=exc.diagnostics,
             )
             raise self._status_failure(stage, exc.status_code, exc.diagnostics) from exc
@@ -431,6 +514,7 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "transport",
+                protocol_attempt=protocol_attempt,
                 transport_type=type(exc).__name__,
             )
             raise self._execution_failure(stage, "HTTP transport failure") from exc
@@ -442,10 +526,63 @@ class HttpJsonExecutor:
                 attempt,
                 attempt_started,
                 "status",
+                protocol_attempt=protocol_attempt,
                 diagnostics=response_fields,
             )
             raise self._status_failure(stage, response.status_code, response_fields)
         return response, attempt, attempt_started, response_fields
+
+    async def _wait_for_rate(
+        self, gate: RateGate, stage: str, attempt: int, start_attempt: Callable[[], None]
+    ) -> None:
+        context = {"provider": self._provider_name, "stage": stage, "attempt": attempt}
+        initial = consume_initial_rate_budget(gate)
+        timeout = (
+            self._retry_policy.request_timeout_seconds
+            if initial is None
+            else initial.remaining_seconds
+        )
+        previous_wait = 0.0 if initial is None else initial.waited_seconds
+        estimate = gate.next_available_in_seconds()
+        if estimate > 0:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "rate_limit_waiting",
+                estimated_wait_ms=seconds_to_ms(estimate),
+                exc_info=False,
+                **context,
+            )
+
+        def before_reserve(waited: float) -> None:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "rate_limit_acquired",
+                waited_ms=seconds_to_ms(previous_wait + waited),
+                exc_info=False,
+                **context,
+            )
+            start_attempt()
+
+        try:
+            await gate.permit(timeout_seconds=timeout, before_reserve=before_reserve)
+        except RateLimitWaitTimeout as exc:
+            reason = "rate_limit_wait_timeout"
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                reason,
+                elapsed_ms=seconds_to_ms(previous_wait + exc.waited_seconds),
+                reason=reason,
+                exc_info=False,
+                **context,
+            )
+            raise ExecutionFailure(
+                ErrorCode.ALL_PROVIDERS_FAILED,
+                f"{self._provider_name}/{stage}: {reason}",
+                reason=reason,
+            ) from exc
 
     def _log_failed(
         self,
@@ -455,6 +592,7 @@ class HttpJsonExecutor:
         started: float,
         category: str,
         *,
+        protocol_attempt: int | None = None,
         transport_type: str | None = None,
         provider_failure: ProviderResponseFailure | None = None,
         diagnostics: Mapping[str, object] | None = None,
@@ -468,6 +606,8 @@ class HttpJsonExecutor:
             details["terminal_reason"] = (
                 "exhausted" if provider_failure.retryable else "non_retryable"
             )
+        if protocol_attempt is not None:
+            details["protocol_attempt"] = protocol_attempt
         if transport_type is not None:
             details["transport_type"] = transport_type
         log_event(

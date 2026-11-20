@@ -8,7 +8,9 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 import httpx
 
 from ...concurrency import CapacityGate
+from ...config import ResolvedInputLimits
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
+from ...input_limits import InputBudgetUnfit, PreparedInput, fit_messages_to_budget
 from ...models import LLMInvocation, RetryPolicy
 from ...observability import SecretValue, log_event
 from ...retry import retry_async
@@ -60,6 +62,7 @@ class OpenAIChatCompletionsClient:
         executor: HttpJsonExecutor,
         quota: CapacityGate,
         retry_policy: RetryPolicy,
+        request_body_bytes: int = ResolvedInputLimits().llm_request_body_bytes,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -69,6 +72,7 @@ class OpenAIChatCompletionsClient:
         self._executor = executor
         self._quota = quota
         self._retry_policy = retry_policy
+        self._request_body_bytes = request_body_bytes
         self._sleep = sleep
         self._logger = logger or logging.getLogger(__name__)
 
@@ -77,10 +81,16 @@ class OpenAIChatCompletionsClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> str:
-        self._validate_invocation(invocation)
+        prepared_body = self._prepare_body(invocation, messages)
+        protocol_attempt = 0
+
+        def before_attempt(attempt: int) -> None:
+            nonlocal protocol_attempt
+            protocol_attempt = attempt
+            self._log_protocol_attempt(invocation, messages, attempt)
 
         async def operation() -> str:
-            payload = await self._request_once(invocation, messages)
+            payload = await self._request_once(prepared_body, protocol_attempt)
             return self._extract_content(payload)
 
         async with self._quota.lease():
@@ -89,11 +99,7 @@ class OpenAIChatCompletionsClient:
                 operation,
                 is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
                 sleep=self._sleep,
-                before_attempt=lambda attempt: self._log_protocol_attempt(
-                    invocation,
-                    messages,
-                    attempt,
-                ),
+                before_attempt=before_attempt,
                 on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
                     invocation,
                     messages,
@@ -110,10 +116,16 @@ class OpenAIChatCompletionsClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> Mapping[str, object]:
-        self._validate_invocation(invocation)
+        prepared_body = self._prepare_body(invocation, messages)
+        protocol_attempt = 0
+
+        def before_attempt(attempt: int) -> None:
+            nonlocal protocol_attempt
+            protocol_attempt = attempt
+            self._log_protocol_attempt(invocation, messages, attempt)
 
         async def operation() -> Mapping[str, object]:
-            payload = await self._request_once(invocation, messages)
+            payload = await self._request_once(prepared_body, protocol_attempt)
             content = self._extract_content(payload)
             try:
                 decoded = json.loads(content)
@@ -143,11 +155,7 @@ class OpenAIChatCompletionsClient:
                 operation,
                 is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
                 sleep=self._sleep,
-                before_attempt=lambda attempt: self._log_protocol_attempt(
-                    invocation,
-                    messages,
-                    attempt,
-                ),
+                before_attempt=before_attempt,
                 on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
                     invocation,
                     messages,
@@ -257,25 +265,56 @@ class OpenAIChatCompletionsClient:
                 f"LLM extra_body cannot override: {', '.join(sorted(collisions))}",
             )
 
-    async def _request_once(
-        self,
-        invocation: LLMInvocation,
-        messages: Sequence[ChatMessage],
-    ) -> object:
-        body: dict[str, object] = {
-            "model": invocation.model,
-            "messages": [dict(message) for message in messages],
-        }
-        body.update(invocation.extra_body)
+    def _prepare_body(
+        self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
+    ) -> PreparedInput:
+        self._validate_invocation(invocation)
+
+        original_bytes: int | None = None
+
+        def encode(candidate: Sequence[ChatMessage]) -> bytes:
+            nonlocal original_bytes
+            body = {
+                "model": invocation.model,
+                "messages": [dict(message) for message in candidate],
+                **invocation.extra_body,
+            }
+            content = httpx.Request("POST", self._endpoint, json=body).content
+            if original_bytes is None:
+                original_bytes = len(content)
+            return content
+
+        try:
+            return fit_messages_to_budget(
+                messages,
+                max_bytes=self._request_body_bytes,
+                encode=encode,
+                preview_projector=self._executor.input_preview_projector(),
+            )
+        except InputBudgetUnfit:
+            sizes = {"limit_bytes": self._request_body_bytes}
+            if original_bytes is not None:
+                sizes["request_body_original_bytes"] = original_bytes
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "input_rejected",
+                exc_info=False,
+                reason="input_budget_unfit",
+                **sizes,
+            )
+        raise ExecutionFailure(
+            ErrorCode.LLM_STAGE_FAILED, "input_budget_unfit", reason="input_budget_unfit"
+        )
+
+    async def _request_once(self, prepared_body: PreparedInput, protocol_attempt: int) -> object:
         return await self._executor.request_json(
             "POST",
             self._endpoint,
             stage="llm",
-            headers={
-                "Authorization": f"Bearer {self._secret.reveal()}",
-                "Content-Type": "application/json",
-            },
-            json_body=body,
+            headers={"Authorization": f"Bearer {self._secret.reveal()}"},
+            prepared_body=prepared_body,
+            protocol_attempt=protocol_attempt,
             response_diagnostics=_response_diagnostics,
         )
 

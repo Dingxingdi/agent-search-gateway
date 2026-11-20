@@ -32,7 +32,7 @@ def test_default_academic_registry_has_exact_order_factories_and_requirements() 
     assert [(item.authentication, item.contact) for item in registrations] == [
         ("none", "none"),
         ("optional", "none"),
-        ("none", "optional"),
+        ("required", "optional"),
         ("none", "none"),
         ("none", "optional"),
         ("required", "none"),

@@ -1,5 +1,6 @@
 """Pure prompt builders for gateway LLM stages."""
 
+from ..input_limits import TruncatableMessage
 from ..providers.contracts import ChatMessage
 
 
@@ -13,7 +14,7 @@ def judge_messages(candidate: str) -> tuple[ChatMessage, ...]:
                 "reason."
             ),
         },
-        {"role": "user", "content": f"Candidate content:\n{candidate}"},
+        TruncatableMessage("Candidate content:\n", candidate),
     )
 
 
@@ -26,7 +27,7 @@ def safety_messages(content: str) -> tuple[ChatMessage, ...]:
                 "Return JSON with boolean field ok and optional short string field reason."
             ),
         },
-        {"role": "user", "content": f"Final content:\n{content}"},
+        TruncatableMessage("Final content:\n", content),
     )
 
 
@@ -38,7 +39,7 @@ def content_clean_messages(raw_content: str) -> tuple[ChatMessage, ...]:
                 "Return only the cleaned, readable main content from the supplied raw page text."
             ),
         },
-        {"role": "user", "content": raw_content},
+        TruncatableMessage("", raw_content),
     )
 
 
@@ -49,10 +50,7 @@ def focus_summary_messages(content: str, focus: str) -> tuple[ChatMessage, ...]:
             "role": "system",
             "content": "Summarize only the supplied page content, emphasizing the requested focus.",
         },
-        {
-            "role": "user",
-            "content": f"Focus: {normalized_focus}\n\nPage content:\n{content}",
-        },
+        TruncatableMessage(f"Focus: {normalized_focus}\n\nPage content:\n", content),
     )
 
 
@@ -67,7 +65,7 @@ def llm_search_messages(prompt: str) -> tuple[ChatMessage, ...]:
                 "Do not use Markdown links or other result formats."
             ),
         },
-        {"role": "user", "content": prompt.strip()},
+        TruncatableMessage("", prompt.strip()),
     )
 
 
@@ -101,5 +99,5 @@ def llm_paper_search_messages(prompt: str) -> tuple[ChatMessage, ...]:
                 "License: "
             ),
         },
-        {"role": "user", "content": prompt.strip()},
+        TruncatableMessage("", prompt.strip()),
     )

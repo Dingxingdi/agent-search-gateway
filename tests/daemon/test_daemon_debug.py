@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,6 +102,13 @@ async def test_debug_daemon_writes_exact_session_markers_and_appends(tmp_path: P
     second = await _run_debug_daemon(paths)
     assert second.count("event=session_started") == 2
     assert second.count("event=session_stopped") == 2
+    assert all(
+        re.match(
+            r"INFO time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z request=- ",
+            line,
+        )
+        for line in second.splitlines()
+    )
 
 
 async def test_normal_daemon_does_not_create_debug_log(tmp_path: Path) -> None:
@@ -297,6 +305,13 @@ async def test_debug_workflow_lifecycle_logs_are_correlated_and_payload_safe(
 
     text = paths.debug_log_file.read_text(encoding="utf-8")
     assert "QUERY_BODY_SENTINEL" not in text
+    assert all(
+        re.match(
+            r"[A-Z]+ time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z request=(?:[0-9a-f]{8}|-) ",
+            line,
+        )
+        for line in text.splitlines()
+    )
     first = [line for line in text.splitlines() if "request=11111111" in line]
     second = [line for line in text.splitlines() if "request=22222222" in line]
     third = [line for line in text.splitlines() if "request=33333333" in line]

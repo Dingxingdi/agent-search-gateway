@@ -29,7 +29,7 @@ from agent_search_gateway.providers.web.serpapi import SerpApiAdapter
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 from agent_search_gateway.providers.web.tinyfish import TinyFishAdapter
 from tests.support.http import RecordingHttpExecutor, RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 class _SearchAdapter(Protocol):
@@ -628,7 +628,7 @@ async def test_serp_adapters_report_only_selected_top_level_error(
     assert rendered.count("event=provider_response_diagnostic") == 1
     assert "semantic_result=error" in rendered
     assert "Vendor quota exhausted" in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
 
 
 @pytest.mark.parametrize(
@@ -705,7 +705,7 @@ async def test_serp_adapters_keep_urls_and_ignore_candidate_error_text(
     rendered = stream.getvalue()
     assert rendered.count("event=provider_response_diagnostic") == 1
     assert "semantic_result=success" in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
     assert "upstream_message" not in rendered
 
 
@@ -729,7 +729,7 @@ async def test_serp_adapters_classify_decode_without_logging_body(
     rendered = stream.getvalue()
     assert rendered.count("event=provider_response_diagnostic") == 1
     assert "category=decode" in rendered
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
 
 
 @pytest.mark.parametrize(
@@ -853,7 +853,7 @@ async def test_json_search_diagnostics_never_log_candidate_or_response_body(
                 await factory(executor).search("query")
     rendered = stream.getvalue()
     assert rendered.count("event=provider_response_diagnostic") == 1
-    assert "PRIVATE_" not in rendered
+    assert "PRIVATE_" not in without_debug_body_previews(rendered)
     assert "upstream_message" not in rendered
     assert "upstream_code" not in rendered
     if mode == "success":

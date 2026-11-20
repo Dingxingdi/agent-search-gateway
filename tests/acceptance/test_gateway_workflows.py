@@ -247,6 +247,255 @@ async def test_real_socket_workflows_match_public_contract_without_network(
         assert not paths.socket_file.exists()
 
 
+@pytest.mark.parametrize("debug", [True, False], ids=["debug", "normal"])
+async def test_debug_gateway_rate_fallback_preserves_admitted_fetch_result(
+    tmp_path: Path, debug: bool
+) -> None:
+    import re
+
+    from agent_search_gateway.config import resolve_config
+    from agent_search_gateway.providers.defaults import build_default_registry
+    from agent_search_gateway.runtime import Runtime
+
+    paths = RuntimePaths.from_home(tmp_path)
+    url = "https://example.test/article"
+    body = "ARTICLE_HEAD" + "H" * 16000 + "DroppedMiddle" + "T" * 16000 + "ARTICLE_TAIL"
+    cap = 1400
+    calls: list[str] = []
+    large_sends: dict[str, int] = {}
+    config = {
+        "web_providers": {
+            "tavily": {
+                "enable_search": True,
+                "enable_fetch": True,
+                "api_key_env": "TEST_KEY",
+                "api_url": "https://tavily.test",
+                "min_interval_seconds": 600,
+            },
+            "firecrawl": {
+                "enable_search": False,
+                "enable_fetch": True,
+                "api_key_env": "TEST_KEY",
+                "api_url": "https://firecrawl.test",
+            },
+        },
+        "llm_providers": {
+            "chat": {
+                "protocol": "openai",
+                "api_endpoint": "chat_completions",
+                "api_url": "https://llm.test",
+                "api_key_env": "TEST_KEY",
+            }
+        },
+        "global_default_llm": {"provider": "chat", "model": "default"},
+        "fetch_llm": {
+            stage: {"model": stage}
+            for stage in ("judge", "safety", "content_clean", "focus_summary")
+        },
+        "retry": {"max_attempts": 1},
+        "input_limits": {"llm_request_body_bytes": cap},
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url.host))
+        if request.url.host == "tavily.test":
+            assert request.url.path == "/search"
+            return httpx.Response(200, json={"results": [{"url": url, "content": "Abstract"}]})
+        if request.url.host == "firecrawl.test":
+            assert request.url.path == "/v2/scrape"
+            return httpx.Response(200, json={"success": True, "data": {"rawHtml": body}})
+        assert request.url.host == "llm.test"
+        payload = json.loads(request.content)
+        stage = payload["model"]
+        if stage in {"judge", "content_clean"}:
+            prompt = payload["messages"][1]["content"]
+            assert all(
+                marker in prompt
+                for marker in ("ARTICLE_HEAD", "[... truncated ...]", "ARTICLE_TAIL")
+            )
+            assert "DroppedMiddle" not in prompt and len(request.content) <= cap
+            large_sends[stage] = len(request.content)
+        reply = {
+            "judge": '{"ok":true}',
+            "safety": '{"ok":true}',
+            "content_clean": "Clean article",
+            "focus_summary": "Focused article",
+        }[stage]
+        return httpx.Response(200, json={"choices": [{"message": {"content": reply}}]})
+
+    log = io.StringIO()
+    session = configure_debug_logging(paths.debug_log_file, stderr=log) if debug else None
+    request_ids = iter(("aaaabbbb", "ccccdddd"))
+    try:
+        registry = build_default_registry()
+        runtime = Runtime.build(
+            resolve_config(config, registry, {"TEST_KEY": "offline-credential"}),
+            paths,
+            http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        daemon = ForegroundDaemon(
+            paths,
+            runtime_factory=lambda: runtime,
+            debug=debug,
+            logging_session=session,
+            request_id_factory=lambda: next(request_ids),
+        )
+        async with _running_daemon(daemon):
+            output = _successful_path(await _filtering_cli(paths, ["keyword-search", "article"]))
+            assert json.loads(output.read_text()) == {"url": url, "abstract": "Abstract"}
+            assert await _filtering_cli(paths, ["url-fetch", url, "subject"]) == (
+                0,
+                "Focused article\n",
+                "",
+            )
+    finally:
+        if session is not None:
+            session.close()
+    assert calls[:2] == ["tavily.test", "firecrawl.test"]
+    assert calls[2:] == ["llm.test"] * 4
+    assert set(large_sends) == {"judge", "content_clean"}
+    if not debug:
+        assert not paths.debug_log_file.exists()
+        return
+
+    for output_text in (log.getvalue(), paths.debug_log_file.read_text()):
+        assert "DroppedMiddle" not in output_text
+        lines = output_text.splitlines()
+        assert all(
+            re.match(r"^[A-Z]+ time=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z ", line)
+            for line in lines
+        )
+        search = [line for line in lines if " request=aaaabbbb " in line]
+        fetch = [line for line in lines if " request=ccccdddd " in line]
+        for workflow in (search, fetch):
+            assert sum(" event=workflow_started" in line for line in workflow) == 1
+            assert sum(" event=workflow_completed" in line for line in workflow) == 1
+        assert sum(" event=upstream_body_preview " in line for line in search) == 1
+        assert any(
+            "provider=tavily " in line and "event=upstream_body_preview " in line for line in search
+        )
+        assert any(
+            "provider=firecrawl " in line and "event=candidate_accepted" in line for line in fetch
+        )
+        assert sum("event=llm_stage_completed " in line for line in fetch) == 4
+        previews = [line for line in fetch if " event=upstream_body_preview " in line]
+        assert len(previews) == len(calls) - 1
+        clipped = [line for line in previews if "request_input_truncated=true" in line]
+        assert len(clipped) == 2
+        for stage, sent in large_sends.items():
+            assert any(
+                stage in line
+                and f"request_body_sent_bytes={sent} " in line
+                and "ARTICLE_HEAD" in line
+                and "ARTICLE_TAIL" in line
+                for line in clipped
+            )
+
+
+@pytest.mark.parametrize("wait", ["rate", "retry"])
+@pytest.mark.parametrize("shutdown", [False, True], ids=["cancel", "shutdown"])
+async def test_fetch_singleflight_cancellation_stops_pending_attempt(
+    tmp_path: Path, wait: str, shutdown: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    from agent_search_gateway.config import ResolvedRatePolicy
+    from agent_search_gateway.rate_limit import RateGate
+
+    sleeping, cancelled = asyncio.Event(), asyncio.Event()
+    sends = 0
+
+    async def blocked(delay: float) -> None:
+        assert delay > 0
+        sleeping.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def no_delay(delay: float) -> None:
+        await asyncio.sleep(0)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal sends
+        sends += 1
+        return httpx.Response(503)
+
+    async def expire(tasks: tuple[asyncio.Task[object], ...], timeout: float) -> None:
+        if tasks:
+            assert len(tasks) == 2
+            raise TimeoutError
+
+    paths = RuntimePaths.from_home(tmp_path)
+    runtime = build_acceptance_runtime(paths)
+    quotas = ProviderQuotaManager(web_limits={"tavily": 1}, llm_limits={})
+    store = URLStore()
+    url = normalize_url("https://example.test/workflow")
+    store.admit(url, "Abstract")
+    gate = (
+        RateGate(ResolvedRatePolicy(min_interval_seconds=60), sleep=blocked)
+        if wait == "rate"
+        else None
+    )
+    if gate is not None:
+        quotas.register_rate("web", "tavily", gate)
+    invocation = LLMInvocation("llm", "model")
+    stages = LLMStages(
+        {"llm": FakeLLMClient("llm")},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.fetch")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client,
+            RetryPolicy(2, 1, 1, 30),
+            provider_name="tavily",
+            rate_gate=gate,
+            sleep=blocked if wait == "retry" else no_delay,
+        )
+        adapter = TavilyAdapter(
+            name="tavily",
+            api_url="https://tavily.test",
+            secret=SecretValue("offline"),
+            http_executor=executor,
+        )
+        runtime.fetch_orchestrator = FetchOrchestrator(
+            store=store, stages=stages, scheduler=FetchScheduler([adapter], quotas, stages)
+        )
+        daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime, shutdown_waiter=expire)
+        async with _running_daemon(daemon):
+            async with asyncio.timeout(2):
+                request = URLFetchRequest(str(url), None)
+                leader = asyncio.create_task(daemon._dispatch(request))
+                follower = asyncio.create_task(daemon._dispatch(request))
+                try:
+                    await sleeping.wait()
+                    while not any(
+                        getattr(r, "gateway_event", None) == "singleflight_joined"
+                        for r in caplog.records
+                    ):
+                        await asyncio.sleep(0)
+                    if shutdown:
+                        assert await send_request(
+                            paths.socket_file, ShutdownRequest()
+                        ) == SuccessResponse("Daemon stopped.")
+                    else:
+                        leader.cancel()
+                    for task in (leader, follower):
+                        with pytest.raises(asyncio.CancelledError):
+                            await task
+                finally:
+                    leader.cancel()
+                    follower.cancel()
+                    await asyncio.gather(leader, follower, return_exceptions=True)
+    assert sends == 1 and cancelled.is_set()
+    assert quotas.get_web("tavily").in_use == 0 and runtime.close_calls == 1
+    snapshot = store.get(url)
+    assert snapshot is not None and snapshot.available and snapshot.raw_content == ""
+
+
 async def test_cli_waits_for_example_http_retry_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

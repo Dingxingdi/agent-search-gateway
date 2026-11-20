@@ -3,16 +3,27 @@
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 
-from ..concurrency import CapacityLease, ProviderQuotaManager
+from ..concurrency import CapacityGate, CapacityLease, ProviderQuotaManager
 from ..errors import ErrorCode, ExecutionFailure
 from ..llm.stages import LLMStages, cheap_check
 from ..models import FetchOutcome
 from ..observability import elapsed_ms, log_event, target_url_for_log
 from ..providers.contracts import URLFetchCandidate, URLFetchProvider
 from ..providers.diagnostics import diagnostic_fields_from_failure, safe_failure_reason
+from ..providers.http import seconds_to_ms
+from ..rate_limit import RateGate, initial_rate_budget
 from ..url_normalization import NormalizedURL
+
+
+@dataclass(eq=False, slots=True)
+class _Candidate:
+    provider: URLFetchProvider
+    rate: RateGate | None
+    remaining_seconds: float
+    waited_seconds: float = 0.0
 
 
 class FetchScheduler:
@@ -24,12 +35,16 @@ class FetchScheduler:
         *,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        request_timeout_seconds: float = 30.0,
     ) -> None:
         self._providers = tuple(providers)
         self._quotas = quotas
         self._stages = stages
         self._logger = logger or logging.getLogger(__name__)
         self._monotonic = monotonic
+        self._sleep = sleep
+        self._request_timeout_seconds = request_timeout_seconds
 
     @property
     def provider_names(self) -> tuple[str, ...]:
@@ -38,10 +53,20 @@ class FetchScheduler:
     async def fetch_until_accepted(self, url: NormalizedURL) -> FetchOutcome:
         semantic_failure_seen = False
         failures: list[ExecutionFailure] = []
-        remaining = list(self._providers)
+        remaining = [
+            _Candidate(
+                provider, self._quotas.get_rate("web", provider.name), self._request_timeout_seconds
+            )
+            for provider in self._providers
+        ]
         while remaining:
-            provider, lease = await self._select_available_provider(remaining)
-            remaining.remove(provider)
+            selected, expired = await self._select_available_provider(remaining)
+            failures.extend(expired)
+            if selected is None:
+                break
+            candidate, lease = selected
+            remaining.remove(candidate)
+            provider = candidate.provider
             log_event(
                 self._logger,
                 logging.DEBUG,
@@ -52,7 +77,7 @@ class FetchScheduler:
             )
             try:
                 async with lease:
-                    outcome = await self._attempt(provider, url)
+                    outcome = await self._attempt(candidate, url)
             except asyncio.CancelledError:
                 raise
             if outcome.kind == "accepted":
@@ -76,29 +101,121 @@ class FetchScheduler:
         return FetchOutcome("execution_failure", failures=tuple(failures))
 
     async def _select_available_provider(
-        self,
-        remaining: list[URLFetchProvider],
-    ) -> tuple[URLFetchProvider, CapacityLease]:
-        while True:
-            for provider in remaining:
-                lease = await self._quotas.get_web(provider.name).try_lease()
+        self, remaining: list[_Candidate]
+    ) -> tuple[tuple[_Candidate, CapacityLease] | None, list[ExecutionFailure]]:
+        failures: list[ExecutionFailure] = []
+        while remaining:
+            blocked: list[tuple[_Candidate, float]] = []
+            full: list[CapacityGate] = []
+            for candidate in remaining:
+                gate = candidate.rate
+                if gate is not None:
+                    observed = self._monotonic()
+                    delay = gate.next_available_in_seconds()
+                    if delay > 0:
+                        blocked.append((candidate, observed + delay))
+                        continue
+                capacity = self._quotas.get_web(candidate.provider.name)
+                lease = await capacity.try_lease()
                 if lease is not None:
-                    return provider, lease
+                    return (candidate, lease), failures
+                full.append(capacity)
+
+            # Cleanup or another provider can spend the permit we saw at the deadline.
+            exhausted = [c for c, _ in blocked if c.remaining_seconds == 0]
+            if exhausted:
+                for candidate in exhausted:
+                    remaining.remove(candidate)
+                    failures.append(self._rate_timeout(candidate))
+                continue
+
             log_event(
                 self._logger,
                 logging.DEBUG,
                 "scheduler_waiting",
                 candidate_count=len(remaining),
             )
-            await self._quotas.wait_until_any_web_available(
-                tuple(provider.name for provider in remaining)
-            )
+            for candidate, ready_at in blocked:
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "rate_limit_waiting",
+                    provider=candidate.provider.name,
+                    stage="fetch",
+                    attempt=1,
+                    estimated_wait_ms=seconds_to_ms(ready_at - self._monotonic()),
+                )
+            waiters: list[asyncio.Task[None]] = []
+            try:
+                for capacity in full:
+                    waiters.append(asyncio.create_task(capacity.wait_until_available()))
+                started = self._monotonic()
+                if blocked:
+                    earliest = min(
+                        min(ready_at, started + c.remaining_seconds) for c, ready_at in blocked
+                    )
+                    waiters.append(asyncio.create_task(self._wake_at(earliest)))
+                done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                woke = self._monotonic()
+                for waiter in done:
+                    waiter.result()
+                for candidate, _ in blocked:
+                    failure = self._charge_rate_wait(candidate, started, woke)
+                    if failure is not None:
+                        remaining.remove(candidate)
+                        failures.append(failure)
+            finally:
+                for waiter in waiters:
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(*waiters, return_exceptions=True)
+        return None, failures
+
+    async def _wake_at(self, deadline: float) -> None:
+        # Creating the timer task and actually starting it can occur on different loop turns.
+        delay = deadline - self._monotonic()
+        if delay > 0:
+            await self._sleep(delay)
+
+    def _charge_rate_wait(
+        self, candidate: _Candidate, started: float, woke: float
+    ) -> ExecutionFailure | None:
+        assert candidate.rate is not None
+        deadline = started + candidate.remaining_seconds
+        elapsed = woke - started
+        candidate.waited_seconds += elapsed
+        candidate.remaining_seconds = (
+            max(0.0, candidate.remaining_seconds - elapsed) if woke < deadline else 0.0
+        )
+        if woke < deadline or (
+            woke == deadline and candidate.rate.next_available_in_seconds() == 0
+        ):
+            return None
+        return self._rate_timeout(candidate)
+
+    def _rate_timeout(self, candidate: _Candidate) -> ExecutionFailure:
+        reason = "rate_limit_wait_timeout"
+        name = candidate.provider.name
+        log_event(
+            self._logger,
+            logging.DEBUG,
+            reason,
+            provider=name,
+            stage="fetch",
+            attempt=1,
+            elapsed_ms=seconds_to_ms(candidate.waited_seconds),
+            reason=reason,
+        )
+        return ExecutionFailure(
+            ErrorCode.ALL_PROVIDERS_FAILED, f"{name}/fetch: {reason}", reason=reason
+        )
 
     async def _attempt(
         self,
-        provider: URLFetchProvider,
+        selected: _Candidate,
         url: NormalizedURL,
     ) -> FetchOutcome:
+        provider = selected.provider
         started = self._monotonic()
         log_event(
             self._logger,
@@ -109,7 +226,12 @@ class FetchScheduler:
             url=target_url_for_log(str(url)),
         )
         try:
-            candidate = await provider.fetch(url)
+            with initial_rate_budget(
+                selected.rate,
+                remaining_seconds=selected.remaining_seconds,
+                waited_seconds=selected.waited_seconds,
+            ):
+                candidate = await provider.fetch(url)
             self._validate_candidate(candidate)
         except asyncio.CancelledError as exc:
             self._log_provider_failed(provider.name, url, started, exc)

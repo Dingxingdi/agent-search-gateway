@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 import httpx
 import pytest
 
+from agent_search_gateway.config import ResolvedRatePolicy
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import DiagnosticText, SecretValue
@@ -16,8 +17,10 @@ from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web import zhihu
 from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
+from agent_search_gateway.rate_limit import RateGate
+from tests.support.controlled import ManualClock
 from tests.support.http import RecordingJsonExecutor
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 _FIXTURES = Path(__file__).parents[2] / "fixtures/providers/zhihu"
 _BRANCHES = ("zhihu_search", "global_search")
@@ -85,6 +88,46 @@ async def test_zhihu_search_combines_both_official_endpoints(
     }
     assert stages == set(_BRANCHES)
     assert not hasattr(adapter, "fetch")
+
+
+async def test_zhihu_rate_gate_spaces_branches_and_refreshes_queued_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    gate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=2), monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    monkeypatch.setattr(
+        "agent_search_gateway.providers.web.zhihu.time.time", lambda: 1_800_000_000 + clock.now
+    )
+    sends: list[tuple[str, float, int]] = []
+    first = asyncio.Event()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        branch = request.url.path.rsplit("/", 1)[-1]
+        sends.append((branch, clock.now, int(request.headers["X-Request-Timestamp"])))
+        first.set()
+        return httpx.Response(200, json=_fixture(branch))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = ZhihuAdapter(
+            name="zhihu",
+            secret=SecretValue("x"),
+            http_executor=HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 5), provider_name="zhihu", rate_gate=gate
+            ),
+        )
+        task = asyncio.create_task(adapter.search("query"))
+        try:
+            await asyncio.wait_for(first.wait(), 1)
+            assert len(sends) == 1
+            await clock.advance_to(2)
+            assert len(await asyncio.wait_for(task, 1)) == 2
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert {branch for branch, _, _ in sends} == set(_BRANCHES)
+    assert [(when, stamp) for _, when, stamp in sends] == [(0, 1_800_000_000), (2, 1_800_000_002)]
 
 
 async def test_zhihu_starts_both_branches_before_either_finishes() -> None:
@@ -929,7 +972,7 @@ async def test_zhihu_success_logs_omit_query_items_and_unaudited_fields(
     assert rendered.count("event=provider_response_diagnostic") == 2
     assert rendered.count("event=provider_candidates_summary") == 2
     assert "received=2" in rendered and "accepted=1" in rendered and "rejected=1" in rendered
-    assert "ZHIHU_" not in rendered
+    assert "ZHIHU_" not in without_debug_body_previews(rendered)
     assert credential.reveal() not in rendered
 
 
@@ -981,10 +1024,10 @@ async def test_zhihu_partial_logs_redact_and_bound_selected_vendor_text(
     assert "upstream_message=<redacted>" in rendered
     assert "upstream_message_truncated=true" in rendered
     assert len(rendered.split("upstream_message=", 1)[1].split()[0]) == 512
-    assert "界" * 512 not in rendered
+    assert "界" * 512 not in without_debug_body_previews(rendered)
     assert credential.reveal() not in rendered
-    assert "ZHIHU_" not in rendered
-    assert "MESSAGE_TAIL_SENTINEL" not in rendered
+    assert "ZHIHU_" not in without_debug_body_previews(rendered)
+    assert "MESSAGE_TAIL_SENTINEL" not in without_debug_body_previews(rendered)
     assert "Traceback" not in rendered
     assert "event=provider_completed" not in rendered
     assert "event=provider_failed" not in rendered
@@ -1033,7 +1076,7 @@ async def test_zhihu_double_failure_logs_keep_safe_diagnostics(
     assert "upstream_code=11" in rendered
     assert 'upstream_message="Synthetic site failure"' in rendered
     assert credential.reveal() not in rendered
-    assert "ZHIHU_" not in rendered
+    assert "ZHIHU_" not in without_debug_body_previews(rendered)
     assert "Traceback" not in rendered
     for event in (
         "provider_partial_failure",

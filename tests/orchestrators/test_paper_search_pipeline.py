@@ -220,17 +220,25 @@ async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
 
     import httpx
 
+    from agent_search_gateway.config import ResolvedRatePolicy
     from agent_search_gateway.models import RetryPolicy
     from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
     from agent_search_gateway.providers.academic.core import CoreProvider
     from agent_search_gateway.providers.academic.crossref import CrossrefProvider
     from agent_search_gateway.providers.academic.openalex import OpenAlexProvider
     from agent_search_gateway.providers.academic.semantic_scholar import SemanticScholarProvider
+    from agent_search_gateway.providers.academic.unpaywall import UnpaywallResolver
     from agent_search_gateway.providers.http import HttpJsonExecutor
+    from agent_search_gateway.rate_limit import RateGate
 
     caplog.set_level(logging.DEBUG)
+    gate = RateGate(ResolvedRatePolicy(min_interval_seconds=60))
+    await gate.permit(timeout_seconds=0)
+    credential = SecretValue("offline-openalex")
+    sent_hosts: list[str] = []
 
     def respond(request: httpx.Request) -> httpx.Response:
+        sent_hosts.append(str(request.url.host))
         if request.url.host == "crossref.test":
             items = [
                 {"DOI": "10.1000/shared", "title": ["PRIVATE_CROSSREF_TITLE"]},
@@ -238,6 +246,8 @@ async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
             ]
             payload: object = {"message": {"items": items}}
         elif request.url.host == "openalex.test":
+            assert request.headers.get("authorization") == f"Bearer {credential.reveal()}"
+            assert credential.reveal() not in str(request.url)
             results = [
                 {
                     "id": "W123",
@@ -260,7 +270,11 @@ async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
 
         providers: list[object] = [
             CrossrefProvider(executor("crossref"), api_url="https://crossref.test"),
-            OpenAlexProvider(executor("openalex"), api_url="https://openalex.test"),
+            OpenAlexProvider(
+                executor("openalex"),
+                api_url="https://openalex.test",
+                api_key=credential,
+            ),
             CoreProvider(
                 executor("core"),
                 api_url="https://core.test",
@@ -268,10 +282,29 @@ async def test_json_adapter_summaries_stay_local_before_paper_aggregation(
             ),
             SemanticScholarProvider(executor("semantic_scholar"), api_url="https://semantic.test"),
         ]
-        orchestrator = _orchestrator(tmp_path, providers)
+        resolver = UnpaywallResolver(
+            HttpJsonExecutor(
+                client, RetryPolicy(1, 0, 0, 0.02), provider_name="unpaywall", rate_gate=gate
+            ),
+            contact_email=SecretValue("offline@example.test"),
+        )
+        orchestrator = _orchestrator(tmp_path, providers, resolver=resolver)
         target = await orchestrator.paper_search("mixed", request_id="77777777")
         rows = [json.loads(line) for line in Path(target).read_text().splitlines()]
         assert len(rows) == 1
+        assert sorted(sent_hosts) == [
+            "core.test",
+            "crossref.test",
+            "openalex.test",
+            "semantic.test",
+        ]
+        assert rows[0]["sources"] == ["openalex", "crossref"]
+        assert rows[0]["abstract"] == "PRIVATE_ABSTRACT"
+        assert rows[0]["url"] == "https://openalex.org/W123"
+        assert any(
+            getattr(r, "gateway_fields", {}).get("reason") == "rate_limit_wait_timeout"
+            for r in caplog.records
+        )
         assert rows[0]["title"] == "PRIVATE_OPENALEX_TITLE"
         assert rows[0]["identifiers"]["doi"] == "10.1000/shared"
         assert "diagnostics" not in rows[0]

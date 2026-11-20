@@ -14,6 +14,7 @@ from .config import (
     ResolvedAcademicProviderConfig,
     ResolvedAgentConfig,
     ResolvedConfig,
+    ResolvedInputLimits,
     ResolvedOAResolverConfig,
     ResolvedWebProviderConfig,
 )
@@ -42,11 +43,13 @@ from .providers.defaults import build_default_registry
 from .providers.http import HttpJsonExecutor
 from .providers.llm.openai_chat import OpenAIChatCompletionsClient
 from .providers.registry import ProviderRegistry
+from .rate_limit import RateGate
 from .result_writer import ResultWriter
 from .scheduler.fetch import FetchScheduler
 from .url_store import URLStore
 
 HttpClientFactory = Callable[[], httpx.AsyncClient]
+_DEFAULT_INPUT_LIMITS = ResolvedInputLimits()
 _RESERVED_WEB_ADAPTER_KWARGS = frozenset({"name", "http_executor", "secret"})
 _RESERVED_ACADEMIC_ADAPTER_KWARGS = frozenset({"name", "executor", "api_key", "contact_email"})
 
@@ -108,23 +111,26 @@ class Runtime:
             academic_limits={item.name: item.max_concurrency for item in enabled_academic},
             agent_limits={item.name: item.max_concurrency for item in config.agent.providers},
         )
-        agent_runners = cls._build_agent_runners(config.agent, quotas)
+        agent_runners = cls._build_agent_runners(config.agent, quotas, config.input_limits)
         web_search, web_fetch, web_executors = cls._build_web_providers(
             enabled_web,
             provider_registry,
             config,
+            quotas,
             http_client_factory,
         )
         academic_search, academic_executors = cls._build_academic_providers(
             enabled_academic,
             academic_provider_registry,
             config,
+            quotas,
             http_client_factory,
         )
         oa_resolver, resolver_executors = cls._build_oa_resolver(
             config.oa_resolver,
             resolver_registry,
             config,
+            quotas,
             http_client_factory,
         )
         llm_clients = cls._build_llm_clients(config, quotas, http_client_factory)
@@ -166,7 +172,12 @@ class Runtime:
         )
         fetch_orchestrator = FetchOrchestrator(
             store=store,
-            scheduler=FetchScheduler(web_fetch, quotas, stages),
+            scheduler=FetchScheduler(
+                web_fetch,
+                quotas,
+                stages,
+                request_timeout_seconds=config.retry.request_timeout_seconds,
+            ),
             stages=stages,
         )
         runtime = cls(
@@ -213,6 +224,7 @@ class Runtime:
         providers: tuple[ResolvedWebProviderConfig, ...],
         registry: ProviderRegistry,
         config: ResolvedConfig,
+        quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
     ) -> tuple[
         tuple[KeywordSearchProvider, ...],
@@ -245,10 +257,13 @@ class Runtime:
                     ErrorCode.CONFIG_ERROR,
                     f"Reserved config key(s) for web provider {provider_config.name}: {names}",
                 )
+            gate = RateGate(provider_config.rate_policy)
+            quotas.register_rate("web", provider_config.name, gate)
             executor = HttpJsonExecutor(
                 http_client_factory(),
                 config.retry,
                 provider_name=provider_config.name,
+                rate_gate=gate,
             )
             kwargs: dict[str, object] = {
                 "name": provider_config.name,
@@ -276,6 +291,7 @@ class Runtime:
         providers: tuple[ResolvedAcademicProviderConfig, ...],
         registry: AcademicProviderRegistry,
         config: ResolvedConfig,
+        quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
     ) -> tuple[tuple[AcademicSearchProvider, ...], tuple[HttpJsonExecutor, ...]]:
         search: list[AcademicSearchProvider] = []
@@ -294,10 +310,13 @@ class Runtime:
                     ErrorCode.CONFIG_ERROR,
                     f"Reserved config key(s) for academic provider {provider_config.name}: {names}",
                 )
+            gate = RateGate(provider_config.rate_policy)
+            quotas.register_rate("academic", provider_config.name, gate)
             executor = HttpJsonExecutor(
                 http_client_factory(),
                 config.retry,
                 provider_name=provider_config.name,
+                rate_gate=gate,
             )
             kwargs: dict[str, object] = {"executor": executor}
             if provider_config.api_key is not None:
@@ -322,6 +341,7 @@ class Runtime:
         resolver_config: ResolvedOAResolverConfig | None,
         registry: OAResolverRegistry,
         config: ResolvedConfig,
+        quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
     ) -> tuple[OAResolver | None, tuple[HttpJsonExecutor, ...]]:
         if resolver_config is None:
@@ -339,10 +359,13 @@ class Runtime:
                 ErrorCode.CONFIG_ERROR,
                 f"Reserved config key(s) for OA resolver {resolver_config.name}: {names}",
             )
+        gate = RateGate(resolver_config.rate_policy)
+        quotas.register_rate("oa", resolver_config.name, gate)
         executor = HttpJsonExecutor(
             http_client_factory(),
             config.retry,
             provider_name=resolver_config.name,
+            rate_gate=gate,
         )
         kwargs: dict[str, object] = {"executor": executor}
         if resolver_config.api_key is not None:
@@ -363,6 +386,7 @@ class Runtime:
     def _build_agent_runners(
         config: ResolvedAgentConfig,
         quotas: ProviderQuotaManager,
+        input_limits: ResolvedInputLimits = _DEFAULT_INPUT_LIMITS,
     ) -> dict[str, AgentTextRunner]:
         runners: dict[str, AgentTextRunner] = {}
         for provider in config.providers:
@@ -378,6 +402,7 @@ class Runtime:
                 timeout_seconds=provider.timeout_seconds,
                 pass_env=provider.pass_env,
                 quota=quotas.get_agent(provider.name),
+                prompt_max_bytes=input_limits.agent_prompt_bytes,
             )
         return runners
 
@@ -401,6 +426,7 @@ class Runtime:
                 secret=private_value,
                 executor=executor,
                 quota=quotas.get_llm(provider_config.name),
+                request_body_bytes=config.input_limits.llm_request_body_bytes,
                 retry_policy=config.retry,
             )
         return clients

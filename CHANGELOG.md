@@ -8,6 +8,16 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- Configure provider-wide rolling request windows and minimum spacing for Web, academic and OA requests. Fetch can select another ready provider when local rate waiting would block. The [rate reference](docs/provider-rate-limits.md) documents account conditions and examples for all 31 services.
+- Bound serialized LLM requests and Agent prompt arguments in UTF-8 bytes through `[input_limits]`. Oversized variable input retains its head and tail while protecting instructions and user focus.
+
+### Changed
+
+- **Breaking configuration change for enabled OpenAlex.** Add `api_key_env` to the existing table, set it to the name of a daemon environment variable such as `OPENALEX_API_KEY`, supply the credential, and restart. To skip OpenAlex, disable it. The gateway sends Bearer credentials with no anonymous fallback. Contact email remains optional.
+- Log records include UTC timestamps with milliseconds. Opt-in DEBUG tracing adds one bounded, redacted request/response preview per HTTP send or Agent spawn attempt, including retries and failed calls. Previews can contain private text. Ordinary runs emit no body previews.
+
 ## [0.4.0] - 2026-11-17
 
 ### Added

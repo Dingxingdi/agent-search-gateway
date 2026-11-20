@@ -6,12 +6,20 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, TextIO
 from urllib.parse import urlsplit, urlunsplit
 
+from . import body_preview
 from .errors import ConfigFailure, ErrorCode
+from .input_limits import (
+    MAX_PREVIEW_SCAN_BYTES,
+    PreparedInput,
+    PreviewProjector,
+    PreviewScanBudgetExceeded,
+)
 from .request_ids import current_request_id
 
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -132,6 +140,18 @@ class SecretRedactor:
             if escaped:
                 self._secrets.add(escaped)
         self._ordered_secrets = tuple(sorted(self._secrets, key=len, reverse=True))
+
+    def sensitive_spans(self, text: str) -> list[tuple[int, int]]:
+        """Original ranges for each registered value with overlapping occurrences combined."""
+        spans = []
+        for value in self._ordered_secrets:
+            start = text.find(value)
+            while start >= 0:
+                left, right = start, start + len(value)
+                while (start := text.find(value, start + 1)) >= 0 and start < right:
+                    right = start + len(value)
+                spans.append((left, right))
+        return spans
 
     def redact(self, rendered: str) -> str:
         for secret in self._ordered_secrets:
@@ -263,6 +283,9 @@ class KeyValueFormatter(logging.Formatter):
         super().__init__()
         self._redactor = redactor
 
+    def redact_for_preview(self, text: str) -> str:
+        return self._redactor.redact(text)
+
     def format(self, record: logging.LogRecord) -> str:
         event = getattr(record, "gateway_event", None)
         raw_fields = getattr(record, "gateway_fields", None)
@@ -291,8 +314,13 @@ class KeyValueFormatter(logging.Formatter):
                     values["upstream_message_truncated"] = len(safe) > max_chars
         values["event"] = event
         request_id = current_request_id() or "-"
-        parts = [record.levelname, f"request={request_id}"]
-        emitted: set[str] = set()
+        timestamp = datetime.fromtimestamp(record.created, UTC).isoformat(timespec="milliseconds")
+        parts = [
+            record.levelname,
+            f"time={timestamp.replace('+00:00', 'Z')}",
+            f"request={request_id}",
+        ]
+        emitted: set[str] = {"time"}
         for name in _PREFERRED_FIELD_ORDER:
             if name not in values:
                 continue
@@ -339,6 +367,163 @@ def log_event(
         )
     except Exception:
         # Logging and diagnostic preparation must not change the business result.
+        pass
+
+
+_BodySource = bytes | Callable[[], bytes | None] | None
+_UNSAFE_PREVIEW_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_PREVIEW_LINE_BREAKS = str.maketrans({"\u0085": "\n", "\u2028": "\n", "\u2029": "\n"})
+
+
+def _preview_formatters(logger: logging.Logger) -> tuple[KeyValueFormatter, ...]:
+    receiving: dict[SecretRedactor, KeyValueFormatter] = {}
+    current: logging.Logger | None = logger
+    while current is not None:
+        for handler in current.handlers:
+            if handler.level > logging.DEBUG:
+                continue
+            while isinstance(handler, _SafeDelegatingHandler):
+                handler = handler._delegate
+            formatter = handler.formatter
+            if isinstance(formatter, KeyValueFormatter):
+                receiving.setdefault(formatter._redactor, formatter)
+        current = current.parent if current.propagate else None
+    return tuple(receiving.values())
+
+
+def _active_scrubber(logger: logging.Logger) -> body_preview.BodyScrubber | None:
+    formatters = _preview_formatters(logger)
+    if not formatters:
+        return None
+
+    def redact(value: str) -> str:
+        for formatter in formatters:
+            value = formatter.redact_for_preview(value)
+        return value
+
+    def spans(value: str) -> Iterable[tuple[int, int]]:
+        for formatter in formatters:
+            yield from formatter._redactor.sensitive_spans(value)
+
+    return body_preview.BodyScrubber(redact, spans, http_endpoint_for_log)
+
+
+def make_input_preview_projector(logger: logging.Logger) -> PreviewProjector | None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return None
+    try:
+        scrubber = _active_scrubber(logger)
+        return scrubber.project if scrubber else None
+    except Exception:
+        return None
+
+
+def _preview_side(
+    source: _BodySource,
+    size: int | None,
+    scrubber: body_preview.BodyScrubber | None,
+    *,
+    incomplete: bool = False,
+) -> tuple[str | None, int, bool]:
+    count = size if size is not None else len(source) if isinstance(source, bytes) else 0
+    if count > MAX_PREVIEW_SCAN_BYTES:
+        return None, count, True
+    try:
+        if scrubber is not None:
+            raw = source() if callable(source) else source
+            if raw:
+                if size is None:
+                    count = len(raw)
+                if len(raw) > MAX_PREVIEW_SCAN_BYTES:
+                    return None, count, True
+                text = raw.decode("utf-8")
+                if _UNSAFE_PREVIEW_CONTROL.search(text):
+                    return None, count, incomplete
+                if incomplete:
+                    json.loads(text)
+                safe = scrubber.scrub(text).translate(_PREVIEW_LINE_BREAKS)
+                # Scrubbing an escaped JSON string can materialize a previously encoded control.
+                if _UNSAFE_PREVIEW_CONTROL.search(safe):
+                    return None, count, incomplete
+                value, clipped = body_preview.limit_preview(safe, _render_string)
+                # A short registered value can match inside our own replacement or a
+                # JSON escape. Keep the bounded field stable for every receiving formatter.
+                if next(iter(scrubber.registered_spans(_render_string(value))), None) is not None:
+                    return None, count, clipped or incomplete
+                return value, count, clipped or incomplete
+    except PreviewScanBudgetExceeded:
+        return None, count, True
+    except Exception:
+        pass
+    return None, count, incomplete and count > 0
+
+
+def log_upstream_body_preview(
+    logger: logging.Logger,
+    *,
+    provider: str,
+    stage: str,
+    endpoint: str | None,
+    attempt: int,
+    transport: str,
+    request_body: _BodySource = None,
+    prepared_body: PreparedInput | None = None,
+    response_body: _BodySource = None,
+    request_body_sent_bytes: int | None = None,
+    response_body_bytes: int | None = None,
+    response_incomplete: bool = False,
+    protocol_attempt: int | None = None,
+) -> None:
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        scrubber = _active_scrubber(logger)
+        request_scan_exceeded = False
+        if prepared_body is not None:
+            if request_body_sent_bytes is None:
+                request_body_sent_bytes = len(prepared_body.content)
+            request_body = prepared_body.content if not prepared_body.input_truncated else None
+            if prepared_body.preview_body is not None:
+                request_body = prepared_body.preview_body.content
+                request_scan_exceeded = prepared_body.preview_body.scan_budget_exceeded
+        request, sent, request_clipped = _preview_side(
+            request_body, request_body_sent_bytes, scrubber
+        )
+        response, count, response_clipped = _preview_side(
+            response_body, response_body_bytes, scrubber, incomplete=response_incomplete
+        )
+        safe_endpoint = http_endpoint_for_log(endpoint) if endpoint is not None else None
+        if scrubber is not None:
+            try:
+                provider = scrubber.redact(provider)
+                stage = scrubber.redact(stage)
+                if safe_endpoint is not None:
+                    safe_endpoint = scrubber.redact(safe_endpoint)
+            except Exception:
+                provider = stage = "<redacted>"
+                safe_endpoint = None
+        log_event(
+            logger,
+            logging.DEBUG,
+            "upstream_body_preview",
+            exc_info=False,
+            provider=provider,
+            stage=stage,
+            endpoint=safe_endpoint,
+            attempt=attempt,
+            transport=transport,
+            request_body_preview=request,
+            request_body_sent_bytes=sent,
+            request_body_original_bytes=prepared_body.original_bytes if prepared_body else sent,
+            request_input_truncated=prepared_body.input_truncated if prepared_body else False,
+            request_preview_truncated=request_clipped or request_scan_exceeded,
+            response_body_preview=response,
+            response_body_bytes=count,
+            response_preview_truncated=response_clipped,
+            **({"protocol_attempt": protocol_attempt} if protocol_attempt is not None else {}),
+        )
+    except Exception:
+        # Logging preparation cannot change a transport outcome.
         pass
 
 

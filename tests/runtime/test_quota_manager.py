@@ -1,8 +1,30 @@
 import asyncio
 
 from agent_search_gateway.concurrency import CapacityGate, ProviderQuotaManager
+from agent_search_gateway.config import ResolvedRatePolicy
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.request_ids import bind_request_id
 from tests.support.logging import structured_test_logger
+
+
+async def test_rate_namespaces_isolate_same_named_providers_and_capacity() -> None:
+    quotas = ProviderQuotaManager(
+        web_limits={"shared": 1}, llm_limits={"shared": 1}, agent_limits={"shared": 1}
+    )
+    policy = ResolvedRatePolicy(min_interval_seconds=10)
+    web, academic, oa = RateGate(policy), RateGate(policy), RateGate(policy)
+    quotas.register_rate("web", "shared", web)
+    quotas.register_rate("academic", "shared", academic)
+    quotas.register_rate("oa", "shared", oa)
+    assert quotas.get_rate("web", "shared") is web
+    assert quotas.get_rate("academic", "shared") is academic
+    assert quotas.get_rate("oa", "shared") is oa
+    assert quotas.get_rate("web", "missing") is None
+    await web.permit(timeout_seconds=0)
+    assert web.next_available_in_seconds() > 0
+    assert academic.next_available_in_seconds() == oa.next_available_in_seconds() == 0
+    async with quotas.get_llm("shared").lease(), quotas.get_agent("shared").lease():
+        assert quotas.get_llm("shared").in_use == quotas.get_agent("shared").in_use == 1
 
 
 async def test_web_search_and_fetch_share_capacity_while_llm_capacity_is_separate() -> None:

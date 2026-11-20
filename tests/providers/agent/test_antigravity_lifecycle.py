@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 from contextlib import suppress
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import pytest
 
 from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import ExecutionFailure
+from agent_search_gateway.observability import configure_debug_logging
 from agent_search_gateway.providers.agent import antigravity_cli as adapter
 from tests.support.agent_cli import force_cleanup, process_is_alive, wait_for_json, write_fake_cli
 
@@ -127,6 +129,135 @@ async def test_cancellation_cleans_grandchildren_in_the_owned_process_group(
         await asyncio.gather(task, return_exceptions=True)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '{"status":"SUCCESS","response":"safe-before-timeout"}',
+        '{"token":"PRIVATE fragment unfinished',
+        '{"cookie":"PRIVATE fragment unfinished',
+    ],
+)
+async def test_agent_timeout_previews_captured_stdout_after_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: str,
+) -> None:
+    monkeypatch.setattr(adapter, "_HARD_TIMEOUT_MARGIN_SECONDS", 0.05)
+    monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.05)
+    command, ready = hanging_cli(tmp_path, terminal=payload)
+    gate = CapacityGate(1)
+    stream = StringIO()
+    session = configure_debug_logging(tmp_path / "debug.log", stderr=stream)
+    try:
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.run_antigravity(
+                None,
+                [],
+                provider_name="agy",
+                command=str(command),
+                timeout_seconds=0.3,
+                pass_env=(),
+                quota=gate,
+            )
+        state = await wait_for_json(ready)
+        try:
+            assert caught.value.reason == "timeout"
+            assert_clean(state, gate)
+            previews = [
+                line
+                for line in stream.getvalue().splitlines()
+                if "event=upstream_body_preview" in line
+            ]
+            assert len(previews) == 1
+            if "PRIVATE" in payload:
+                assert "response_body_preview=null" in previews[0]
+                assert "PRIVATE" not in stream.getvalue() + (tmp_path / "debug.log").read_text()
+            else:
+                assert "safe-before-timeout" in previews[0]
+            assert f"response_body_bytes={len(payload.encode()) + 1}" in previews[0]
+            assert "response_preview_truncated=true" in previews[0]
+        finally:
+            force_cleanup(state)
+    finally:
+        session.close()
+
+
+async def test_stdout_limit_preview_counts_all_observed_bytes_but_only_shows_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = b'{"status":"SUCCESS","response":"captured text"}'
+    output = captured + b"outside capture"
+    monkeypatch.setattr(adapter, "_STDOUT_LIMIT_BYTES", len(captured))
+    command = write_fake_cli(tmp_path, f"sys.stdout.buffer.write({output!r})")
+    stream = StringIO()
+    session = configure_debug_logging(tmp_path / "stdout.log", stderr=stream)
+    try:
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.run_antigravity(
+                None,
+                [],
+                provider_name="agy",
+                command=str(command),
+                timeout_seconds=2,
+                pass_env=(),
+                quota=CapacityGate(1),
+            )
+    finally:
+        session.close()
+    assert caught.value.reason == "output_limit"
+    observed = caught.value.diagnostics["stdout_bytes"]
+    assert observed == len(output)
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert f"response_body_bytes={observed} " in preview
+    assert "captured text" in preview
+    assert "outside capture" not in preview
+    assert "response_preview_truncated=true" in preview
+
+
+async def test_agent_stdout_arriving_during_cleanup_stays_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(adapter, "_STDERR_LIMIT_BYTES", 8)
+    envelope = '{"status":"SUCCESS","response":"late stdout"}'
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        def on_term(*_args):
+            print({envelope!r}, flush=True)
+            sys.exit(0)
+        signal.signal(signal.SIGTERM, on_term)
+        sys.stderr.write("PRIVATE_STDERR")
+        sys.stderr.flush()
+        time.sleep(60)
+        """,
+    )
+    stream = StringIO()
+    session = configure_debug_logging(tmp_path / "late.log", stderr=stream)
+    try:
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.run_antigravity(
+                None,
+                [],
+                provider_name="agy",
+                command=str(command),
+                timeout_seconds=2,
+                pass_env=(),
+                quota=CapacityGate(1),
+            )
+    finally:
+        session.close()
+    assert caught.value.reason == "output_limit"
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert "late stdout" in preview
+    assert f"response_body_bytes={len(envelope.encode()) + 1}" in preview
+    assert "response_preview_truncated=true" in preview
+    assert "PRIVATE_STDERR" not in stream.getvalue()
+
+
 @pytest.mark.parametrize("ignore_term", [False, True])
 async def test_timeout_terminates_process_group_before_releasing_quota(
     tmp_path: Path,
@@ -160,6 +291,79 @@ async def test_timeout_terminates_process_group_before_releasing_quota(
         force_cleanup(state)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("cancel_twice", [False, True])
+async def test_cancellation_previews_captured_stdout_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_twice: bool,
+) -> None:
+    monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.10)
+    envelope = '{"status":"SUCCESS","response":"public before cancel"}'
+    observed = asyncio.Event()
+    original_read = asyncio.StreamReader.read
+
+    async def observe_read(reader: asyncio.StreamReader, n: int = -1) -> bytes:
+        chunk = await original_read(reader, n)
+        if envelope.encode() in chunk:
+            observed.set()
+        return chunk
+
+    monkeypatch.setattr(asyncio.StreamReader, "read", observe_read)
+    ready = tmp_path / "ready.json"
+    command = write_fake_cli(
+        tmp_path,
+        f"""
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        print({envelope!r}, flush=True)
+        target = Path({str(ready)!r})
+        pending = target.with_suffix(".tmp")
+        pending.write_text(json.dumps({{"pid": os.getpid(), "children": [], "cwd": os.getcwd()}}))
+        pending.replace(target)
+        time.sleep(60)
+        """,
+    )
+    gate = CapacityGate(1)
+    stream = StringIO()
+    session = configure_debug_logging(tmp_path / "cancel.log", stderr=stream)
+    task = asyncio.create_task(
+        adapter.run_antigravity(
+            None,
+            [],
+            provider_name="agy",
+            command=str(command),
+            timeout_seconds=5,
+            pass_env=(),
+            quota=gate,
+        )
+    )
+    try:
+        state = await wait_for_json(ready)
+        try:
+            await asyncio.wait_for(observed.wait(), 2)
+            task.cancel("first")
+            if cancel_twice:
+                await asyncio.sleep(0.02)
+                assert "upstream_body_preview" not in stream.getvalue()
+                task.cancel("second")
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert_clean(state, gate)
+            [preview] = [
+                line
+                for line in stream.getvalue().splitlines()
+                if "event=upstream_body_preview" in line
+            ]
+            assert "public before cancel" in preview
+            assert f"response_body_bytes={len(envelope.encode()) + 1}" in preview
+            assert "response_preview_truncated=true" in preview
+        finally:
+            force_cleanup(state)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        session.close()
 
 
 async def test_cancellation_and_second_cancel_wait_for_cleanup(
@@ -207,6 +411,15 @@ async def test_cancellation_and_second_cancel_wait_for_cleanup(
         assert fields["stdout_bytes"] == fields["stderr_bytes"] == 0
         assert "upstream_status" not in fields
         assert not hasattr(caught.value, "diagnostics")
+        [preview] = [
+            r
+            for r in caplog.records
+            if getattr(r, "gateway_event", None) == "upstream_body_preview"
+        ]
+        preview_fields = getattr(preview, "gateway_fields", {})
+        assert preview_fields["response_body_preview"] is None
+        assert preview_fields["response_body_bytes"] == 0
+        assert preview_fields["response_preview_truncated"] is False
     finally:
         force_cleanup(state)
         task.cancel()
@@ -382,6 +595,12 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
         assert fields["reason"] == "cancelled"
         assert fields.get("exit_code") == (-signal.SIGKILL if deny_group_probe else -signal.SIGTERM)
         assert "upstream_status" not in fields
+        [preview] = [
+            r
+            for r in caplog.records
+            if getattr(r, "gateway_event", None) == "upstream_body_preview"
+        ]
+        assert getattr(preview, "gateway_fields", {})["response_body_bytes"] == 0
         if deny_group_probe:
             assert 0 in signals
             assert signal.SIGTERM in signals
@@ -396,7 +615,10 @@ async def test_cancel_while_spawn_is_returning_keeps_process_handle(
 async def test_cancel_queued_invocation_never_spawns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger=adapter.__name__)
+
     async def forbidden(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
         pytest.fail("A cancelled quota waiter must not spawn")
 
@@ -420,6 +642,9 @@ async def test_cancel_queued_invocation_never_spawns(
             await task
         assert gate.in_use == 1
     assert gate.in_use == 0
+    assert not any(
+        getattr(r, "gateway_event", None) == "upstream_body_preview" for r in caplog.records
+    )
 
 
 @pytest.mark.parametrize("exists", [False, True])
@@ -661,12 +886,12 @@ async def test_signal_errors_keep_cleanup_bounded_and_preserve_outcome(
     async def capture_read(
         stream: asyncio.StreamReader,
         *,
-        capture: bool,
+        capture: bytearray | None,
         limit: int,
-        counter: adapter._ByteCount | None = None,
-    ) -> bytes:
+        counter: adapter._ByteCount,
+    ) -> None:
         try:
-            return await original_read(stream, capture=capture, limit=limit, counter=counter)
+            await original_read(stream, capture=capture, limit=limit, counter=counter)
         finally:
             readers_finished.append(stream)
 
@@ -818,5 +1043,5 @@ async def test_stderr_reader_counts_bytes_without_retaining_content() -> None:
     stream.feed_data(b"STDERR_SENTINEL" * 100)
     stream.feed_eof()
     counter = adapter._ByteCount()
-    assert await adapter._read_stream(stream, capture=False, limit=4096, counter=counter) == b""
+    await adapter._read_stream(stream, capture=None, limit=4096, counter=counter)
     assert counter.observed == len(b"STDERR_SENTINEL" * 100)

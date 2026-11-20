@@ -1,6 +1,10 @@
 import asyncio
 import io
 import logging
+import re
+import shlex
+import time
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -34,6 +38,101 @@ def _isolated_logger(name: str, stream: io.StringIO, redactor: SecretRedactor) -
     return logger
 
 
+def test_formatter_uses_record_created_in_utc_milliseconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = io.StringIO()
+    logger = _isolated_logger("tests.observability.created", stream, SecretRedactor())
+    created = datetime(2026, 11, 18, 8, 21, 30, 124999, tzinfo=UTC).timestamp()
+
+    def freeze_created(record: logging.LogRecord) -> bool:
+        record.created = created
+        return True
+
+    logger.handlers[0].addFilter(freeze_created)
+    try:
+        with monkeypatch.context() as timezone:
+            timezone.setenv("TZ", "UTC-9")
+            time.tzset()
+            assert time.localtime(created).tm_hour == 17
+            with bind_request_id("0123abcd"):
+                log_event(logger, logging.DEBUG, "completed", elapsed_ms=42)
+    finally:
+        time.tzset()
+
+    assert stream.getvalue() == (
+        "DEBUG time=2026-11-18T08:21:30.124Z request=0123abcd event=completed elapsed_ms=42\n"
+    )
+
+
+def test_formatter_reserves_time_against_external_gateway_fields() -> None:
+    record = logging.makeLogRecord(
+        {
+            "levelname": "DEBUG",
+            "created": datetime(2026, 11, 18, 8, 21, 30, 124000, tzinfo=UTC).timestamp(),
+            "gateway_event": "completed",
+            "gateway_fields": {"time": "FORGED_TIME", "elapsed_ms": 42},
+        }
+    )
+    formatter = KeyValueFormatter(SecretRedactor())
+    with bind_request_id("0123abcd"):
+        line = formatter.format(record)
+
+    assert line == (
+        "DEBUG time=2026-11-18T08:21:30.124Z request=0123abcd event=completed elapsed_ms=42"
+    )
+
+
+@pytest.mark.parametrize(
+    ("created", "timestamp"),
+    [
+        (datetime(2026, 11, 18, 23, 59, 59, 999999, tzinfo=UTC), "2026-11-18T23:59:59.999Z"),
+        (datetime(2026, 11, 19, 0, 0, 0, 1, tzinfo=UTC), "2026-11-19T00:00:00.000Z"),
+    ],
+)
+def test_formatter_timestamps_plain_records_at_millisecond_day_boundary(
+    created: datetime, timestamp: str
+) -> None:
+    record = logging.makeLogRecord(
+        {"levelname": "INFO", "created": created.timestamp(), "msg": "first\nsecond"}
+    )
+
+    line = KeyValueFormatter(SecretRedactor()).format(record)
+
+    assert line == f'INFO time={timestamp} request=- event=log message="first\\nsecond"'
+    assert len(line.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    "created", [float("nan"), float("inf"), -float("inf"), 1e30, "PRIVATE_TIME"]
+)
+def test_invalid_created_uses_safe_handlers_and_preserves_business_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], created: object
+) -> None:
+    stderr = io.StringIO()
+    log_file = tmp_path / "debug.log"
+    session = configure_debug_logging(log_file, stderr=stderr)
+    record = logging.makeLogRecord(
+        {
+            "levelname": "DEBUG",
+            "levelno": logging.DEBUG,
+            "created": created,
+            "msg": "PRIVATE_RECORD\nSECOND_LINE",
+        }
+    )
+    try:
+
+        def business() -> str:
+            logging.getLogger("agent_search_gateway").handle(record)
+            return "business result"
+
+        assert business() == "business result"
+    finally:
+        session.close()
+
+    assert stderr.getvalue() == "agent-search-gateway debug logging sink failure\n" * 2
+    assert capsys.readouterr().err == ""
+    assert log_file.read_text(encoding="utf-8") == ""
+
+
 def test_formatter_emits_structured_single_line_with_request_context() -> None:
     stream = io.StringIO()
     logger = _isolated_logger("tests.observability.contract", stream, SecretRedactor())
@@ -52,7 +151,9 @@ def test_formatter_emits_structured_single_line_with_request_context() -> None:
 
     line = stream.getvalue()
     assert len(line.splitlines()) == 1
-    assert line.startswith("DEBUG request=11111111 ")
+    assert re.match(
+        r"DEBUG time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z request=11111111 ", line
+    )
     assert "provider=tavily" in line
     assert "stage=search" in line
     assert "event=completed" in line
@@ -63,7 +164,10 @@ def test_formatter_emits_structured_single_line_with_request_context() -> None:
     stream.seek(0)
     stream.truncate(0)
     log_event(logger, logging.DEBUG, "session_started", pid=123)
-    assert stream.getvalue().startswith("DEBUG request=- event=session_started ")
+    assert re.match(
+        r"DEBUG time=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z request=- event=session_started ",
+        stream.getvalue(),
+    )
 
 
 def test_log_event_skips_validation_when_level_is_disabled() -> None:
@@ -222,6 +326,85 @@ def test_debug_log_appends_across_restart_and_rotates_with_bounded_backups(tmp_p
     assert not (tmp_path / "debug.log.4").exists()
 
 
+def test_rotation_preserves_timestamp_and_request_id_at_default_boundary(tmp_path: Path) -> None:
+    log_file = tmp_path / "debug.log"
+    stderr = io.StringIO()
+    session = configure_debug_logging(log_file, stderr=stderr)
+    logger = logging.getLogger("agent_search_gateway")
+    handler = next(
+        handler for handler in logger.handlers if isinstance(handler, RotatingFileHandler)
+    )
+    assert handler.maxBytes == LOG_MAX_BYTES == 5 * 1024 * 1024
+    assert handler.backupCount == LOG_BACKUP_COUNT == 3
+    before_line = (
+        "DEBUG time=2026-11-18T23:59:59.999Z request=0123abcd event=rotation_before "
+        'marker="before\\nline"\n'
+    )
+    after_line = (
+        "DEBUG time=2026-11-19T00:00:00.000Z request=fedc4321 event=rotation_after "
+        'marker="after\\nline"\n'
+    )
+    before = logging.makeLogRecord(
+        {
+            "levelname": "DEBUG",
+            "levelno": logging.DEBUG,
+            "created": datetime(2026, 11, 18, 23, 59, 59, 999999, tzinfo=UTC).timestamp(),
+            "gateway_event": "rotation_before",
+            "gateway_fields": {"marker": "before\nline"},
+        }
+    )
+    after = logging.makeLogRecord(
+        {
+            "levelname": "DEBUG",
+            "levelno": logging.DEBUG,
+            "created": datetime(2026, 11, 19, 0, 0, 0, 1, tzinfo=UTC).timestamp(),
+            "gateway_event": "rotation_after",
+            "gateway_fields": {"marker": "after\nline"},
+        }
+    )
+    try:
+        with bind_request_id("0123abcd"):
+            logger.handle(before)
+        handler.flush()
+        assert log_file.read_text(encoding="utf-8") == before_line
+
+        # One bounded prefill reaches the production threshold without many log calls.
+        # Use the handler's stream so rollover checks see the updated position.
+        remaining = LOG_MAX_BYTES - len(after_line.encode("utf-8")) - log_file.stat().st_size
+        assert remaining > 1
+        assert handler.stream is not None
+        handler.stream.write("x" * (remaining - 1) + "\n")
+        handler.flush()
+        assert handler.stream.tell() == log_file.stat().st_size
+        assert log_file.stat().st_size < LOG_MAX_BYTES
+        assert not (tmp_path / "debug.log.1").exists()
+
+        with bind_request_id("fedc4321"):
+            logger.handle(after)
+    finally:
+        session.close()
+
+    backup = tmp_path / "debug.log.1"
+    assert backup.stat().st_size + len(after_line.encode("utf-8")) == LOG_MAX_BYTES
+    assert not (tmp_path / "debug.log.2").exists()
+    assert stderr.getvalue() == before_line + after_line
+    for path, expected, request_id, timestamp in (
+        (backup, before_line, "0123abcd", "2026-11-18T23:59:59.999Z"),
+        (log_file, after_line, "fedc4321", "2026-11-19T00:00:00.000Z"),
+    ):
+        event_lines = [
+            line for line in path.read_text(encoding="utf-8").splitlines() if "event=" in line
+        ]
+        assert event_lines == [expected.rstrip("\n")]
+        level, *tokens = shlex.split(event_lines[0])
+        fields = dict(token.split("=", 1) for token in tokens)
+        assert level == "DEBUG"
+        assert fields["time"] == timestamp
+        assert fields["request"] == request_id
+        assert list(fields)[:2] == ["time", "request"]
+        assert len(fields) == len(tokens)
+
+
 def test_configure_close_configure_does_not_duplicate_owned_handlers(tmp_path: Path) -> None:
     project_logger = logging.getLogger("agent_search_gateway")
     baseline = tuple(project_logger.handlers)
@@ -376,3 +559,67 @@ def test_logging_cancellation_is_never_swallowed(origin: str) -> None:
         logger.handlers[:] = [handler]
     with pytest.raises(asyncio.CancelledError):
         log_event(logger, logging.DEBUG, "provider_response_diagnostic")
+
+
+@pytest.mark.parametrize("propagate", [False, True])
+@pytest.mark.parametrize("parent_level", [logging.INFO, logging.DEBUG])
+def test_preview_uses_each_receiving_formatter(propagate: bool, parent_level: int) -> None:
+    from logging.handlers import BufferingHandler
+
+    from agent_search_gateway.observability import log_upstream_body_preview
+
+    parent = _isolated_logger(
+        "tests.preview.route", io.StringIO(), SecretRedactor([SecretValue("PARENT")])
+    )
+    parent.setLevel(logging.WARNING)
+    parent.handlers[0].setLevel(parent_level)
+    child = _isolated_logger(
+        "tests.preview.route.child", io.StringIO(), SecretRedactor([SecretValue("CHILD")])
+    )
+    child.propagate = propagate
+    capture = BufferingHandler(10)
+    child.addHandler(capture)
+    log_upstream_body_preview(
+        child,
+        provider="p",
+        stage="s",
+        attempt=1,
+        endpoint=None,
+        transport="http",
+        request_body=b"VISIBLE CHILD PARENT",
+    )
+    (record,) = capture.buffer
+    expected = "<redacted>" if propagate and parent_level <= logging.DEBUG else "PARENT"
+    assert (
+        record.__dict__["gateway_fields"]["request_body_preview"]
+        == "VISIBLE <redacted> " + expected
+    )
+
+
+def test_preview_follows_outer_wrapper_level(tmp_path: Path) -> None:
+    from agent_search_gateway.observability import log_upstream_body_preview
+
+    stderr, sink = io.StringIO(), io.StringIO()
+    delegated = logging.StreamHandler(sink)
+    session = configure_debug_logging(
+        tmp_path / "debug.log", stderr=stderr, file_handler_factory=lambda *a, **kw: delegated
+    )
+    try:
+        session.add_secrets(SecretValue("PRIVATE_DELEGATE"))
+        logger = logging.getLogger("agent_search_gateway")
+        logger.handlers[-2].setLevel(logging.INFO)
+        delegated.setLevel(logging.INFO)
+        log_upstream_body_preview(
+            logger,
+            provider="p",
+            stage="s",
+            attempt=1,
+            endpoint=None,
+            transport="http",
+            request_body=b"VISIBLE PRIVATE_DELEGATE",
+        )
+        line = sink.getvalue()
+        assert "VISIBLE" in line and "PRIVATE_DELEGATE" not in line
+        assert not stderr.getvalue()
+    finally:
+        session.close()

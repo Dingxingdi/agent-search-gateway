@@ -19,7 +19,7 @@ from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
-from tests.support.logging import structured_test_logger
+from tests.support.logging import structured_test_logger, without_debug_body_previews
 
 
 class _SearchClient:
@@ -340,4 +340,5 @@ async def test_protocol_retry_has_one_provider_terminal_outcome(
     else:
         assert len(completed) == 1 and "stage=llm_search" in completed[0]
         assert not failed and not stage_failed
-    assert "PROMPT_SENTINEL" not in logged and "ANSWER_SENTINEL" not in logged
+    other_events = without_debug_body_previews(logged)
+    assert "PROMPT_SENTINEL" not in other_events and "ANSWER_SENTINEL" not in other_events

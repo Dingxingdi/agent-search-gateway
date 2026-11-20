@@ -1,14 +1,21 @@
 import asyncio
 import logging
 
+import httpx
 import pytest
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
 from agent_search_gateway.academic.enrichment import enrich_paper_records
+from agent_search_gateway.config import ResolvedRatePolicy
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
-from agent_search_gateway.models import OAResolution, PaperIdentifiers, PaperRecord
+from agent_search_gateway.models import OAResolution, PaperIdentifiers, PaperRecord, RetryPolicy
+from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
+from agent_search_gateway.providers.academic.unpaywall import UnpaywallResolver
 from agent_search_gateway.providers.contracts import PaperSearchHit
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.url_normalization import normalize_url
+from tests.support.controlled import ManualClock
 
 
 class RecordingResolver:
@@ -127,6 +134,44 @@ async def test_enrichment_failure_logs_safe_event_and_retains_record(caplog: obj
     assert "10.1000/example" not in rendered_fields
 
 
+async def test_oa_rate_wait_timeout_retains_paper_and_logs_safe_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    clock = ManualClock()
+    gate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=3600), monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    await gate.permit(timeout_seconds=0)
+
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        pytest.fail("resolver sent an HTTP request without a permit")
+
+    original = _record()
+    caplog.set_level(logging.DEBUG)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+        resolver = UnpaywallResolver(
+            HttpJsonExecutor(
+                client, RetryPolicy(3, 0, 0, 0.5), provider_name="unpaywall", rate_gate=gate
+            ),
+            contact_email=SecretValue("user@example.test"),
+        )
+        task = asyncio.create_task(enrich_paper_records([original], resolver))
+        await asyncio.sleep(0)
+        assert list(clock.sleepers.values()) == [0.5]
+        await clock.advance_to(0.5)
+        assert await asyncio.wait_for(task, 1) == [original]
+    failure_records = [
+        record
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_failed"
+    ]
+    assert len(failure_records) == 1
+    assert vars(failure_records[0])["gateway_fields"]["reason"] == "rate_limit_wait_timeout"
+    formatter = KeyValueFormatter(SecretRedactor([]))
+    rendered = "\n".join(formatter.format(record) for record in failure_records)
+    assert original.identifiers.doi not in rendered
+
+
 async def test_enrichment_unexpected_resolver_failure_retains_record(caplog: object) -> None:
     resolver = RecordingResolver(failure=RuntimeError("unexpected resolver failure"))
     original = _record()
@@ -156,13 +201,6 @@ async def test_oa_no_match_and_outage_have_distinct_terminal_diagnostics(
     caplog: pytest.LogCaptureFixture,
     case: str,
 ) -> None:
-    import httpx
-
-    from agent_search_gateway.models import RetryPolicy
-    from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
-    from agent_search_gateway.providers.academic.unpaywall import UnpaywallResolver
-    from agent_search_gateway.providers.http import HttpJsonExecutor
-
     response = (
         httpx.Response(404, json={"error": "PRIVATE_NO_MATCH"})
         if case == "no_match"

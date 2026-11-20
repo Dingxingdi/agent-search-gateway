@@ -31,7 +31,9 @@ def test_readme_documents_debug_and_doctor_operational_contract() -> None:
     assert "URI userinfo is stripped" in readme
     assert "HTTP transport endpoint fields" in readme
     assert "sensitive local artifacts" in readme
-    assert "query/prompt/page/model-response bodies" in readme
+    assert "upstream_body_preview" in readme
+    assert "request_input_truncated" in readme
+    assert "response_preview_truncated" in readme
     assert "authentication values" in readme
     assert "final-output-only" in readme
     assert "no network" in readme

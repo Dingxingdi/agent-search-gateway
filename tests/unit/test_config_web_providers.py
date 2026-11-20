@@ -643,3 +643,301 @@ def test_new_keyed_provider_requires_named_environment_value(
             {"OTHER": "unused"},
         )
     assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+def test_web_provider_resolves_multiple_rate_windows_without_adapter_options() -> None:
+    from dataclasses import FrozenInstanceError
+
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                "dual": {
+                    "enable_search": True,
+                    "api_key_env": "TEST_RATE",
+                    "mode": "fast",
+                    "rate_limits": [
+                        {"requests": 2, "period_seconds": 1},
+                        {"requests": 30, "period_seconds": 60.5},
+                    ],
+                    "min_interval_seconds": 0.25,
+                }
+            }
+        },
+        _registry(),
+        {"TEST_RATE": "x"},
+    ).providers
+
+    policy = provider.rate_policy
+    assert isinstance(policy.windows, tuple)
+    assert [(window.requests, window.period_seconds) for window in policy.windows] == [
+        (2, 1.0),
+        (30, 60.5),
+    ]
+    assert policy.min_interval_seconds == 0.25
+    assert dict(provider.options) == {"mode": "fast"}
+    with pytest.raises(FrozenInstanceError):
+        policy.min_interval_seconds = 1.0  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        policy.windows[0].requests = 1  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("rate_fields", "expected_windows", "expected_interval"),
+    [
+        ({}, [], None),
+        ({"rate_limits": []}, [], None),
+        ({"rate_limits": [{"requests": 3, "period_seconds": 2}]}, [(3, 2.0)], None),
+        (
+            {
+                "rate_limits": [
+                    {"requests": 3, "period_seconds": 2},
+                    {"requests": 10, "period_seconds": 60.5},
+                ]
+            },
+            [(3, 2.0), (10, 60.5)],
+            None,
+        ),
+        ({"min_interval_seconds": 0.125}, [], 0.125),
+    ],
+    ids=["default", "empty", "single", "multiple", "interval-only"],
+)
+def test_web_rate_policy_values(
+    rate_fields: dict[str, object],
+    expected_windows: list[tuple[int, float]],
+    expected_interval: float | None,
+) -> None:
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                "dual": {
+                    "enable_search": True,
+                    "api_key_env": "TEST_RATE",
+                    **rate_fields,
+                }
+            }
+        },
+        _registry(),
+        {"TEST_RATE": "x"},
+    ).providers
+    windows = [(w.requests, w.period_seconds) for w in provider.rate_policy.windows]
+    assert windows == expected_windows
+    assert provider.rate_policy.min_interval_seconds == expected_interval
+    assert dict(provider.options) == {}
+
+
+@pytest.mark.parametrize(
+    ("rate_limits", "field"),
+    [
+        (None, "rate_limits"),
+        ({}, "rate_limits"),
+        ((), "rate_limits"),
+        ("do-not-echo-rate-value", "rate_limits"),
+        ([None], "rate_limits[0]"),
+        ([True], "rate_limits[0]"),
+        ([[]], "rate_limits[0]"),
+        ([{}], "rate_limits[0].requests"),
+        ([{"requests": 2}], "rate_limits[0].period_seconds"),
+        ([{"period_seconds": 1}], "rate_limits[0].requests"),
+        (
+            [{"requests": 2, "period_seconds": 1, "do-not-echo-key": "do-not-echo-value"}],
+            "rate_limits[0]",
+        ),
+    ],
+)
+@pytest.mark.parametrize("enabled", [False, True])
+def test_web_rate_policy_rejects_invalid_window_structure(
+    rate_limits: object,
+    field: str,
+    enabled: bool,
+) -> None:
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {
+                "web_providers": {
+                    "dual": {
+                        "enable_search": enabled,
+                        "api_key_env": "TEST_RATE",
+                        "rate_limits": rate_limits,
+                    }
+                }
+            },
+            _registry(),
+            {"TEST_RATE": "x"},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"web_providers.dual.{field}" in str(caught.value)
+    assert "do-not-echo" not in str(caught.value)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "value",
+    [0, -1, 1.0, 1.5, True, False, "3", {"do-not-echo": 1}, [1], None],
+    ids=[
+        "zero",
+        "negative",
+        "float",
+        "fraction",
+        "true",
+        "false",
+        "string",
+        "nested",
+        "array",
+        "null",
+    ],
+)
+def test_web_rate_policy_rejects_invalid_requests(value: object, enabled: bool) -> None:
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {
+                "web_providers": {
+                    "dual": {
+                        "enable_search": enabled,
+                        "api_key_env": "TEST_RATE",
+                        "rate_limits": [{"requests": value, "period_seconds": 1}],
+                    }
+                }
+            },
+            _registry(),
+            {"TEST_RATE": "x"},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert "web_providers.dual.rate_limits[0].requests" in str(caught.value)
+    assert "positive integer" in str(caught.value)
+    assert "do-not-echo" not in str(caught.value)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("field", ["period_seconds", "min_interval_seconds"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        -1,
+        True,
+        False,
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        10**1000,
+        "3",
+        {"do-not-echo": 1},
+        [1],
+        None,
+    ],
+    ids=[
+        "zero",
+        "negative",
+        "true",
+        "false",
+        "nan",
+        "inf",
+        "negative-inf",
+        "overflow",
+        "string",
+        "nested",
+        "array",
+        "null",
+    ],
+)
+def test_web_rate_policy_rejects_invalid_seconds(
+    value: object,
+    field: str,
+    enabled: bool,
+) -> None:
+    rate_fields = (
+        {"rate_limits": [{"requests": 2, "period_seconds": value}]}
+        if field == "period_seconds"
+        else {"min_interval_seconds": value}
+    )
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {
+                "web_providers": {
+                    "dual": {
+                        "enable_search": enabled,
+                        "api_key_env": "TEST_RATE",
+                        **rate_fields,
+                    }
+                }
+            },
+            _registry(),
+            {"TEST_RATE": "x"},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    path = f"rate_limits[0].{field}" if field == "period_seconds" else field
+    assert f"web_providers.dual.{path}" in str(caught.value)
+    assert "positive number" in str(caught.value)
+    assert "do-not-echo" not in str(caught.value)
+
+
+@pytest.mark.parametrize("name", ["dual", "unknown_disabled"])
+def test_disabled_web_rate_policy_needs_no_credentials(name: str) -> None:
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                name: {
+                    "rate_limits": [{"requests": 2, "period_seconds": 1}],
+                    "min_interval_seconds": 0.5,
+                    "mode": "fast",
+                }
+            }
+        },
+        _registry(),
+        {},
+    ).providers
+    assert provider.secret is None
+    assert provider.api_key_env is None
+    assert [(w.requests, w.period_seconds) for w in provider.rate_policy.windows] == [(2, 1.0)]
+    assert provider.rate_policy.min_interval_seconds == 0.5
+    assert dict(provider.options) == {"mode": "fast"}
+
+
+def test_unknown_disabled_web_rate_policy_is_still_validated() -> None:
+    with pytest.raises(ConfigFailure, match="web_providers.unknown_disabled.rate_limits"):
+        resolve_web_provider_config(
+            {"web_providers": {"unknown_disabled": {"rate_limits": "unused"}}},
+            _registry(),
+            {},
+        )
+
+
+def test_web_rate_policy_preserves_enabled_provider_and_credential_checks() -> None:
+    with pytest.raises(ConfigFailure, match="unknown enabled web provider"):
+        resolve_web_provider_config(
+            {"web_providers": {"unknown": {"enable_search": True, "rate_limits": []}}},
+            _registry(),
+            {},
+        )
+    with pytest.raises(ConfigFailure, match="requires api_key_env"):
+        resolve_web_provider_config(
+            {"web_providers": {"dual": {"enable_search": True, "rate_limits": []}}},
+            _registry(),
+            {},
+        )
+
+
+def test_web_old_constructor_defaults_to_empty_rate_policy() -> None:
+    from agent_search_gateway.config import ResolvedWebProviderConfig
+
+    provider = ResolvedWebProviderConfig("dual", True, True, 3, None, None, {})
+    assert provider.rate_policy.windows == ()
+    assert provider.rate_policy.min_interval_seconds is None
+
+
+def test_no_auth_web_provider_resolves_rate_policy() -> None:
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                "jina": {
+                    "enable_fetch": True,
+                    "rate_limits": [{"requests": 2, "period_seconds": 1}],
+                }
+            }
+        },
+        build_default_registry(),
+        {},
+    ).providers
+    assert provider.secret is None
+    assert [(w.requests, w.period_seconds) for w in provider.rate_policy.windows] == [(2, 1.0)]
+    assert dict(provider.options) == {}

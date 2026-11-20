@@ -5,13 +5,16 @@ from collections.abc import Mapping, Sequence
 import pytest
 
 from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.config import ResolvedRatePolicy
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.providers.contracts import ChatMessage, URLFetchCandidate
+from agent_search_gateway.rate_limit import InitialRateBudget, RateGate, consume_initial_rate_budget
 from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import NormalizedURL, normalize_url
+from tests.support.controlled import ManualClock
 from tests.support.fakes import FakeLLMClient, FakeURLFetchProvider
 from tests.support.logging import structured_test_logger
 
@@ -43,11 +46,16 @@ class _JudgeClient:
 
 
 def _scheduler(
-    providers: list[FakeURLFetchProvider], *, logger: logging.Logger | None = None
+    providers: list[FakeURLFetchProvider],
+    *,
+    logger: logging.Logger | None = None,
+    quotas: ProviderQuotaManager | None = None,
+    judge: _JudgeClient | None = None,
+    timeout: float = 30,
 ) -> FetchScheduler:
     invocation = LLMInvocation("judge", "model", {})
     stages = LLMStages(
-        {"judge": _JudgeClient()},
+        {"judge": judge or _JudgeClient()},
         judge=invocation,
         safety=invocation,
         content_clean=invocation,
@@ -55,12 +63,14 @@ def _scheduler(
     )
     return FetchScheduler(
         providers,
-        ProviderQuotaManager(
+        quotas
+        or ProviderQuotaManager(
             web_limits={provider.name: 1 for provider in providers},
             llm_limits={},
         ),
         stages,
         logger=logger,
+        request_timeout_seconds=timeout,
     )
 
 
@@ -488,3 +498,65 @@ async def test_unexpected_fetch_validation_error_logs_once_without_changing_prop
     assert "event=provider_completed " not in logged
     assert "event=provider_fallback " not in logged
     assert "SENTINEL" not in logged
+
+
+@pytest.mark.parametrize("rejected_body", ["   ", "judge-reject"])
+async def test_semantic_rejection_precedes_exhaustion_of_rate_limited_fallbacks(
+    rejected_body: str,
+) -> None:
+    rejected = FakeURLFetchProvider("rejected", URLFetchCandidate(rejected_body))
+    limited = FakeURLFetchProvider("limited")
+    quotas = ProviderQuotaManager(web_limits={"rejected": 1, "limited": 1}, llm_limits={})
+    gate = RateGate(ResolvedRatePolicy(min_interval_seconds=3600))
+    await gate.permit(timeout_seconds=0)
+    quotas.register_rate("web", "limited", gate)
+    scheduler = _scheduler([rejected, limited], quotas=quotas, timeout=0)
+    outcome = await scheduler.fetch_until_accepted(normalize_url("https://example.test"))
+    assert outcome.kind == "semantic_failure"
+    assert [f.reason for f in outcome.failures] == ["rate_limit_wait_timeout"]
+    assert not limited.calls
+
+
+@pytest.mark.parametrize("phase", ["provider", "judge"])
+async def test_other_providers_fetch_and_judge_do_not_spend_a_blocked_candidates_budget(
+    phase: str,
+) -> None:
+    clock = ManualClock()
+    quotas = ProviderQuotaManager(web_limits={"limited": 1, "other": 1}, llm_limits={})
+    gate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=0.4), monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    await gate.permit(timeout_seconds=0)
+    quotas.register_rate("web", "limited", gate)
+    budgets: list[InitialRateBudget | None] = []
+    failure = ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "other failed")
+
+    class LaterReady(FakeURLFetchProvider):
+        async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:
+            budgets.append(consume_initial_rate_budget(gate))
+            return await super().fetch(url)
+
+    class Other(FakeURLFetchProvider):
+        async def fetch(self, url: NormalizedURL) -> URLFetchCandidate:
+            if phase == "provider":
+                await clock.advance_to(0.8)
+                raise failure
+            return URLFetchCandidate("judge-reject")
+
+    class SlowJudge(_JudgeClient):
+        async def complete_json(
+            self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
+        ) -> Mapping[str, object]:
+            if "judge-reject" in messages[-1]["content"]:
+                assert quotas.get_web("other").in_use == 1
+                await clock.advance_to(0.8)
+            return await super().complete_json(invocation, messages)
+
+    scheduler = _scheduler(
+        [LaterReady("limited"), Other("other")], quotas=quotas, judge=SlowJudge(), timeout=0.5
+    )
+    outcome = await scheduler.fetch_until_accepted(normalize_url("https://example.test"))
+    assert outcome.kind == "accepted"
+    assert outcome.failures == ((failure,) if phase == "provider" else ())
+    assert budgets == [InitialRateBudget(0.5, 0)]
+    assert quotas.get_web("limited").in_use == quotas.get_web("other").in_use == 0
