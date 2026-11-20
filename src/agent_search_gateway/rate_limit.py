@@ -47,9 +47,16 @@ class RateGate:
                 delay = max(delay, sent[0] + window.period_seconds - now)
         return delay
 
-    async def permit(self, *, timeout_seconds: float) -> float:
-        """Reserve once all limits allow it and return the actual elapsed wait."""
+    async def permit(
+        self,
+        *,
+        timeout_seconds: float,
+        before_reserve: Callable[[float], None] | None = None,
+    ) -> float:
+        """Run synchronous dispatch preparation when eligible, then record the send time."""
         if not self._windows and self._min_interval is None:
+            if before_reserve is not None:
+                before_reserve(0.0)
             return 0.0
         started = self._monotonic()
         deadline = started + timeout_seconds
@@ -64,10 +71,14 @@ class RateGate:
                         sent.popleft()
                 delay = self._delay_at(now)
                 if delay == 0:
+                    waited = now - started
+                    if before_reserve is not None:
+                        before_reserve(waited)
+                        now = self._monotonic()
                     for _, sent in self._windows:
                         sent.append(now)
                     self._last_sent = now
-                    return now - started
+                    return waited
                 if now >= deadline:
                     raise RateLimitWaitTimeout(now - started)
             has_slept = True

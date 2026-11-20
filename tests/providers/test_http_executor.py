@@ -498,6 +498,50 @@ async def test_rate_wait_timeout_is_terminal_without_an_http_attempt(
     assert events[1][1] == {**common, "elapsed_ms": 500, "reason": "rate_limit_wait_timeout"}
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResolvedRatePolicy(windows=(ResolvedRateWindow(1, 1),)),
+        ResolvedRatePolicy(min_interval_seconds=1),
+    ],
+)
+async def test_rate_policy_spaces_dispatches_after_slow_attempt_logging(
+    policy: ResolvedRatePolicy,
+) -> None:
+    clock = ManualClock()
+    sends: list[float] = []
+
+    class SlowFirstWrite(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if not sends and getattr(record, "gateway_event", None) == "http_attempt_started":
+                clock.now += 2
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        return httpx.Response(200, json={})
+
+    logger = logging.Logger("test.dispatch_time", logging.DEBUG)
+    logger.addHandler(SlowFirstWrite())
+    gate = RateGate(policy, monotonic=clock.monotonic, sleep=clock.sleep)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 2), provider_name="test", rate_gate=gate, logger=logger
+        )
+        await executor.request_json("GET", "https://example.test", stage="search")
+        task = asyncio.create_task(
+            executor.request_json("GET", "https://example.test", stage="fetch")
+        )
+        try:
+            await asyncio.sleep(0)
+            assert sends == [2]
+            await clock.advance_to(3)
+            assert await asyncio.wait_for(task, 1) == {}
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert sends == [2, 3]
+
+
 async def test_rate_wait_ends_before_network_timer_and_dynamic_headers(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

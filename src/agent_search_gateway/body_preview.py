@@ -4,6 +4,7 @@ import json
 import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from html import unescape
 
 from .input_limits import (
     TRUNCATION_MARKER,
@@ -37,9 +38,17 @@ _SENSITIVE_KEYS = frozenset(
     }
 )
 _JSON_START = re.compile(
-    r'\{\s*(?=["}])|\[(?!\d{4}-\d{2}-\d{2}\])\s*(?=[\[{"\]\d-]|true\b|false\b|null\b)'
+    r'\{\s*(?=["}])|\[(?!(?:\d{4}-\d{2}-\d{2}|\s*\d+\s*[-–—]\s*\d+\s*)\])'
+    r'\s*(?=[\[{"\]\d-]|true\b|false\b|null\b)'
 )
 _ENCODED_URL_DELIMITER = re.compile(r"%(?:23|3f|40|25)", re.IGNORECASE)
+_URL_ATTRIBUTE = re.compile(
+    r"""(?<![\w:-])(?:href|src|action|formaction|poster|cite)\s*=\s*"""
+    r"""(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))""",
+    re.IGNORECASE,
+)
+_URI_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
+_MEMBER_SEPARATOR = re.compile(r"[ \r\n\t]*:[ \r\n\t]*")
 _TOKEN = re.compile(
     rf"(?P<json>{_JSON_START.pattern})"
     r"""|(?P<url>(?:https?(?::|%3a)|(?<![\w/%\\]))(?:/|\\+/|%2f){2}[^\s<>"]+)"""
@@ -49,13 +58,31 @@ _TOKEN = re.compile(
     r"""|\b(?:bearer|basic|key)[ \t]+[^\s,;]+""",
     re.IGNORECASE,
 )
-_WHITESPACE = re.compile(r"[ \r\n\t]*")
 _DECODER = json.JSONDecoder()
 _Edit = tuple[int, int, str]
 
 
 def _sensitive_key(key: str) -> bool:
     return key.lower().replace("_", "").replace("-", "") in _SENSITIVE_KEYS
+
+
+def _url_field(key: str) -> bool:
+    return (
+        key.lower() in {"url", "uri", "href", "src", "link"}
+        or key.lower().endswith(("_url", "-url", "_uri", "-uri"))
+        or key.endswith(("Url", "URL", "Uri", "URI"))
+    )
+
+
+def _relative_url_edit(value: str) -> _Edit | None:
+    """Strip private components only from a value already identified as a URL."""
+    if value.lstrip().startswith("//") or _URI_SCHEME.match(value.lstrip()):
+        return None
+    delimiter = re.search(r"[?#]", value)
+    path = value[: delimiter.start()] if delimiter else value
+    if _ENCODED_URL_DELIMITER.search(path):
+        return 0, len(value), _MASK
+    return (delimiter.start(), len(value), "") if delimiter else None
 
 
 def _masked_slice(text: str, edits: Sequence[_Edit], left: int, right: int) -> str:
@@ -90,32 +117,50 @@ class BodyScrubber:
     def _json_edits(self, text: str, start: int, end: int) -> Iterator[_Edit]:
         """Walk validated JSON string tokens using original offsets, including duplicate keys."""
         cursor = start
+        url_value_at = -1
         while (opening := text.find('"', cursor, end)) >= 0:
-            value, stop = _DECODER.raw_decode(text, opening)
-            after = _WHITESPACE.match(text, stop)
-            assert after is not None
-            cursor = after.end()
-            if text[cursor : cursor + 1] == ":" and _sensitive_key(value):
-                before = _WHITESPACE.match(text, cursor + 1)
-                assert before is not None
-                _, cursor = _DECODER.raw_decode(text, before.end())
-                yield before.end(), cursor, json.dumps(_MASK)
-                continue
-            if text[opening + 1 : stop - 1] == value:
+            value, cursor = _DECODER.raw_decode(text, opening)
+            separator = _MEMBER_SEPARATOR.match(text, cursor)
+            if separator:
+                if _sensitive_key(value):
+                    _, cursor = _DECODER.raw_decode(text, separator.end())
+                    yield separator.end(), cursor, json.dumps(_MASK)
+                    continue
+                if _url_field(value):
+                    url_value_at = separator.end()
+
+            edits = self._edits(value)
+            if opening == url_value_at and (url_edit := _relative_url_edit(value)) is not None:
+                edits = self._merge([*edits, url_edit])
+            if text[opening + 1 : cursor - 1] == value:
                 # Unescaped string content shares exact source offsets with its JSON token.
-                for left, right, replacement in self._edits(value):
+                for left, right, replacement in edits:
                     yield (
                         opening + 1 + left,
                         opening + 1 + right,
                         json.dumps(replacement, ensure_ascii=False)[1:-1],
                     )
-                continue
-            safe = self.scrub(value)
-            if safe != value:
-                yield opening, stop, json.dumps(safe, ensure_ascii=False)
+            else:
+                safe = self.redact(_masked_slice(value, edits, 0, len(value)))
+                if safe != value:
+                    yield opening, cursor, json.dumps(safe, ensure_ascii=False)
 
     def _edits(self, text: str) -> list[_Edit]:
         edits = [(a, b, _MASK) for a, b in self.registered_spans(text)]
+        for attribute in _URL_ATTRIBUTE.finditer(text):
+            group = attribute.lastindex
+            assert group is not None
+            url = attribute[group]
+            decoded = unescape(url) if "&" in url else url
+            if decoded != url and any(char in decoded for char in "?#@"):
+                # Decoded separators have no reliable offsets in the raw attribute.
+                edits.append((*attribute.span(group), _MASK))
+                continue
+            edit = _relative_url_edit(url)
+            if edit is not None:
+                left, right, replacement = edit
+                offset = attribute.start(group)
+                edits.append((offset + left, offset + right, replacement))
         first = len(text) - len(text.lstrip())
         cursor = 0
         if text[first : first + 1] == '"':
@@ -127,9 +172,17 @@ class BodyScrubber:
                 if re.search(r'[\[{]|\\[utrnbf"/]', text):
                     raise
             else:
-                safe = self.scrub(decoded)
-                if decoded != safe:
-                    edits.append((first, cursor, json.dumps(safe, ensure_ascii=False)))
+                separator = _MEMBER_SEPARATOR.match(text, cursor)
+                if separator and _sensitive_key(decoded):
+                    start_value = separator.end()
+                    _, cursor = _DECODER.raw_decode(text, start_value)
+                    if cursor < len(text) and text[cursor] not in " \t\r\n,}]":
+                        raise ValueError("ambiguous credential boundary")
+                    edits.append((start_value, cursor, json.dumps(_MASK)))
+                else:
+                    safe = self.scrub(decoded)
+                    if decoded != safe:
+                        edits.append((first, cursor, json.dumps(safe, ensure_ascii=False)))
         # Match the earliest token. A plaintext credential can enclose JSON.
         while match := _TOKEN.search(text, cursor):
             start, cursor = match.span()

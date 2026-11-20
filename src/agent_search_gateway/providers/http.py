@@ -350,24 +350,30 @@ class HttpJsonExecutor:
                 content=prepared_body.content if prepared_body is not None else None,
                 timeout=self._retry_policy.request_timeout_seconds,
             )
-            if self._rate_gate is not None:
-                await self._wait_for_rate(self._rate_gate, stage, attempt)
-            if callable(headers):
-                request.headers.update(headers())
-            if prepared_body is not None:
-                request.headers["Content-Type"] = "application/json"
-            attempt_started = self._monotonic()
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "http_attempt_started",
-                provider=self._provider_name,
-                stage=stage,
-                endpoint=log_endpoint,
-                attempt=attempt,
-                exc_info=False,
-                **protocol_fields,
-            )
+
+            def start_attempt() -> None:
+                nonlocal attempt_started
+                if callable(headers):
+                    request.headers.update(headers())
+                if prepared_body is not None:
+                    request.headers["Content-Type"] = "application/json"
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "http_attempt_started",
+                    provider=self._provider_name,
+                    stage=stage,
+                    endpoint=log_endpoint,
+                    attempt=attempt,
+                    exc_info=False,
+                    **protocol_fields,
+                )
+                attempt_started = self._monotonic()
+
+            if self._rate_gate is None:
+                start_attempt()
+            else:
+                await self._wait_for_rate(self._rate_gate, stage, attempt, start_attempt)
             response = None
             try:
                 response = await self._client.send(request, follow_redirects=False)
@@ -526,7 +532,9 @@ class HttpJsonExecutor:
             raise self._status_failure(stage, response.status_code, response_fields)
         return response, attempt, attempt_started, response_fields
 
-    async def _wait_for_rate(self, gate: RateGate, stage: str, attempt: int) -> None:
+    async def _wait_for_rate(
+        self, gate: RateGate, stage: str, attempt: int, start_attempt: Callable[[], None]
+    ) -> None:
         context = {"provider": self._provider_name, "stage": stage, "attempt": attempt}
         initial = consume_initial_rate_budget(gate)
         timeout = (
@@ -545,8 +553,20 @@ class HttpJsonExecutor:
                 exc_info=False,
                 **context,
             )
+
+        def before_reserve(waited: float) -> None:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "rate_limit_acquired",
+                waited_ms=seconds_to_ms(previous_wait + waited),
+                exc_info=False,
+                **context,
+            )
+            start_attempt()
+
         try:
-            waited = await gate.permit(timeout_seconds=timeout)
+            await gate.permit(timeout_seconds=timeout, before_reserve=before_reserve)
         except RateLimitWaitTimeout as exc:
             reason = "rate_limit_wait_timeout"
             log_event(
@@ -563,14 +583,6 @@ class HttpJsonExecutor:
                 f"{self._provider_name}/{stage}: {reason}",
                 reason=reason,
             ) from exc
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            "rate_limit_acquired",
-            waited_ms=seconds_to_ms(previous_wait + waited),
-            exc_info=False,
-            **context,
-        )
 
     def _log_failed(
         self,

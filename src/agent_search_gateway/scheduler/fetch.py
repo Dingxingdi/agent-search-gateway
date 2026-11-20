@@ -109,10 +109,12 @@ class FetchScheduler:
             full: list[CapacityGate] = []
             for candidate in remaining:
                 gate = candidate.rate
-                delay = gate.next_available_in_seconds() if gate is not None else 0.0
-                if delay > 0:
-                    blocked.append((candidate, delay))
-                    continue
+                if gate is not None:
+                    observed = self._monotonic()
+                    delay = gate.next_available_in_seconds()
+                    if delay > 0:
+                        blocked.append((candidate, observed + delay))
+                        continue
                 capacity = self._quotas.get_web(candidate.provider.name)
                 lease = await capacity.try_lease()
                 if lease is not None:
@@ -133,7 +135,7 @@ class FetchScheduler:
                 "scheduler_waiting",
                 candidate_count=len(remaining),
             )
-            for candidate, delay in blocked:
+            for candidate, ready_at in blocked:
                 log_event(
                     self._logger,
                     logging.DEBUG,
@@ -141,7 +143,7 @@ class FetchScheduler:
                     provider=candidate.provider.name,
                     stage="fetch",
                     attempt=1,
-                    estimated_wait_ms=seconds_to_ms(delay),
+                    estimated_wait_ms=seconds_to_ms(ready_at - self._monotonic()),
                 )
             waiters: list[asyncio.Task[None]] = []
             try:
@@ -149,8 +151,10 @@ class FetchScheduler:
                     waiters.append(asyncio.create_task(capacity.wait_until_available()))
                 started = self._monotonic()
                 if blocked:
-                    earliest = min(min(delay, c.remaining_seconds) for c, delay in blocked)
-                    waiters.append(asyncio.create_task(self._wake_at(started + earliest)))
+                    earliest = min(
+                        min(ready_at, started + c.remaining_seconds) for c, ready_at in blocked
+                    )
+                    waiters.append(asyncio.create_task(self._wake_at(earliest)))
                 done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
                 woke = self._monotonic()
                 for waiter in done:

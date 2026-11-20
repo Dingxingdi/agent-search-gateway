@@ -202,6 +202,27 @@ async def _fetching(scheduler: FetchScheduler) -> AsyncIterator[asyncio.Task[Fet
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def test_fetch_wakes_at_observed_rate_opening_after_slow_logging(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    provider = _ControlledFetchProvider("limited")
+    quotas = ProviderQuotaManager(web_limits={"limited": 1}, llm_limits={})
+    await _blocked_gate(quotas, provider.name, clock, 0.375)
+
+    def slow_log(record: logging.LogRecord) -> None:
+        if getattr(record, "gateway_event", None) == "rate_limit_waiting":
+            clock.now += 0.25
+
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(caplog.handler, "emit", slow_log)
+    async with _fetching(_scheduler([provider], quotas, clock)) as task:
+        await _until(lambda: bool(clock.sleepers))
+        assert list(clock.sleepers.values()) == [0.375]
+        await clock.advance_to(0.375)
+        assert (await asyncio.wait_for(task, 1)).kind == "accepted"
+
+
 @pytest.mark.parametrize("wake_at", [0.5, 2.0])
 async def test_fetch_all_rate_blocked_expires_even_if_late_wakeup_finds_capacity(
     wake_at: float, caplog: pytest.LogCaptureFixture
