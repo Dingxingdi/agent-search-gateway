@@ -14,7 +14,12 @@ from urllib.parse import urlsplit, urlunsplit
 
 from . import body_preview
 from .errors import ConfigFailure, ErrorCode
-from .input_limits import PreparedInput, PreviewProjector
+from .input_limits import (
+    MAX_PREVIEW_SCAN_BYTES,
+    PreparedInput,
+    PreviewProjector,
+    PreviewScanBudgetExceeded,
+)
 from .request_ids import current_request_id
 
 LOG_MAX_BYTES = 5 * 1024 * 1024
@@ -421,12 +426,16 @@ def _preview_side(
     incomplete: bool = False,
 ) -> tuple[str | None, int, bool]:
     count = size if size is not None else len(source) if isinstance(source, bytes) else 0
+    if count > MAX_PREVIEW_SCAN_BYTES:
+        return None, count, True
     try:
         if scrubber is not None:
             raw = source() if callable(source) else source
             if raw:
                 if size is None:
                     count = len(raw)
+                if len(raw) > MAX_PREVIEW_SCAN_BYTES:
+                    return None, count, True
                 text = raw.decode("utf-8")
                 if _UNSAFE_PREVIEW_CONTROL.search(text):
                     return None, count, incomplete
@@ -442,6 +451,8 @@ def _preview_side(
                 if next(iter(scrubber.registered_spans(_render_string(value))), None) is not None:
                     return None, count, clipped or incomplete
                 return value, count, clipped or incomplete
+    except PreviewScanBudgetExceeded:
+        return None, count, True
     except Exception:
         pass
     return None, count, incomplete and count > 0
@@ -467,12 +478,14 @@ def log_upstream_body_preview(
         return
     try:
         scrubber = _active_scrubber(logger)
+        request_scan_exceeded = False
         if prepared_body is not None:
             if request_body_sent_bytes is None:
                 request_body_sent_bytes = len(prepared_body.content)
             request_body = prepared_body.content if not prepared_body.input_truncated else None
             if prepared_body.preview_body is not None:
                 request_body = prepared_body.preview_body.content
+                request_scan_exceeded = prepared_body.preview_body.scan_budget_exceeded
         request, sent, request_clipped = _preview_side(
             request_body, request_body_sent_bytes, scrubber
         )
@@ -503,7 +516,7 @@ def log_upstream_body_preview(
             request_body_sent_bytes=sent,
             request_body_original_bytes=prepared_body.original_bytes if prepared_body else sent,
             request_input_truncated=prepared_body.input_truncated if prepared_body else False,
-            request_preview_truncated=request_clipped,
+            request_preview_truncated=request_clipped or request_scan_exceeded,
             response_body_preview=response,
             response_body_bytes=count,
             response_preview_truncated=response_clipped,

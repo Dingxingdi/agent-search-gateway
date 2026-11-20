@@ -19,6 +19,7 @@ import pytest
 from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.config import ResolvedRatePolicy
 from agent_search_gateway.errors import ExecutionFailure
+from agent_search_gateway.input_limits import MAX_PREVIEW_SCAN_BYTES
 from agent_search_gateway.llm.prompts import judge_messages
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
 from agent_search_gateway.observability import KeyValueFormatter, SecretRedactor, SecretValue
@@ -152,6 +153,12 @@ def _probe(obs: _Observation, secrets: tuple[SecretValue, ...]) -> Iterator[None
     original_bytes = int(original_match[1]) if original_match else 0
     sent_bytes = int(sent_match[1]) if sent_match else 0
     clipped = " request_input_truncated=true" in preview
+    response_match = re.search(r"\bresponse_body_bytes=(\d+)\b", preview)
+    response_budget_omitted = (
+        response_match is not None
+        and int(response_match[1]) > MAX_PREVIEW_SCAN_BYTES
+        and " response_preview_truncated=true" in preview
+    )
     time_valid = bool(lines) and all(_TIME.match(line) for line in lines)
     diagnostic_count = sum(" event=agent_process_diagnostic " in line for line in lines)
     redacted = all(secret.reveal() not in output for secret in secrets)
@@ -168,7 +175,7 @@ def _probe(obs: _Observation, secrets: tuple[SecretValue, ...]) -> Iterator[None
         and len(previews) == 1
         and "request_body_preview=" in preview
         and "response_body_preview=" in preview
-        and "response_body_preview=null" not in preview
+        and ("response_body_preview=null" not in preview or response_budget_omitted)
         and time_valid
         and redacted
         and size_ok

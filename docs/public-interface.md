@@ -122,6 +122,8 @@ Upstream error metadata is redacted and sanitized. Code/status/type fields are l
 
 Ordinary mode emits no body previews. With opt-in `start --debug`, each actual HTTP send and each attempted Agent spawn produces one `upstream_body_preview` event. It pairs the prepared request with the HTTP response body or captured Agent stdout. An absent response has a null preview. Preflight failures and rate waits that never reach send or spawn produce no preview. For each side, both the redacted preview text and its final JSON-escaped field value fit within 8192 UTF-8 bytes, including any omission marker. `request_input_truncated` records shortening of the outbound input. `request_preview_truncated` and `response_preview_truncated` record incomplete log previews. Events exclude header contents, raw stderr, environment values, full argv, credential values and discarded input middles.
 
+Preview preparation inspects at most 262144 UTF-8 bytes in each raw body or individual text being redacted, including original text used by input-truncation previews. When this work limit is exceeded, the affected preview is null and its `request_preview_truncated` or `response_preview_truncated` flag is true. The event retains the actual byte counts, and request processing continues with its normal result.
+
 DEBUG output can contain private text and URL paths. Review it before sharing. The opt-in `debug.log` rotates at 5 MiB with 3 backups. Business-command stdout and public result and error schemas retain their documented contracts.
 
 ## Internal interfaces

@@ -102,6 +102,7 @@ def test_repeated_pem_headers_scan_footer_text_once(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(body_preview, "_PRIVATE_KEY_FOOTER", CountingFooters())
     lines = ["-----BEGIN RSA PRIVATE KEY-----"] * 128 + [_FIXTURE, "-----END RSA PRIVATE KEY-----"]
+    lines.extend([lines[-1]] * 127)
     text = 'HEAD token="' + "\n".join(lines) + '", TAIL'
     fields, output = _response_fields(text)
     assert 0 < scanned <= len(text)
@@ -110,7 +111,11 @@ def test_repeated_pem_headers_scan_footer_text_once(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.parametrize("inner_closes", [True, False])
-def test_overlapping_pem_labels_mask_through_the_last_matching_footer(inner_closes: bool) -> None:
+@pytest.mark.parametrize("same_label", [False, True])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_overlapping_pem_labels_mask_through_the_last_matching_footer(
+    inner_closes: bool, same_label: bool, as_json: bool
+) -> None:
     lines = [
         'HEAD token="-----BEGIN RSA PRIVATE KEY-----',
         '"',
@@ -121,10 +126,17 @@ def test_overlapping_pem_labels_mask_through_the_last_matching_footer(inner_clos
     if inner_closes:
         lines.append("-----END EC PRIVATE KEY-----")
     lines.append("TAIL")
-    fields, output = _response_fields("\n".join(lines))
+    body = "\n".join(lines)
+    if same_label:
+        body = body.replace("EC PRIVATE KEY", "RSA PRIVATE KEY")
+    if as_json:
+        body = json.dumps({"snippet": body, "note": "SAFE_SIBLING"})
+    fields, output = _response_fields(body)
     for observed in (repr(fields), output):
         assert _FIXTURE not in observed and "HEAD" in observed
         assert ("TAIL" in observed) == inner_closes
+        if as_json:
+            assert "SAFE_SIBLING" in observed
 
 
 def test_pem_footer_inside_a_line_does_not_expose_the_remaining_value() -> None:

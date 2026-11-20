@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from html import unescape
 
 from .input_limits import (
+    MAX_PREVIEW_SCAN_BYTES,
     TRUNCATION_MARKER,
     BodySelection,
+    PreviewScanBudgetExceeded,
     TruncatableMessage,
     truncate_utf8_head_tail,
 )
@@ -72,6 +74,17 @@ _TOKEN = re.compile(
 )
 _DECODER = json.JSONDecoder()
 _Edit = tuple[int, int, str]
+
+
+def _check_scan_budget(*parts: str) -> None:
+    chars = sum(map(len, parts))
+    if chars <= MAX_PREVIEW_SCAN_BYTES // 4:
+        return
+    if chars > MAX_PREVIEW_SCAN_BYTES:
+        raise PreviewScanBudgetExceeded
+    size = sum(len(part) if part.isascii() else len(part.encode("utf-8")) for part in parts)
+    if size > MAX_PREVIEW_SCAN_BYTES:
+        raise PreviewScanBudgetExceeded
 
 
 def _private_key_footer_ends(text: str, start: int) -> dict[str, deque[int]]:
@@ -165,6 +178,7 @@ class BodyScrubber:
                     yield opening, cursor, json.dumps(safe, ensure_ascii=False)
 
     def _edits(self, text: str) -> list[_Edit]:
+        _check_scan_budget(text)
         edits = [(a, b, _MASK) for a, b in self.registered_spans(text)]
         for attribute in _URL_ATTRIBUTE.finditer(text):
             group = attribute.lastindex
@@ -243,7 +257,7 @@ class BodyScrubber:
                         if not ends:
                             cursor = len(text)
                             break
-                        cursor = max(cursor, ends[0])
+                        cursor = max(cursor, ends.popleft())
                     marker = _PEM_START.search(text, marker.end(), cursor)
             if replacement != text[start:cursor]:
                 edits.append((start, cursor, replacement))
@@ -279,8 +293,12 @@ class BodyScrubber:
             if isinstance(source, TruncatableMessage):
                 cut = cuts.get(index)
                 prefix = len(source.protected_prefix)
-                full = source["content"]
+                if prefix or source.protected_suffix:
+                    _check_scan_budget(
+                        source.protected_prefix, source.body, source.protected_suffix
+                    )
                 body_edits = self._edits(source.body)
+                full = source["content"]
                 if prefix or source.protected_suffix:
                     # A protected label can introduce a body credential. Keep both the
                     # standalone body's structure and spans from its surrounding context.

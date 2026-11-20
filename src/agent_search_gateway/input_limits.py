@@ -5,8 +5,13 @@ from dataclasses import dataclass, field
 
 from .providers.contracts import ChatMessage
 
+MAX_PREVIEW_SCAN_BYTES = 256 * 1024
 TRUNCATION_MARKER = "[... truncated ...]"
 _MARKER_BYTES = len(TRUNCATION_MARKER.encode())
+
+
+class PreviewScanBudgetExceeded(ValueError):
+    """The complete source is too large to safely prepare a debug preview."""
 
 
 class InputBudgetUnfit(ValueError):
@@ -36,6 +41,7 @@ class BodySelection:
 @dataclass(frozen=True, slots=True)
 class PreparedPreview:
     content: bytes | None = field(repr=False)
+    scan_budget_exceeded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,9 +195,12 @@ def fit_messages_to_budget(
     preview = None
     if preview_projector is not None:
         try:
+            if len(original) > MAX_PREVIEW_SCAN_BYTES:
+                raise PreviewScanBudgetExceeded
             projected = preview_projector(messages, candidate, selections)
-            preview_content = None if projected is None else encode(projected)
+            preview = PreparedPreview(None if projected is None else encode(projected))
+        except PreviewScanBudgetExceeded:
+            preview = PreparedPreview(None, scan_budget_exceeded=True)
         except Exception:
-            preview_content = None
-        preview = PreparedPreview(preview_content)
+            preview = PreparedPreview(None)
     return PreparedInput(content, len(original), bool(selections), preview)
