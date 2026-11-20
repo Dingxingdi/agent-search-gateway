@@ -48,6 +48,13 @@ _JSON_START = re.compile(
     r'\{\s*(?=["}])|\[(?!(?:\d{4}-\d{2}-\d{2}|\s*\d+\s*[-–—]\s*\d+\s*)\])'
     r'\s*(?=[\[{"\]\d-]|true\b|false\b|null\b)'
 )
+_NUMERIC_BRACKETS = re.compile(
+    r"\[(?:[0-9]++(?:, ?[0-9]++)*+,? and [0-9]++|(?P<title>[0-9]++(?: [A-Za-z0-9]++)++))\]"
+)
+_MARKDOWN_DESTINATION = re.compile(r"([A-Za-z0-9._~:/?#@!&*+$,;=%-]++)\)")
+_UNPARSED_QUOTE_OR_ESCAPE = re.compile(r"""["'\\]""")
+_MAX_BRACKET_CHARS = 128
+_MAX_DESTINATION_CHARS = 2048
 _ENCODED_URL_DELIMITER = re.compile(r"%(?:23|3f|40|25)", re.IGNORECASE)
 _URL_ATTRIBUTE = re.compile(
     r"""(?<![\w:-])(?:href|src|action|formaction|poster|cite)\s*=\s*"""
@@ -140,13 +147,23 @@ def _masked_slice(text: str, edits: Sequence[_Edit], left: int, right: int) -> s
     return "".join(parts)
 
 
+@dataclass(slots=True)
+class _ProseScan:
+    numeric_seen: bool = False
+    ambiguous_gap: bool = False
+
+    def check_gap(self, text: str, start: int, end: int) -> None:
+        if not self.ambiguous_gap and _UNPARSED_QUOTE_OR_ESCAPE.search(text, start, end):
+            self.ambiguous_gap = True
+
+
 @dataclass(frozen=True)
 class BodyScrubber:
     redact: Callable[[str], str]
     registered_spans: Callable[[str], Iterable[tuple[int, int]]]
     safe_url: Callable[[str], str]
 
-    def _json_edits(self, text: str, start: int, end: int) -> Iterator[_Edit]:
+    def _json_edits(self, text: str, start: int, end: int, scan: _ProseScan) -> Iterator[_Edit]:
         """Walk validated JSON string tokens using original offsets, including duplicate keys."""
         cursor = start
         url_value_at = -1
@@ -161,7 +178,7 @@ class BodyScrubber:
                 if _url_field(value):
                     url_value_at = separator.end()
 
-            edits = self._edits(value)
+            edits = self._collect_edits(value, scan)
             if opening == url_value_at and (url_edit := _relative_url_edit(value)) is not None:
                 edits = self._merge([*edits, url_edit])
             if text[opening + 1 : cursor - 1] == value:
@@ -177,7 +194,46 @@ class BodyScrubber:
                 if safe != value:
                     yield opening, cursor, json.dumps(safe, ensure_ascii=False)
 
+    def _numeric_prose_end(
+        self, text: str, start: int, edits: list[_Edit], scan: _ProseScan
+    ) -> int | None:
+        if text[start] != "[" or text[start - 1 : start] == "\\":
+            return None
+        fragment = _NUMERIC_BRACKETS.match(text, start, start + _MAX_BRACKET_CHARS)
+        if fragment is None:
+            return None
+        if not text.startswith("(", fragment.end()):
+            return fragment.end() if fragment["title"] is None else None
+
+        offset = fragment.end() + 1
+        target = _MARKDOWN_DESTINATION.match(text, offset, offset + _MAX_DESTINATION_CHARS + 1)
+        if target is None:
+            raise ValueError("ambiguous Markdown destination")
+
+        if title := fragment["title"]:
+            for left, right, replacement in self._collect_edits(title, scan):
+                edits.append((start + 1 + left, start + 1 + right, replacement))
+        url = target[1]
+        if ("&" in url and unescape(url) != url) or (
+            _URI_SCHEME.match(url) and not url.lower().startswith(("http://", "https://"))
+        ):
+            edits.append((offset, target.end(1), _MASK))
+        else:
+            url_edits = self._collect_edits(url, scan)
+            if relative := _relative_url_edit(url):
+                url_edits.append(relative)
+            for left, right, replacement in url_edits:
+                edits.append((offset + left, offset + right, replacement))
+        return target.end()
+
     def _edits(self, text: str) -> list[_Edit]:
+        scan = _ProseScan()
+        edits = self._collect_edits(text, scan)
+        if scan.numeric_seen and scan.ambiguous_gap:
+            raise ValueError("ambiguous quoted or escaped text beside numeric prose")
+        return edits
+
+    def _collect_edits(self, text: str, scan: _ProseScan) -> list[_Edit]:
         _check_scan_budget(text)
         edits = [(a, b, _MASK) for a, b in self.registered_spans(text)]
         for attribute in _URL_ATTRIBUTE.finditer(text):
@@ -217,16 +273,25 @@ class BodyScrubber:
                             raise ValueError("ambiguous credential boundary")
                         edits.append((start_value, cursor, json.dumps(_MASK)))
                 else:
-                    safe = self.scrub(decoded)
+                    decoded_edits = self._collect_edits(decoded, scan)
+                    safe = self.redact(_masked_slice(decoded, decoded_edits, 0, len(decoded)))
                     if decoded != safe:
                         edits.append((first, cursor, json.dumps(safe, ensure_ascii=False)))
         footer_ends: dict[str, deque[int]] | None = None
         # Match the earliest token. A plaintext credential can enclose JSON.
         while match := _TOKEN.search(text, cursor):
+            # Inspect each gap once. Complete JSON and recognized credential values are
+            # consumed by their own handlers and are outside these ranges.
+            scan.check_gap(text, cursor, match.start())
             start, cursor = match.span()
             if match["json"]:
+                prose_end = self._numeric_prose_end(text, start, edits, scan)
+                if prose_end is not None:
+                    scan.numeric_seen = True
+                    cursor = prose_end
+                    continue
                 _, cursor = _DECODER.raw_decode(text, start)
-                edits.extend(self._json_edits(text, start, cursor))
+                edits.extend(self._json_edits(text, start, cursor, scan))
                 continue
             url = match["url"]
             replacement = _MASK
@@ -262,6 +327,7 @@ class BodyScrubber:
             if replacement != text[start:cursor]:
                 edits.append((start, cursor, replacement))
 
+        scan.check_gap(text, cursor, len(text))
         return self._merge(edits)
 
     def _merge(self, edits: list[_Edit]) -> list[_Edit]:
