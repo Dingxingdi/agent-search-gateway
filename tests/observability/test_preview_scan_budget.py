@@ -22,6 +22,20 @@ from tests.support.logging import structured_test_logger
 BUDGET = 256 * 1024
 
 
+@pytest.mark.parametrize("label", ["PRIVATE KEY", "RSA PRIVATE KEY", "4X-TEST PRIVATE KEY"])
+def test_incomplete_begin_markers_do_not_become_label_words(label: str) -> None:
+    from agent_search_gateway import body_preview
+
+    prefix = "-----BEGIN " * 3
+    text = prefix + f"-----BEGIN {label}-----"
+    assert body_preview._PRIVATE_KEY_HEADER.match(text) is None
+    for pattern in (body_preview._PRIVATE_KEY_HEADER, body_preview._TOKEN):
+        marker = pattern.search(text)
+        assert marker is not None
+        assert marker.span() == (len(prefix), len(text))
+        assert marker["label"] == label
+
+
 def _record(
     logger: logging.Logger,
     *,

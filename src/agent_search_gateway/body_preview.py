@@ -57,7 +57,7 @@ _URL_ATTRIBUTE = re.compile(
 _URI_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _MEMBER_SEPARATOR = re.compile(r"[ \r\n\t]*:[ \r\n\t]*")
 _PEM_START = re.compile(r"-----BEGIN")
-_PRIVATE_KEY_LABEL = r"(?P<label>(?:[A-Z0-9-]+ )*PRIVATE KEY)"
+_PRIVATE_KEY_LABEL = r"(?P<label>(?:[A-Z0-9][A-Z0-9-]* )*PRIVATE KEY)"
 _PRIVATE_KEY_HEADER = re.compile(rf"(?-i:-----BEGIN {_PRIVATE_KEY_LABEL}-----)")
 _PRIVATE_KEY_FOOTER = re.compile(
     rf"(?<![^\r\n])[ \t]*-----END {_PRIVATE_KEY_LABEL}-----"
