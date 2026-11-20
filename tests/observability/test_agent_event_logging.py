@@ -488,8 +488,7 @@ async def test_agent_interrupted_process_diagnostics_use_only_observed_facts(
     [preview] = [
         line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
     ]
-    captured_bytes = 8 if case == "output_limit" else len(stdout)
-    assert f"response_body_bytes={captured_bytes}" in preview
+    assert f"response_body_bytes={len(stdout)}" in preview
     assert "response_preview_truncated=true" in preview
     assert "response_body_preview=null" in preview
     assert "SENTINEL" not in stream.getvalue() + repr(caught.value.diagnostics)

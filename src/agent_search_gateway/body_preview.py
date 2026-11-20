@@ -31,6 +31,9 @@ _SENSITIVE_KEYS = frozenset(
         "refreshtoken",
         "apikey",
         "xapikey",
+        "privatekey",
+        "credentials",
+        "jwt",
         "password",
         "secret",
         "accesssecret",
@@ -54,7 +57,7 @@ _TOKEN = re.compile(
     rf"(?P<json>{_JSON_START.pattern})"
     r"""|(?P<url>(?:https?(?::|%3a)|(?<![\w/%\\]))(?:/|\\+/|%2f){2}[^\s<>"]+)"""
     r"""|\b(?:authorization|proxy[-_]authorization|cookie|set[-_]cookie)["']?\s*[:=][^\r\n]*"""
-    r"""|\b(?:x[-_])?(?:api[-_]?key|access[-_]?(?:token|secret)|(?:auth|refresh|id|session)[-_]?token|client[-_]?secret|token|key|password|secret|signature)"""
+    r"""|\b(?:x[-_])?(?:(?:api|private)[-_]?key|access[-_]?(?:token|secret)|(?:auth|refresh|id|session)[-_]?token|client[-_]?secret|credentials|jwt|token|key|password|secret|signature)"""
     r"""["']?\s*[:=]\s*(?:(?P<structured>[\[{])|"(?:\\[\s\S]|[^"\\])*(?:"|\\?\Z)|'(?:\\[\s\S]|[^'\\])*(?:'|\\?\Z)|[^"'\s,;]+)"""
     r"""|\b(?:bearer|basic|key)[ \t]+[^\s,;]+""",
     re.IGNORECASE,

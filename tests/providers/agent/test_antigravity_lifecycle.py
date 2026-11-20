@@ -182,6 +182,40 @@ async def test_agent_timeout_previews_captured_stdout_after_cleanup(
         session.close()
 
 
+async def test_stdout_limit_preview_counts_all_observed_bytes_but_only_shows_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = b'{"status":"SUCCESS","response":"captured text"}'
+    output = captured + b"outside capture"
+    monkeypatch.setattr(adapter, "_STDOUT_LIMIT_BYTES", len(captured))
+    command = write_fake_cli(tmp_path, f"sys.stdout.buffer.write({output!r})")
+    stream = StringIO()
+    session = configure_debug_logging(tmp_path / "stdout.log", stderr=stream)
+    try:
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.run_antigravity(
+                None,
+                [],
+                provider_name="agy",
+                command=str(command),
+                timeout_seconds=2,
+                pass_env=(),
+                quota=CapacityGate(1),
+            )
+    finally:
+        session.close()
+    assert caught.value.reason == "output_limit"
+    observed = caught.value.diagnostics["stdout_bytes"]
+    assert observed == len(output)
+    [preview] = [
+        line for line in stream.getvalue().splitlines() if "event=upstream_body_preview" in line
+    ]
+    assert f"response_body_bytes={observed} " in preview
+    assert "captured text" in preview
+    assert "outside capture" not in preview
+    assert "response_preview_truncated=true" in preview
+
+
 async def test_agent_stdout_arriving_during_cleanup_stays_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

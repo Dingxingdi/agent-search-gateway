@@ -479,6 +479,6 @@ async def run_antigravity(
                                 transport="agent_cli",
                                 prepared_body=prepared,
                                 response_body=lambda: bytes(stdout_capture),
-                                response_body_bytes=len(stdout_capture),
+                                response_body_bytes=stdout_count.observed,
                                 response_incomplete=stdout_incomplete,
                             )

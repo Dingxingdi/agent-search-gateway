@@ -31,13 +31,25 @@ def _response_fields(body: str) -> tuple[dict[str, object], str]:
     return fields, stream.getvalue()
 
 
-@pytest.mark.parametrize("field", ["authToken", "AUTH-TOKEN", "auth_token"])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "authToken",
+        "AUTH-TOKEN",
+        "auth_token",
+        "private_key",
+        "privateKey",
+        "PRIVATE-KEY",
+        "credentials",
+        "jwt",
+    ],
+)
 @pytest.mark.parametrize("context", ["json", "quoted_text"])
-def test_auth_token_field_is_redacted_before_logging(field: str, context: str) -> None:
+def test_credential_field_is_redacted_before_logging(field: str, context: str) -> None:
     if context == "json":
-        body = json.dumps({field: {"nested": _FIXTURE}, "note": "VISIBLE"})
+        body = json.dumps({field: {"nested": _FIXTURE}, "publicKey": "VISIBLE"})
     else:
-        body = f'Details: "{field}": "{_FIXTURE}", note: VISIBLE'
+        body = f'Details: "{field}": "{_FIXTURE}", publicKey: VISIBLE'
     fields, output = _response_fields(body)
     for observed in (repr(fields), output):
         assert _FIXTURE not in observed
