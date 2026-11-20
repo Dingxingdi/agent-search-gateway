@@ -2,6 +2,7 @@
 
 import json
 import re
+from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from html import unescape
@@ -73,11 +74,11 @@ _DECODER = json.JSONDecoder()
 _Edit = tuple[int, int, str]
 
 
-def _private_key_end(text: str, header: re.Match[str]) -> int:
-    for footer in _PRIVATE_KEY_FOOTER.finditer(text, header.end()):
-        if footer["label"] == header["label"]:
-            return footer.end()
-    return len(text)
+def _private_key_footer_ends(text: str, start: int) -> dict[str, deque[int]]:
+    ends: dict[str, deque[int]] = {}
+    for footer in _PRIVATE_KEY_FOOTER.finditer(text, start):
+        ends.setdefault(footer["label"], deque()).append(footer.end())
+    return ends
 
 
 def _sensitive_key(key: str) -> bool:
@@ -193,17 +194,19 @@ class BodyScrubber:
                 separator = _MEMBER_SEPARATOR.match(text, cursor)
                 if separator and _sensitive_key(decoded):
                     start_value = separator.end()
-                    if header := _PRIVATE_KEY_HEADER.match(text, start_value):
-                        cursor = _private_key_end(text, header)
+                    if _PRIVATE_KEY_HEADER.match(text, start_value):
+                        # The plaintext scanner below handles the entire PEM span.
+                        cursor = start_value
                     else:
                         _, cursor = _DECODER.raw_decode(text, start_value)
-                    if cursor < len(text) and text[cursor] not in " \t\r\n,}]":
-                        raise ValueError("ambiguous credential boundary")
-                    edits.append((start_value, cursor, json.dumps(_MASK)))
+                        if cursor < len(text) and text[cursor] not in " \t\r\n,}]":
+                            raise ValueError("ambiguous credential boundary")
+                        edits.append((start_value, cursor, json.dumps(_MASK)))
                 else:
                     safe = self.scrub(decoded)
                     if decoded != safe:
                         edits.append((first, cursor, json.dumps(safe, ensure_ascii=False)))
+        footer_ends: dict[str, deque[int]] | None = None
         # Match the earliest token. A plaintext credential can enclose JSON.
         while match := _TOKEN.search(text, cursor):
             start, cursor = match.span()
@@ -227,13 +230,21 @@ class BodyScrubber:
                         replacement = self.safe_url(url)
             if not match["structured"]:
                 # A credential or URL token can consume the first word of the PEM header.
-                for marker in _PEM_START.finditer(text, start, cursor):
+                marker = _PEM_START.search(text, start, cursor)
+                while marker:
                     if header := _PRIVATE_KEY_HEADER.match(text, marker.start()):
                         replacement = _MASK
-                        end = _private_key_end(text, header)
-                        if end >= cursor:
-                            cursor = end
+                        if footer_ends is None:
+                            footer_ends = _private_key_footer_ends(text, header.end())
+                        ends = footer_ends.get(header["label"])
+                        # Headers are visited in source order, even when a block extends the token.
+                        while ends and ends[0] <= header.end():
+                            ends.popleft()
+                        if not ends:
+                            cursor = len(text)
                             break
+                        cursor = max(cursor, ends[0])
+                    marker = _PEM_START.search(text, marker.end(), cursor)
             if replacement != text[start:cursor]:
                 edits.append((start, cursor, replacement))
 

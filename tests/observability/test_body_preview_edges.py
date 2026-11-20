@@ -82,6 +82,51 @@ def test_unquoted_pem_private_key_preserves_adjacent_fields(label: str, wrapped:
         assert "VISIBLE" in observed and "<redacted>" in observed
 
 
+def test_repeated_pem_headers_scan_footer_text_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    import re
+    from collections.abc import Iterator
+
+    from agent_search_gateway import body_preview
+
+    footer_pattern = body_preview._PRIVATE_KEY_FOOTER
+    scanned = 0
+
+    class CountingFooters:
+        def finditer(self, text: str, start: int = 0) -> Iterator[re.Match[str]]:
+            nonlocal scanned
+            for footer in footer_pattern.finditer(text, start):
+                scanned += footer.end() - start
+                start = footer.end()
+                yield footer
+            scanned += len(text) - start
+
+    monkeypatch.setattr(body_preview, "_PRIVATE_KEY_FOOTER", CountingFooters())
+    lines = ["-----BEGIN RSA PRIVATE KEY-----"] * 128 + [_FIXTURE, "-----END RSA PRIVATE KEY-----"]
+    text = 'HEAD token="' + "\n".join(lines) + '", TAIL'
+    fields, output = _response_fields(text)
+    assert 0 < scanned <= len(text)
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "HEAD" in observed and "TAIL" in observed
+
+
+@pytest.mark.parametrize("inner_closes", [True, False])
+def test_overlapping_pem_labels_mask_through_the_last_matching_footer(inner_closes: bool) -> None:
+    lines = [
+        'HEAD token="-----BEGIN RSA PRIVATE KEY-----',
+        '"',
+        "-----BEGIN EC PRIVATE KEY-----",
+        "-----END RSA PRIVATE KEY-----",
+        _FIXTURE,
+    ]
+    if inner_closes:
+        lines.append("-----END EC PRIVATE KEY-----")
+    lines.append("TAIL")
+    fields, output = _response_fields("\n".join(lines))
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "HEAD" in observed
+        assert ("TAIL" in observed) == inner_closes
+
+
 def test_pem_footer_inside_a_line_does_not_expose_the_remaining_value() -> None:
     lines = [
         "private_key: -----BEGIN RSA PRIVATE KEY-----",
