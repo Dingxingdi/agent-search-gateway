@@ -56,6 +56,106 @@ def test_credential_field_is_redacted_before_logging(field: str, context: str) -
         assert "VISIBLE" in observed and "<redacted>" in observed
 
 
+@pytest.mark.parametrize(
+    "label",
+    [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+    ],
+)
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_unquoted_pem_private_key_preserves_adjacent_fields(label: str, wrapped: bool) -> None:
+    snippet = "\n".join(
+        [
+            f"private_key: -----BEGIN {label}-----",
+            _FIXTURE,
+            f"-----END {label}-----",
+            "note: VISIBLE",
+        ]
+    )
+    fields, output = _response_fields(json.dumps({"snippet": snippet}) if wrapped else snippet)
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "-----END" not in observed
+        assert "VISIBLE" in observed and "<redacted>" in observed
+
+
+def test_pem_footer_inside_a_line_does_not_expose_the_remaining_value() -> None:
+    lines = [
+        "private_key: -----BEGIN RSA PRIVATE KEY-----",
+        "prefix-----END RSA PRIVATE KEY-----suffix",
+        "-----END RSA PRIVATE KEY-----suffix",
+        "-----END RSA PRIVATE KEY----- is a diagnostic example",
+        _FIXTURE,
+        "-----END RSA PRIVATE KEY-----  \t",
+        "note: VISIBLE",
+    ]
+    fields, output = _response_fields("\r\n".join(lines))
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "VISIBLE" in observed
+
+
+def test_quote_inside_pem_metadata_does_not_end_the_redaction() -> None:
+    lines = [
+        'private_key="-----BEGIN RSA PRIVATE KEY-----',
+        'Comment: "example"',
+        _FIXTURE,
+        '-----END RSA PRIVATE KEY-----"',
+        "note: VISIBLE",
+    ]
+    fields, output = _response_fields("\n".join(lines))
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "VISIBLE" in observed
+
+
+@pytest.mark.parametrize("prefix", ["", "Authorization: ", "token="])
+def test_two_unquoted_pem_blocks_are_masked_even_inside_a_header(prefix: str) -> None:
+    lines = [
+        prefix + "-----BEGIN PRIVATE KEY-----",
+        _FIXTURE,
+        "-----END PRIVATE KEY-----",
+        "VISIBLE",
+        "-----BEGIN EC PRIVATE KEY-----",
+        "SYNTHETIC_SECOND",
+        "-----END EC PRIVATE KEY-----",
+    ]
+    fields, output = _response_fields("\n".join(lines))
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "SYNTHETIC_SECOND" not in observed
+        assert "VISIBLE" in observed
+
+
+@pytest.mark.parametrize("end_label", [None, "EC PRIVATE KEY"])
+def test_unquoted_pem_private_key_with_no_matching_footer_masks_to_end(
+    end_label: str | None,
+) -> None:
+    lines = ["VISIBLE private_key: -----BEGIN RSA PRIVATE KEY-----", _FIXTURE]
+    if end_label is not None:
+        lines.append(f"-----END {end_label}-----")
+    lines.append("SYNTHETIC_CONTINUATION")
+    fields, output = _response_fields("\n".join(lines))
+    for observed in (repr(fields), output):
+        assert "VISIBLE" in observed
+        assert _FIXTURE not in observed and "SYNTHETIC_CONTINUATION" not in observed
+
+
+def test_quoted_member_name_with_unquoted_pem_uses_only_the_matching_footer() -> None:
+    lines = [
+        '"private_key": -----BEGIN RSA PRIVATE KEY-----',
+        _FIXTURE,
+        "-----END EC PRIVATE KEY-----",
+        "SYNTHETIC_CONTINUATION",
+        "-----END RSA PRIVATE KEY-----",
+        "note: VISIBLE",
+    ]
+    fields, output = _response_fields("\n".join(lines))
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed and "SYNTHETIC_CONTINUATION" not in observed
+        assert "VISIBLE" in observed and "<redacted>" in observed
+
+
 @pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
 def test_escaped_separator_created_by_redaction_stays_single_line(separator: str) -> None:
     body = json.dumps({"note": f"HEAD{separator}password={_FIXTURE} TAIL"})

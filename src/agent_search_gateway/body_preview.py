@@ -53,8 +53,15 @@ _URL_ATTRIBUTE = re.compile(
 )
 _URI_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _MEMBER_SEPARATOR = re.compile(r"[ \r\n\t]*:[ \r\n\t]*")
+_PEM_START = re.compile(r"-----BEGIN")
+_PRIVATE_KEY_LABEL = r"(?P<label>(?:[A-Z0-9-]+ )*PRIVATE KEY)"
+_PRIVATE_KEY_HEADER = re.compile(rf"(?-i:-----BEGIN {_PRIVATE_KEY_LABEL}-----)")
+_PRIVATE_KEY_FOOTER = re.compile(
+    rf"(?<![^\r\n])[ \t]*-----END {_PRIVATE_KEY_LABEL}-----"
+    r"""(?=[ \t]*(?:\r|\n|\Z|["'][ \t]*(?:[,;]|\r|\n|\Z)))"""
+)
 _TOKEN = re.compile(
-    rf"(?P<json>{_JSON_START.pattern})"
+    rf"(?P<json>{_JSON_START.pattern})|{_PRIVATE_KEY_HEADER.pattern}"
     r"""|(?P<url>(?:https?(?::|%3a)|(?<![\w/%\\]))(?:/|\\+/|%2f){2}[^\s<>"]+)"""
     r"""|\b(?:authorization|proxy[-_]authorization|cookie|set[-_]cookie)["']?\s*[:=][^\r\n]*"""
     r"""|\b(?:x[-_])?(?:(?:api|private)[-_]?key|access[-_]?(?:token|secret)|(?:auth|refresh|id|session)[-_]?token|client[-_]?secret|credentials|jwt|token|key|password|secret|signature)"""
@@ -64,6 +71,13 @@ _TOKEN = re.compile(
 )
 _DECODER = json.JSONDecoder()
 _Edit = tuple[int, int, str]
+
+
+def _private_key_end(text: str, header: re.Match[str]) -> int:
+    for footer in _PRIVATE_KEY_FOOTER.finditer(text, header.end()):
+        if footer["label"] == header["label"]:
+            return footer.end()
+    return len(text)
 
 
 def _sensitive_key(key: str) -> bool:
@@ -179,7 +193,10 @@ class BodyScrubber:
                 separator = _MEMBER_SEPARATOR.match(text, cursor)
                 if separator and _sensitive_key(decoded):
                     start_value = separator.end()
-                    _, cursor = _DECODER.raw_decode(text, start_value)
+                    if header := _PRIVATE_KEY_HEADER.match(text, start_value):
+                        cursor = _private_key_end(text, header)
+                    else:
+                        _, cursor = _DECODER.raw_decode(text, start_value)
                     if cursor < len(text) and text[cursor] not in " \t\r\n,}]":
                         raise ValueError("ambiguous credential boundary")
                     edits.append((start_value, cursor, json.dumps(_MASK)))
@@ -208,6 +225,15 @@ class BodyScrubber:
                         replacement = self.safe_url("https:" + url).removeprefix("https:")
                     else:
                         replacement = self.safe_url(url)
+            if not match["structured"]:
+                # A credential or URL token can consume the first word of the PEM header.
+                for marker in _PEM_START.finditer(text, start, cursor):
+                    if header := _PRIVATE_KEY_HEADER.match(text, marker.start()):
+                        replacement = _MASK
+                        end = _private_key_end(text, header)
+                        if end >= cursor:
+                            cursor = end
+                            break
             if replacement != text[start:cursor]:
                 edits.append((start, cursor, replacement))
 
