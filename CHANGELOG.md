@@ -2,11 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Because the project is pre-1.0, minor releases may contain breaking changes when they are called out in the release notes.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Starting with 1.0.0, breaking changes to documented public interfaces require a major release.
 
 The first public release is `v0.1.0`.
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-11-20
 
 ### Added
 
@@ -17,6 +19,11 @@ The first public release is `v0.1.0`.
 
 - **Breaking configuration change for enabled OpenAlex.** Add `api_key_env` to the existing table, set it to the name of a daemon environment variable such as `OPENALEX_API_KEY`, supply the credential, and restart. To skip OpenAlex, disable it. The gateway sends Bearer credentials with no anonymous fallback. Contact email remains optional.
 - Log records include UTC timestamps with milliseconds. Opt-in DEBUG tracing adds one bounded, redacted request/response preview per HTTP send or Agent spawn attempt, including retries and failed calls. Previews can contain private text. Ordinary runs emit no body previews.
+- Apply semantic-versioning compatibility guarantees to the documented public interfaces from 1.0.0. Internal Python modules and the local socket protocol remain implementation details.
+
+### Security
+
+- Bound DEBUG preview inspection and redact credential fields, private-key blocks, and sensitive URL components before rendering. Preserve byte counts when a safe preview cannot be produced.
 
 ## [0.4.0] - 2026-11-17
 
