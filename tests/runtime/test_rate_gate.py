@@ -273,8 +273,13 @@ async def test_initial_budget_requires_an_owning_task_even_for_a_loop_callback()
     observed: asyncio.Future[InitialRateBudget | None] = asyncio.get_running_loop().create_future()
 
     def callback() -> None:
-        with initial_rate_budget(gate, remaining_seconds=0.1, waited_seconds=0.4):
-            observed.set_result(consume_initial_rate_budget(gate))
+        try:
+            with initial_rate_budget(gate, remaining_seconds=0.1, waited_seconds=0.4):
+                result = consume_initial_rate_budget(gate)
+        except Exception as exc:
+            observed.set_exception(exc)
+        else:
+            observed.set_result(result)
 
     asyncio.get_running_loop().call_soon(callback)
     assert await observed is None

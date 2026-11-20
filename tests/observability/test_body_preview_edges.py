@@ -31,6 +31,47 @@ def _response_fields(body: str) -> tuple[dict[str, object], str]:
     return fields, stream.getvalue()
 
 
+@pytest.mark.parametrize("field", ["authToken", "AUTH-TOKEN", "auth_token"])
+@pytest.mark.parametrize("context", ["json", "quoted_text"])
+def test_auth_token_field_is_redacted_before_logging(field: str, context: str) -> None:
+    if context == "json":
+        body = json.dumps({field: {"nested": _FIXTURE}, "note": "VISIBLE"})
+    else:
+        body = f'Details: "{field}": "{_FIXTURE}", note: VISIBLE'
+    fields, output = _response_fields(body)
+    for observed in (repr(fields), output):
+        assert _FIXTURE not in observed
+        assert "VISIBLE" in observed and "<redacted>" in observed
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_escaped_separator_created_by_redaction_stays_single_line(separator: str) -> None:
+    body = json.dumps({"note": f"HEAD{separator}password={_FIXTURE} TAIL"})
+    assert separator not in body
+    fields, output = _response_fields(body)
+    preview = fields["response_body_preview"]
+    assert isinstance(preview, str)
+    for observed in (preview, output):
+        assert separator not in observed and _FIXTURE not in observed
+        assert "HEAD" in observed and "TAIL" in observed
+    assert len(output.splitlines()) == 1
+
+
+def test_unsafe_control_created_by_redaction_is_withheld() -> None:
+    fields, output = _response_fields(json.dumps({"note": f"HEAD\u009bpassword={_FIXTURE} TAIL"}))
+    assert fields["response_body_preview"] is None
+    assert "\u009b" not in output and _FIXTURE not in output
+
+
+def test_registered_secret_spans_coalesce_overlaps_but_keep_adjacent_matches() -> None:
+    from agent_search_gateway.observability import SecretRedactor, SecretValue
+
+    redactor = SecretRedactor([SecretValue("aba")])
+    assert redactor.sensitive_spans("ababaaba aba") == [(0, 5), (5, 8), (9, 12)]
+    repeated = "ab" * 4096 + "a"
+    assert redactor.sensitive_spans(repeated) == [(0, len(repeated))]
+
+
 @pytest.mark.parametrize("reference", ["/download", "../download", "", "#"])
 @pytest.mark.parametrize("context", ["html", "json"])
 def test_relative_url_in_explicit_context(reference: str, context: str) -> None:

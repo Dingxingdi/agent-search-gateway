@@ -272,8 +272,20 @@ async def test_get_preview_covers_each_terminal_transport_outcome(mode: str) -> 
                 task.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await task
+            elif mode == "inspector":
+                with pytest.raises(ProviderResponseFailure) as rejected:
+                    await request
+                assert rejected.value.safe_reason == "business"
+            elif mode.isdigit():
+                with pytest.raises(HttpStatusFailure) as http_failure:
+                    await request
+                assert http_failure.value.status_code == int(mode)
+            elif mode in {"decode", "empty"}:
+                with pytest.raises(ProtocolFailure):
+                    await request
             else:
-                with pytest.raises((ProtocolFailure, ExecutionFailure)):
+                assert mode in {"transport", "timeout"}
+                with pytest.raises(ExecutionFailure, match="HTTP transport failure"):
                     await request
     (fields,) = [
         vars(r)["gateway_fields"]

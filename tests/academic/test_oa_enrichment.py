@@ -160,14 +160,16 @@ async def test_oa_rate_wait_timeout_retains_paper_and_logs_safe_reason(
         assert list(clock.sleepers.values()) == [0.5]
         await clock.advance_to(0.5)
         assert await asyncio.wait_for(task, 1) == [original]
-    failures = [
-        vars(record)["gateway_fields"]
+    failure_records = [
+        record
         for record in caplog.records
         if getattr(record, "gateway_event", None) == "provider_failed"
     ]
-    assert len(failures) == 1
-    assert failures[0]["reason"] == "rate_limit_wait_timeout"
-    assert original.identifiers.doi not in str(failures)
+    assert len(failure_records) == 1
+    assert vars(failure_records[0])["gateway_fields"]["reason"] == "rate_limit_wait_timeout"
+    formatter = KeyValueFormatter(SecretRedactor([]))
+    rendered = "\n".join(formatter.format(record) for record in failure_records)
+    assert original.identifiers.doi not in rendered
 
 
 async def test_enrichment_unexpected_resolver_failure_retains_record(caplog: object) -> None:

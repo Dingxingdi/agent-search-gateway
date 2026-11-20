@@ -137,13 +137,15 @@ class SecretRedactor:
         self._ordered_secrets = tuple(sorted(self._secrets, key=len, reverse=True))
 
     def sensitive_spans(self, text: str) -> list[tuple[int, int]]:
-        """Original character ranges for registered values, including overlapping matches."""
+        """Original ranges for each registered value with overlapping occurrences combined."""
         spans = []
         for value in self._ordered_secrets:
-            offset = 0
-            while (start := text.find(value, offset)) >= 0:
-                spans.append((start, start + len(value)))
-                offset = start + 1
+            start = text.find(value)
+            while start >= 0:
+                left, right = start, start + len(value)
+                while (start := text.find(value, start + 1)) >= 0 and start < right:
+                    right = start + len(value)
+                spans.append((left, right))
         return spans
 
     def redact(self, rendered: str) -> str:
@@ -364,6 +366,8 @@ def log_event(
 
 
 _BodySource = bytes | Callable[[], bytes | None] | None
+_UNSAFE_PREVIEW_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_PREVIEW_LINE_BREAKS = str.maketrans({"\u0085": "\n", "\u2028": "\n", "\u2029": "\n"})
 
 
 def _preview_formatters(logger: logging.Logger) -> tuple[KeyValueFormatter, ...]:
@@ -424,14 +428,14 @@ def _preview_side(
                 if size is None:
                     count = len(raw)
                 text = raw.decode("utf-8")
-                if any(
-                    ord(char) < 32 and char not in "\t\r\n" or 127 <= ord(char) <= 159
-                    for char in text
-                ):
+                if _UNSAFE_PREVIEW_CONTROL.search(text):
                     return None, count, incomplete
                 if incomplete:
                     json.loads(text)
-                safe = scrubber.scrub(text).replace("\u2028", "\n").replace("\u2029", "\n")
+                safe = scrubber.scrub(text).translate(_PREVIEW_LINE_BREAKS)
+                # Scrubbing an escaped JSON string can materialize a previously encoded control.
+                if _UNSAFE_PREVIEW_CONTROL.search(safe):
+                    return None, count, incomplete
                 value, clipped = body_preview.limit_preview(safe, _render_string)
                 # A short registered value can match inside our own replacement or a
                 # JSON escape. Keep the bounded field stable for every receiving formatter.
