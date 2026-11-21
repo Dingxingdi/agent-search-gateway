@@ -35,6 +35,59 @@ def _registry() -> ProviderRegistry:
     return registry
 
 
+def _optional_registry(*, required: bool = False) -> ProviderRegistry:
+    registry = ProviderRegistry()
+    registry.register(
+        WebProviderRegistration(
+            name="optional",
+            capabilities=ProviderCapabilities(search=True, fetch=False),
+            factory=_factory,
+            allowed_config_keys=frozenset(),
+            requires_api_key=required,
+            supports_optional_api_key=True,
+        )
+    )
+    return registry
+
+
+def test_optional_web_provider_resolves_without_key() -> None:
+    data = {"web_providers": {"optional": {"enable_search": True}}}
+    [provider] = resolve_web_provider_config(data, _optional_registry(), {}).providers
+    assert provider.api_key_env is None
+    assert provider.secret is None
+
+
+def test_optional_web_provider_resolves_explicit_key() -> None:
+    env_name = "ENV_A"
+    data = {"web_providers": {"optional": {"enable_search": True, "api_key_env": env_name}}}
+    [provider] = resolve_web_provider_config(
+        data, _optional_registry(), {"ENV_A": "synthetic-value"}
+    ).providers
+    assert provider.api_key_env == "ENV_A"
+    assert isinstance(provider.secret, SecretValue)
+    assert provider.secret.reveal() == "synthetic-value"
+    assert "synthetic-value" not in repr(provider.secret)
+
+
+@pytest.mark.parametrize(
+    ("env_name", "environ"),
+    [("", {}), ("   ", {}), (17, {}), (None, {}), ("ENV_A", {}), ("ENV_A", {"ENV_A": ""})],
+)
+def test_optional_web_provider_rejects_invalid_explicit_key(
+    env_name: object, environ: dict[str, str]
+) -> None:
+    data = {"web_providers": {"optional": {"enable_search": True, "api_key_env": env_name}}}
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(data, _optional_registry(), environ)
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+
+
+def test_required_key_takes_precedence_over_optional() -> None:
+    data = {"web_providers": {"optional": {"enable_search": True}}}
+    with pytest.raises(ConfigFailure, match="requires api_key_env"):
+        resolve_web_provider_config(data, _optional_registry(required=True), {})
+
+
 def test_resolve_web_provider_config_or_fail_startup() -> None:
     data = {
         "web_providers": {
@@ -627,8 +680,15 @@ def test_new_keyed_provider_resolves_only_explicit_secret(provider_name: str) ->
     assert "fixture-value" not in repr(provider)
 
 
-@pytest.mark.parametrize("provider_name", _NEW_KEYED_PROVIDERS)
-@pytest.mark.parametrize("credential", [None, "", "MISSING"])
+@pytest.mark.parametrize(
+    ("provider_name", "credential"),
+    [
+        (name, credential)
+        for name in _NEW_KEYED_PROVIDERS
+        for credential in (None, "", "MISSING")
+        if name != "youcom" or credential is not None
+    ],
+)
 def test_new_keyed_provider_requires_named_environment_value(
     provider_name: str,
     credential: str | None,

@@ -183,26 +183,19 @@ def _resolve_one_web_provider(
     if enable_fetch and not registration.capabilities.fetch:
         raise _config_error(f"web provider {name} does not support fetch")
 
-    if not registration.requires_api_key:
-        if "api_key_env" in table:
+    api_key_env = None
+    secret = None
+    if registration.requires_api_key or "api_key_env" in table:
+        if not registration.requires_api_key and not registration.supports_optional_api_key:
             raise _config_error(f"web provider {name} does not accept api_key_env")
-        return ResolvedWebProviderConfig(
-            name=name,
-            enable_search=enable_search,
-            enable_fetch=enable_fetch,
-            max_concurrency=max_concurrency,
-            api_key_env=None,
-            secret=None,
-            options=MappingProxyType(dict(options)),
-            rate_policy=rate_policy,
-        )
-
-    api_key_env = table.get("api_key_env")
-    if not isinstance(api_key_env, str) or not api_key_env.strip():
-        raise _config_error(f"web provider {name} requires api_key_env")
-    secret_text = environ.get(api_key_env)
-    if not secret_text:
-        raise _config_error(f"environment variable {api_key_env} is required")
+        env_name = table.get("api_key_env")
+        if not isinstance(env_name, str) or not env_name.strip():
+            raise _config_error(f"web provider {name} requires api_key_env")
+        secret_text = environ.get(env_name)
+        if not secret_text:
+            raise _config_error(f"environment variable {env_name} is required")
+        api_key_env = env_name
+        secret = SecretValue(secret_text)
 
     return ResolvedWebProviderConfig(
         name=name,
@@ -210,7 +203,7 @@ def _resolve_one_web_provider(
         enable_fetch=enable_fetch,
         max_concurrency=max_concurrency,
         api_key_env=api_key_env,
-        secret=SecretValue(secret_text),
+        secret=secret,
         options=MappingProxyType(dict(options)),
         rate_policy=rate_policy,
     )

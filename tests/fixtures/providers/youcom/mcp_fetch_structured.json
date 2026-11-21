@@ -1,0 +1,40 @@
+{
+  "jsonrpc": "2.0",
+  "id": "fixture-id-overwritten-per-request",
+  "result": {
+    "_meta": {
+      "you/usage": {
+        "sku": "synthetic-extract",
+        "results_returned": 1,
+        "pages_extracted": 1
+      },
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "synthetic-server",
+        "version": "0.0.0"
+      }
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"output\":{\"url\":\"https://example.test/page\",\"extraction_source\":\"synthetic\",\"title\":\"Example page\",\"contents\":{\"full_page\":{\"markdown\":\"  # Synthetic page\\n\\nSynthetic full page body.\\n \"}},\"metadata\":{\"site_name\":\"\",\"favicon_url\":\"https://example.test/favicon.ico\"}}}"
+      }
+    ],
+    "structuredContent": {
+      "output": {
+        "url": "https://example.test/page",
+        "extraction_source": "synthetic",
+        "title": "Example page",
+        "contents": {
+          "full_page": {
+            "markdown": "  # Synthetic page\n\nSynthetic full page body.\n "
+          }
+        },
+        "metadata": {
+          "site_name": "",
+          "favicon_url": "https://example.test/favicon.ico"
+        }
+      }
+    },
+    "resultType": "complete"
+  }
+}

@@ -1,0 +1,8 @@
+# Replacement fragment, not a complete gateway configuration.
+# Replace the existing [web_providers.youcom] table; do not append a duplicate.
+# Remove its api_key_env line. An existing YDC_API_KEY environment value is ignored.
+# Public free quota may change; local rate_limits do not track its remaining balance.
+[web_providers.youcom]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.you.com/mcp/free"
