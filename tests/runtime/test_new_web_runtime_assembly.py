@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 from agent_search_gateway.config import resolve_config
-from agent_search_gateway.errors import ConfigFailure
+from agent_search_gateway.errors import ConfigFailure, ErrorCode
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
@@ -433,4 +433,290 @@ async def test_new_web_provider_builds_with_shared_rate_fields(
         assert gate is not None
         assert runtime._web_http_executors[0]._rate_gate is gate
     finally:
+        await runtime.aclose()
+
+
+def _youcom_mcp_config(**options: object) -> dict[str, object]:
+    return {
+        "enable_search": True,
+        "enable_fetch": True,
+        "max_concurrency": 7,
+        "api_url": "https://api.you.com/mcp/free",
+        **options,
+    }
+
+
+async def test_youcom_mcp_runtime_builds_without_secret(
+    tmp_path: Path, client_factory: _ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _youcom_mcp_response(request)
+
+    client_factory.transport = httpx.MockTransport(handler)
+    monkeypatch.setenv("YDC_API_KEY", "x")
+    registry = build_default_registry()
+    resolved = resolve_config(
+        _config({"youcom": _youcom_mcp_config()}),
+        registry,
+        {"TEST_LLM": "x", "YDC_API_KEY": "x"},
+    )
+    [provider] = resolved.web.providers
+    assert provider.secret is None
+    assert provider.api_key_env is None
+    runtime = Runtime.build(
+        resolved,
+        RuntimePaths.from_home(tmp_path),
+        http_client_factory=client_factory,
+    )
+    try:
+        assert isinstance(runtime.web_search_providers[0], YouComAdapter)
+        assert len(client_factory.clients) == 3
+        assert requests == []
+        assert await runtime.web_search_providers[0].search("runtime query") == []
+        candidate = await runtime.web_fetch_providers[0].fetch(_TARGET)
+        assert candidate.content == _BODY
+        assert len(requests) == 2
+        for request in requests:
+            assert str(request.url) == "https://api.you.com/mcp/free"
+            assert request.method == "POST"
+            assert not any(key in request.headers for key in ("authorization", "x-api-key"))
+        search_request, fetch_request = (json.loads(request.content) for request in requests)
+        assert search_request["params"]["arguments"] == {"query": "runtime query", "count": 10}
+        assert fetch_request["params"]["arguments"] == {"url": str(_TARGET)}
+    finally:
+        await runtime.aclose()
+
+
+async def test_youcom_mcp_runtime_shares_adapter_executor_and_rate_gate(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    runtime = _build_runtime(
+        tmp_path,
+        {"youcom": _youcom_mcp_config(rate_limits=[{"requests": 5, "period_seconds": 1}])},
+        client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        [fetch] = runtime.web_fetch_providers
+        assert search is cast(object, fetch)
+        assert isinstance(search, YouComAdapter)
+        assert search._secret is None
+        [executor] = runtime._web_http_executors
+        assert search._http is executor
+        assert len(client_factory.clients) == 3
+        assert runtime.quotas.get_web("youcom").limit == 7
+        gate = runtime.quotas.get_rate("web", "youcom")
+        assert gate is not None
+        assert executor._rate_gate is gate
+    finally:
+        await runtime.aclose()
+
+
+@pytest.mark.parametrize(
+    ("options", "environment", "created_clients", "message"),
+    [
+        ({}, {}, 1, "REST requires an API key"),
+        (
+            {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
+            {"TEST_WEB": "x"},
+            1,
+            "free MCP does not accept an API key",
+        ),
+        (
+            {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
+            {},
+            0,
+            "environment variable TEST_WEB is required",
+        ),
+        (
+            {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
+            {"TEST_WEB": ""},
+            0,
+            "environment variable TEST_WEB is required",
+        ),
+        (
+            {"api_url": "https://api.you.com/mcp/free", "api_key_env": ""},
+            {},
+            0,
+            "requires api_key_env",
+        ),
+        (
+            {"api_url": "https://api.you.com/mcp"},
+            {},
+            1,
+            "Unsupported You.com MCP endpoint",
+        ),
+        (
+            {"api_url": "https://api.you.com/mcp/free?unsupported=true"},
+            {},
+            1,
+            "Unsupported You.com MCP endpoint",
+        ),
+    ],
+    ids=[
+        "rest-without-key",
+        "free-with-explicit-key",
+        "missing-env-value",
+        "empty-env-value",
+        "empty-env-name",
+        "unsupported-mcp",
+        "unsupported-free-query",
+    ],
+)
+async def test_youcom_runtime_rejects_invalid_protocol_credentials_before_http(
+    tmp_path: Path,
+    client_factory: _ClientFactory,
+    options: dict[str, object],
+    environment: dict[str, str],
+    created_clients: int,
+    message: str,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("Invalid configuration must not issue HTTP requests")
+
+    client_factory.transport = httpx.MockTransport(handler)
+    try:
+        with pytest.raises(ConfigFailure, match=message) as caught:
+            resolved = resolve_config(
+                _config({"youcom": {"enable_search": True, "enable_fetch": True, **options}}),
+                build_default_registry(),
+                {"TEST_LLM": "x", **environment},
+            )
+            Runtime.build(
+                resolved,
+                RuntimePaths.from_home(tmp_path),
+                http_client_factory=client_factory,
+            )
+        assert caught.value.code is ErrorCode.CONFIG_ERROR
+        assert len(client_factory.clients) == created_clients
+        assert requests == []
+    finally:
+        for client in client_factory.clients:
+            await client.aclose()
+
+
+@pytest.mark.parametrize(
+    ("search_enabled", "fetch_enabled"),
+    [(True, False), (False, True), (True, True), (False, False)],
+    ids=["search-only", "fetch-only", "both", "disabled"],
+)
+async def test_youcom_mcp_runtime_obeys_capability_switches(
+    tmp_path: Path,
+    client_factory: _ClientFactory,
+    search_enabled: bool,
+    fetch_enabled: bool,
+) -> None:
+    options: dict[str, object] = {}
+    if not search_enabled and not fetch_enabled:
+        options = {"api_key_env": "MISSING", "api_url": "https://api.you.com/mcp/unsupported"}
+    runtime = _build_runtime(
+        tmp_path,
+        {
+            "youcom": _youcom_mcp_config(
+                enable_search=search_enabled, enable_fetch=fetch_enabled, **options
+            )
+        },
+        client_factory,
+    )
+    try:
+        assert [provider.name for provider in runtime.web_search_providers] == (
+            ["youcom"] if search_enabled else []
+        )
+        assert [provider.name for provider in runtime.web_fetch_providers] == (
+            ["youcom"] if fetch_enabled else []
+        )
+        assert len(runtime._web_http_executors) == int(search_enabled or fetch_enabled)
+        assert len(client_factory.clients) == 2 + int(search_enabled or fetch_enabled)
+        if not search_enabled and not fetch_enabled:
+            with pytest.raises(KeyError):
+                runtime.quotas.get_web("youcom")
+    finally:
+        await runtime.aclose()
+
+
+async def test_youcom_mcp_runtime_closes_client_once(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    runtime = _build_runtime(tmp_path, {"youcom": _youcom_mcp_config()}, client_factory)
+    await runtime.aclose()
+    await runtime.aclose()
+    assert len(client_factory.clients) == 3
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+def _youcom_mcp_response(request: httpx.Request) -> httpx.Response:
+    body = json.loads(request.content)
+    tool = body["params"]["name"]
+    if tool == "you-search":
+        payload: dict[str, object] = {"results": {"web": []}}
+    else:
+        assert tool == "you-extract"
+        payload = {
+            "output": {
+                "url": str(_TARGET),
+                "contents": {"full_page": {"markdown": _BODY}},
+            }
+        }
+    return httpx.Response(
+        200,
+        json={"jsonrpc": "2.0", "id": body["id"], "result": {"structuredContent": payload}},
+    )
+
+
+async def test_youcom_mcp_search_and_fetch_share_concurrency(
+    tmp_path: Path,
+    client_factory: _ClientFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    search_entered = asyncio.Event()
+    release_search = asyncio.Event()
+    fetch_entered = asyncio.Event()
+    scheduler_waiting = asyncio.Event()
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "primary.example.test":
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
+        body = json.loads(request.content)
+        if body["params"]["name"] == "you-search":
+            search_entered.set()
+            await release_search.wait()
+        else:
+            fetch_entered.set()
+        return _youcom_mcp_response(request)
+
+    client_factory.transport = httpx.MockTransport(handler)
+    runtime = _build_runtime(
+        tmp_path, {"youcom": _youcom_mcp_config(max_concurrency=1)}, client_factory
+    )
+    logger = logging.getLogger("agent_search_gateway.scheduler.fetch")
+    caplog.set_level(logging.DEBUG, logger=logger.name)
+    waiting_handler = _SchedulerWaitingHandler(scheduler_waiting)
+    logger.addHandler(waiting_handler)
+    try:
+        async with asyncio.timeout(3), asyncio.TaskGroup() as tasks:
+            search = tasks.create_task(
+                runtime.search_orchestrator.keyword_search("runtime query", request_id="12345678")
+            )
+            await search_entered.wait()
+            fetch = tasks.create_task(
+                runtime.fetch_orchestrator._scheduler.fetch_until_accepted(_TARGET)
+            )
+            await scheduler_waiting.wait()
+            assert not fetch_entered.is_set()
+            assert runtime.quotas.get_web("youcom").in_use == 1
+            release_search.set()
+            await fetch_entered.wait()
+        assert Path(search.result()).is_file()
+        assert fetch.result().kind == "accepted"
+        assert runtime.quotas.get_web("youcom").in_use == 0
+        assert runtime.quotas.get_web("youcom").max_observed_in_use == 1
+    finally:
+        release_search.set()
+        logger.removeHandler(waiting_handler)
         await runtime.aclose()

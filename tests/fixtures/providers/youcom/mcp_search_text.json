@@ -1,0 +1,24 @@
+{
+  "jsonrpc": "2.0",
+  "id": "fixture-id-overwritten-per-request",
+  "result": {
+    "_meta": {
+      "you/usage": {
+        "sku": "synthetic-search",
+        "results_returned": 10,
+        "extraction_mode": "synthetic"
+      },
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "synthetic-server",
+        "version": "0.0.0"
+      }
+    },
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"results\":{\"web\":[{\"url\":\"https://example.test/1\",\"title\":\"Example page 1\",\"description\":\"\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 1.\"]}},{\"url\":\"https://example.test/2\",\"title\":\"Example page 2\",\"description\":\"\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 2.\"]}},{\"url\":\"https://example.test/3\",\"title\":\"Example page 3\",\"description\":\"\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 3.\"]},\"thumbnail_url\":\"https://example.test/thumbnail-3.png\"},{\"url\":\"https://example.test/4\",\"title\":\"Example page 4\",\"description\":\"Synthetic description 4.\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 4.\"]}},{\"url\":\"https://example.test/5\",\"title\":\"Example page 5\",\"description\":\"Synthetic description 5.\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 5.\"]},\"thumbnail_url\":\"https://example.test/thumbnail-5.png\"},{\"url\":\"https://example.test/6\",\"title\":\"Example page 6\",\"description\":\"Synthetic description 6.\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 6.\"]}},{\"url\":\"https://example.test/7\",\"title\":\"Example page 7\",\"description\":\"\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 7.\"]}},{\"url\":\"https://example.test/8\",\"title\":\"Example page 8\",\"description\":\"Synthetic description 8.\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 8.\"]},\"thumbnail_url\":\"https://example.test/thumbnail-8.png\"},{\"url\":\"https://example.test/9\",\"title\":\"Example page 9\",\"description\":\"\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 9.\"]}},{\"url\":\"https://example.test/10\",\"title\":\"Example page 10\",\"description\":\"Synthetic description 10.\",\"page_age\":\"2026-01-01\",\"favicon_url\":\"https://example.test/favicon.ico\",\"contents\":{\"highlights\":[\"Synthetic excerpt 10.\"]},\"thumbnail_url\":\"https://example.test/thumbnail-10.png\"}]},\"metadata\":{\"search_uuid\":\"00000000-0000-4000-8000-000000000001\",\"query\":\"neutral query\",\"latency\":0.1}}"
+      }
+    ],
+    "resultType": "complete"
+  }
+}

@@ -1,6 +1,8 @@
 import asyncio
 import json
 import logging
+import socket
+import ssl
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,6 +11,7 @@ from typing import cast
 import httpx
 import pytest
 
+from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import (
@@ -35,7 +38,9 @@ from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.keenable import KeenableAdapter
 from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.youcom import YouComAdapter
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.url_normalization import normalize_url
+from tests.support.controlled import ManualClock
 from tests.support.logging import structured_test_logger
 
 
@@ -1040,3 +1045,305 @@ async def test_new_web_partial_engine_failures_preserve_results_and_safe_local_c
         }
     ]
     _assert_new_web_safe(caplog)
+
+
+_MCP_ENDPOINT = "https://api.you.com/mcp/free"
+_MCP_URL = "https://example.test/PRIVATE_URL"
+_MCP_HEADERS = {"mcp-session-id": "PRIVATE_SESSION", "x-example": "PRIVATE_AUTH"}
+
+
+@asynccontextmanager
+async def _youcom_mcp_http(
+    caplog: pytest.LogCaptureFixture,
+    stage: str,
+    respond: Callable[[httpx.Request, int], httpx.Response],
+) -> AsyncIterator[tuple[YouComAdapter, list[float]]]:
+    clock = ManualClock()
+    delays: list[float] = []
+    requests: list[httpx.Request] = []
+    logger, output = structured_test_logger(
+        "tests.youcom.mcp", secrets=[SecretValue("PRIVATE_AUTH")]
+    )
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    logger.addHandler(caplog.handler)
+
+    def send(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.method == "POST" and str(request.url) == _MCP_ENDPOINT
+        assert set(request.headers) <= {
+            "accept",
+            "accept-encoding",
+            "connection",
+            "content-length",
+            "content-type",
+            "host",
+            "mcp-method",
+            "mcp-name",
+            "mcp-protocol-version",
+            "user-agent",
+        }
+        call = json.loads(request.content)
+        tool, arguments = (
+            ("you-search", {"query": "PRIVATE_QUERY", "count": 10})
+            if stage == "search"
+            else ("you-extract", {"url": _MCP_URL})
+        )
+        assert call["method"] == "tools/call"
+        assert call["params"]["name"] == request.headers["mcp-name"] == tool
+        assert call["params"]["arguments"] == arguments
+        assert len(_new_web_events(caplog, "rate_limit_acquired")) == len(requests)
+        clock.now += 0.125
+        return respond(request, len(requests))
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+        clock.now += delay
+
+    gate = RateGate(
+        ResolvedRatePolicy(windows=(ResolvedRateWindow(3, 60),)),
+        monotonic=clock.monotonic,
+        sleep=sleep,
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(send), follow_redirects=True
+        ) as client:
+            executor = HttpJsonExecutor(
+                client,
+                RetryPolicy(3, 0.25, 0.5, 5),
+                provider_name="youcom",
+                logger=logger,
+                rate_gate=gate,
+                sleep=sleep,
+                monotonic=clock.monotonic,
+            )
+            yield (
+                YouComAdapter(name="youcom", api_url=_MCP_ENDPOINT, http_executor=executor),
+                delays,
+            )
+    finally:
+        logger.removeHandler(caplog.handler)
+
+    previews = _new_web_events(caplog, "upstream_body_preview")
+    assert len(previews) == len(requests) > 0
+    for attempt, (preview, request) in enumerate(zip(previews, requests, strict=True), 1):
+        assert preview["attempt"] == attempt
+        assert preview["request_body_sent_bytes"] == len(request.content)
+        assert preview["request_body_preview"] is None
+        assert preview["response_body_preview"] is None
+    rendered = output.getvalue()
+    assert rendered.count("event=upstream_body_preview ") == len(requests)
+    assert "PRIVATE_" not in rendered
+    for record in caplog.records:
+        if getattr(record, "gateway_event", None):
+            assert "PRIVATE_" not in repr(vars(record)["gateway_fields"])
+            assert "PRIVATE_" not in logger.handlers[0].format(record)
+
+
+@pytest.mark.parametrize("status", [408, 429, 503])
+@pytest.mark.parametrize("recovers", [True, False], ids=["recovers", "exhausts"])
+async def test_youcom_mcp_status_retries_and_search_candidate_counts(
+    caplog: pytest.LogCaptureFixture, status: int, recovers: bool
+) -> None:
+    def respond(request: httpx.Request, attempt: int) -> httpx.Response:
+        if not recovers or attempt == 1:
+            headers = {**_MCP_HEADERS, **({"Retry-After": "2"} if attempt == 1 else {})}
+            return httpx.Response(status, headers=headers, text="PRIVATE_BODY")
+        result = {"results": {"web": [{"url": _MCP_URL, "snippets": ["PRIVATE_BODY"]}, {}]}}
+        return httpx.Response(
+            200,
+            headers=_MCP_HEADERS,
+            json={
+                "jsonrpc": "2.0",
+                "id": json.loads(request.content)["id"],
+                "result": {"structuredContent": result},
+            },
+        )
+
+    async with _youcom_mcp_http(caplog, "search", respond) as (adapter, delays):
+        if recovers:
+            assert await adapter.search("PRIVATE_QUERY") == [
+                KeywordSearchHit(_MCP_URL, "", "PRIVATE_BODY")
+            ]
+        else:
+            with pytest.raises(HttpStatusFailure) as caught:
+                await adapter.search("PRIVATE_QUERY")
+            assert caught.value.message == f"youcom/search: HTTP status {status}"
+            assert "PRIVATE_" not in repr(caught.value.diagnostics)
+    expected = [status, 200] if recovers else [status] * 3
+    assert delays == ([2] if recovers else [2, 0.5])
+    _assert_new_web_attempts(
+        caplog,
+        "youcom",
+        "search",
+        attempts=len(expected),
+        retries=len(delays),
+        terminal_category=None if recovers else "status",
+    )
+    retries = _new_web_events(caplog, "http_retrying")
+    assert [r["delay_source"] for r in retries] == (
+        ["retry_after"] if recovers else ["retry_after", "backoff"]
+    )
+    assert [r["delay_ms"] for r in retries] == [int(d * 1000) for d in delays]
+    diagnostics = _new_web_events(caplog, "provider_response_diagnostic")
+    assert [d["http_status"] for d in diagnostics] == expected
+    for i, (event, code) in enumerate(zip(diagnostics, expected, strict=True), 1):
+        assert event["attempt"] == i and event["elapsed_ms"] == 125
+        if code == 200:
+            assert event["semantic_result"] == "success"
+        else:
+            assert (event["category"], event["semantic_result"], event["response_bytes"]) == (
+                "http_status",
+                "error",
+                0,
+            )
+    assert all(e["elapsed_ms"] == 125 for e in [*retries, *_new_web_events(caplog, "http_failed")])
+    if recovers:
+        (summary,) = _new_web_events(caplog, "provider_candidates_summary")
+        assert (summary["received"], summary["accepted"], summary["rejected"]) == (2, 1, 1)
+        assert summary["rejection_counts"] == {"missing_url": 1}
+
+
+@pytest.mark.parametrize(
+    "outcome,status,category,upstream,message",
+    [
+        ("http", 401, "http_status", None, "HTTP status 401"),
+        ("http", 402, "http_status", None, "HTTP status 402"),
+        ("http", 403, "http_status", None, "HTTP status 403"),
+        ("redirect_rest", 302, "http_status", None, "HTTP status 302"),
+        ("redirect_paid", 302, "http_status", None, "HTTP status 302"),
+        (
+            "rpc",
+            200,
+            "provider_response",
+            "invalid_params",
+            "provider response failure: MCP RPC error",
+        ),
+        (
+            "tool",
+            200,
+            "provider_response",
+            "tool_error",
+            "provider response failure: MCP tool error",
+        ),
+        ("envelope", 200, "invalid_envelope", None, "invalid MCP response envelope"),
+    ],
+)
+async def test_youcom_mcp_terminal_fetch_diagnostics(
+    caplog: pytest.LogCaptureFixture,
+    outcome: str,
+    status: int,
+    category: str,
+    upstream: str | None,
+    message: str,
+) -> None:
+    response_bytes = 0
+
+    def respond(request: httpx.Request, attempt: int) -> httpx.Response:
+        nonlocal response_bytes
+        assert attempt == 1
+        envelope: dict[str, object] = {"jsonrpc": "2.0", "id": json.loads(request.content)["id"]}
+        headers = dict(_MCP_HEADERS)
+        if outcome == "rpc":
+            envelope["error"] = {"code": -32602, "message": "PRIVATE_BODY", "data": _MCP_URL}
+        elif outcome == "tool":
+            envelope["result"] = {
+                "isError": True,
+                "content": [{"type": "text", "text": "PRIVATE_BODY"}],
+            }
+        else:
+            envelope["unexpected"] = "PRIVATE_BODY"
+            if outcome == "redirect_rest":
+                headers["location"] = "https://ydc-index.io/v1/contents"
+            elif outcome == "redirect_paid":
+                headers["location"] = "https://api.you.com/mcp"
+        response = httpx.Response(status, headers=headers, json=envelope)
+        response_bytes = len(response.content) if response.is_success else 0
+        return response
+
+    async with _youcom_mcp_http(caplog, "fetch", respond) as (adapter, delays):
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.fetch(normalize_url(_MCP_URL))
+    failure = caught.value
+    assert failure.message == f"youcom/fetch: {message}" and "PRIVATE_" not in str(failure)
+    assert "PRIVATE_" not in repr(failure.diagnostics)
+    assert delays == []
+    terminal = "status" if category == "http_status" else category
+    _assert_new_web_attempts(
+        caplog, "youcom", "fetch", attempts=1, retries=0, terminal_category=terminal
+    )
+    (diagnostic,) = _new_web_events(caplog, "provider_response_diagnostic")
+    (failed,) = _new_web_events(caplog, "http_failed")
+    assert diagnostic["category"] == failure.diagnostics["category"] == category
+    for fields in (diagnostic, failed, failure.diagnostics):
+        assert fields["http_status"] == status and fields["semantic_result"] == "error"
+        assert fields["response_bytes"] == response_bytes
+        code = fields.get("upstream_code")
+        assert (code.text if isinstance(code, DiagnosticText) else code) == upstream
+    assert diagnostic["elapsed_ms"] == failed["elapsed_ms"] == 125
+
+
+@pytest.mark.parametrize(
+    "kind,transport_type",
+    [
+        ("connect", httpx.ConnectError),
+        ("tls", httpx.ConnectError),
+        ("dns", httpx.ConnectError),
+        ("read", httpx.ReadError),
+        ("timeout", httpx.ReadTimeout),
+    ],
+)
+async def test_youcom_mcp_transport_failures_exhaust_budget_and_close_streams(
+    caplog: pytest.LogCaptureFixture,
+    kind: str,
+    transport_type: type[httpx.TransportError],
+) -> None:
+    partial = b"PRIVATE_BODY"
+    closed: list[int] = []
+    received = kind in {"read", "timeout"}
+
+    def respond(request: httpx.Request, attempt: int) -> httpx.Response:
+        error = transport_type(f"{kind}: PRIVATE_BODY", request=request)
+        if kind == "dns":
+            raise error from socket.gaierror("PRIVATE_BODY")
+        if kind == "tls":
+            raise error from ssl.SSLError("PRIVATE_BODY")
+        if not received:
+            raise error
+
+        class BrokenStream(httpx.AsyncByteStream):
+            async def __aiter__(self) -> AsyncIterator[bytes]:
+                yield partial
+                raise error
+
+            async def aclose(self) -> None:
+                closed.append(attempt)
+
+        return httpx.Response(200, stream=BrokenStream(), headers=_MCP_HEADERS)
+
+    async with _youcom_mcp_http(caplog, "fetch", respond) as (adapter, delays):
+        with pytest.raises(ExecutionFailure) as caught:
+            await adapter.fetch(normalize_url(_MCP_URL))
+    assert caught.value.message == "youcom/fetch: HTTP transport failure"
+    assert "PRIVATE_" not in repr(caught.value.diagnostics)
+    assert delays == [0.25, 0.5]
+    _assert_new_web_attempts(
+        caplog, "youcom", "fetch", attempts=3, retries=2, terminal_category="transport"
+    )
+    for event in [
+        *_new_web_events(caplog, "http_retrying"),
+        *_new_web_events(caplog, "http_failed"),
+    ]:
+        assert (
+            event["category"] == "transport" and event["transport_type"] == transport_type.__name__
+        )
+        assert event["elapsed_ms"] == 125
+    diagnostics = _new_web_events(caplog, "provider_response_diagnostic")
+    assert [d["attempt"] for d in diagnostics] == closed == ([1, 2, 3] if received else [])
+    for event in diagnostics:
+        assert (
+            event["category"],
+            event["semantic_result"],
+            event["http_status"],
+            event["response_bytes"],
+        ) == ("transport", "error", 200, len(partial))

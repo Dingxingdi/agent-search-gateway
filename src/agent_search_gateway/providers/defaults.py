@@ -163,6 +163,8 @@ def build_default_registry() -> ProviderRegistry:
             ProviderCapabilities(search=True, fetch=True),
             YouComAdapter,
             frozenset({"api_url"}),
+            requires_api_key=False,
+            supports_optional_api_key=True,
         ),
         WebProviderRegistration(
             "keenable",

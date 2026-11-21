@@ -1,0 +1,140 @@
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -107,5 +107,7 @@
+ `enable_fetch = true` in the corresponding `[web_providers.NAME]` table to enable
+-each capability independently. Set `api_url` to the API root below; the adapter
+-adds the Search or Fetch path. Existing timeout and retry settings in `[retry]`
+-and provider `max_concurrency` continue to apply.
++each capability independently. The REST configurations below use an API root;
++their adapters add the Search or Fetch path. You.com's free MCP alternative
++uses the complete endpoint shown below, without appending a REST path. Existing
++timeout and retry settings in `[retry]` and provider `max_concurrency` continue
++to apply.
+ 
+@@ -118,2 +120,30 @@
+ 
++For You.com, choose either the existing keyed REST configuration or free MCP.
++Replace the entire existing `[web_providers.youcom]` table with this free
++alternative; do not append a duplicate table:
++
++```toml
++[web_providers.youcom]
++enable_search = true
++enable_fetch = true
++api_url = "https://api.you.com/mcp/free"
++```
++
++Delete its `api_key_env` line. An existing `YDC_API_KEY` environment variable may
++remain; it is not automatically used without `api_key_env`. Explicit credentials
++on the free endpoint are rejected before HTTP. REST still uses its configured root
++and key; Fetch calls the separate `/v1/contents` API with its existing billing and
++permission requirements. The free endpoint uses the same `youcom` provider and
++independent capability switches.
++
++As of 2026-11-21, [You.com's MCP documentation](https://you.com/docs/agents/mcp-server)
++publishes 100 free queries per day; this external quota may change. Local
++`rate_limits` are not a remaining-balance meter or a daily quota ledger shared
++across processes. The existing REST 10 QPS example is not an official MCP limit.
++Free MCP failures follow existing Search fan-out and Fetch fallback through other
++configured providers, without automatically switching to paid You.com REST.
++See the [free MCP guide](docs/youcom-free-mcp.md) and
++[replacement fragment](config.youcom-free.fragment.toml) for configuration and checks.
++No new provider name, mode, SDK, or MCP service deployment is required.
++
+ Only `open_websearch` accepts the provider-specific `engines` option. The full
+@@ -601,3 +631,3 @@
+ 
+-The Doubao, You.com, and Keenable adapter checks use `DOUBAO_API_KEY`,
++The original REST adapter checks for Doubao, You.com, and Keenable use `DOUBAO_API_KEY`,
+ `YDC_API_KEY`, and `KEENABLE_API_KEY`, respectively. The open-webSearch check
+@@ -608,4 +638,5 @@
+ 
+-Run one provider at a time, replacing `doubao` with `youcom`, `keenable`, or
+-`open_websearch` as appropriate:
++Run one original provider at a time, replacing `doubao` with `keenable` or
++`open_websearch` as appropriate. For only keyed You.com REST, use the selector
++`-k "youcom and not youcom_mcp"` instead:
+ 
+@@ -620,3 +651,3 @@
+ produce SKIP; configured connection, permission, quota, or schema failures produce
+-FAIL. Ordinary CI leaves all eight cases skipped.
++FAIL. Ordinary CI leaves these eight original cases skipped.
+ 
+@@ -633,2 +664,17 @@
+ 
++For the keyless You.com free MCP check, select its dedicated case:
++
++```bash
++env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_new_web_providers.py -k youcom_mcp -v -rs -rP
++```
++
++This case does not require or use `YDC_API_KEY`. It sends at most one Search
++request and, after usable hits, one Extract request for the first hit, with a
++30-second timeout per request and no retries. A Search failure reports Extract
++as SKIP. Stage output reports safe PASS/FAIL/SKIP categories, request counts,
++elapsed time, and hit/content counts. Default offline runs skip this case unless
++`WEB_SEARCH_RUN_INTEGRATION=1` is set. Use `-k youcom_mcp`; `-k youcom` would
++also select the original keyed REST checks. See the
++[free MCP guide](docs/youcom-free-mcp.md) for details.
++
+ ## Contributing and support
+diff --git a/config.example.toml b/config.example.toml
+--- a/config.example.toml
++++ b/config.example.toml
+@@ -149,3 +149,16 @@
+ [web_providers.youcom]
+-# Self-serve Search and Contents.
++# Self-serve REST Search and Contents; this 10 QPS example applies to REST.
++# To use free MCP instead, REPLACE this entire table with the commented block below.
++# Delete api_key_env when switching; an existing YDC_API_KEY environment value is ignored.
++# Do not append a second [web_providers.youcom] table.
++# BEGIN You.com free MCP replacement
++# [web_providers.youcom]
++# enable_search = true
++# enable_fetch = true
++# api_url = "https://api.you.com/mcp/free"
++# END You.com free MCP replacement
++# Public free quota as of 2026-11-21: 100 queries/day; the provider may change it.
++# Source: https://you.com/docs/agents/mcp-server
++# Local rate_limits do not track the upstream balance or a daily quota across processes.
++# Choose any local MCP rate policy for your needs; the REST example below is not its limit.
+ rate_limits = [{ requests = 10, period_seconds = 1 }]
+diff --git a/tests/docs/test_documented_config.py b/tests/docs/test_documented_config.py
+--- a/tests/docs/test_documented_config.py
++++ b/tests/docs/test_documented_config.py
+@@ -395,3 +395,11 @@
+ 
+-@pytest.mark.parametrize("source", ["docs/youcom-free-mcp.md", "config.youcom-free.fragment.toml"])
++@pytest.mark.parametrize(
++    "source",
++    [
++        "README.md",
++        "config.example.toml",
++        "docs/youcom-free-mcp.md",
++        "config.youcom-free.fragment.toml",
++    ],
++)
+ @pytest.mark.parametrize("existing_key", [False, True], ids=["no-key", "unused-environment-key"])
+@@ -408,6 +416,17 @@
+             if "[web_providers.youcom]" in block and "https://api.you.com/mcp/free" in block
+-        ]
+-    else:
+-        blocks = [text]
+-    assert len(blocks) == 1, f"{source} must contain one free MCP replacement example"
++        ]
++    elif source_path.name == "config.example.toml":
++        match = re.search(
++            r"^# BEGIN You.com free MCP replacement\n(.*?)^# END You.com free MCP replacement$",
++            text,
++            flags=re.MULTILINE | re.DOTALL,
++        )
++        blocks = (
++            ["\n".join(line.removeprefix("# ") for line in match[1].splitlines())]
++            if match is not None
++            else []
++        )
++    else:
++        blocks = [text]
++    assert len(blocks) == 1, f"{source} must contain one free MCP replacement example"
+     replacement = tomllib.loads(blocks[0])

@@ -1351,7 +1351,9 @@ _NEW_WEB_BODY = "Article body returned by Tavily fallback."
 class _NewWebWorkflow:
     """Exercise real adapters and shared workflows with only external I/O replaced."""
 
-    def __init__(self, tmp_path: Path, client: httpx.AsyncClient, name: str) -> None:
+    def __init__(
+        self, tmp_path: Path, client: httpx.AsyncClient, name: str, *, free_mcp: bool = False
+    ) -> None:
         self.store = URLStore()
         self.quotas = ProviderQuotaManager(web_limits={name: 1, "tavily": 1}, llm_limits={})
         self.llm = FakeLLMClient("llm", text_result=_NEW_WEB_BODY)
@@ -1362,10 +1364,16 @@ class _NewWebWorkflow:
             content_clean=LLMInvocation("llm", "clean"),
             focus_summary=LLMInvocation("llm", "focus"),
         )
-        executor = HttpJsonExecutor(client, RetryPolicy(1, 0, 1, 0), provider_name=name)
+        policy = RetryPolicy(1, 0, 1, 5) if free_mcp else RetryPolicy(1, 0, 1, 0)
+        executor = HttpJsonExecutor(client, policy, provider_name=name)
         api_url = f"https://{name}.example.test"
         provider: DoubaoAdapter | YouComAdapter | KeenableAdapter | OpenWebSearchAdapter
-        if name == "open_websearch":
+        if free_mcp:
+            assert name == "youcom"
+            provider = YouComAdapter(
+                name=name, api_url="https://api.you.com/mcp/free", http_executor=executor
+            )
+        elif name == "open_websearch":
             provider = OpenWebSearchAdapter(
                 name=name, api_url=api_url, http_executor=executor, engines=["bing", "duckduckgo"]
             )
@@ -1685,3 +1693,82 @@ async def test_new_provider_open_websearch_multi_engine_results_use_existing_sta
         assert any(item.get("phase") == "staging" for item in fields)
         identities = {item["provider"] for item in fields if "provider" in item}
         assert identities == {"open_websearch"}
+
+
+class _YouComMCPWorkflowHTTP(_NewWebHTTP):
+    def __init__(self, *, fetch_outcome: str = "success", search_failure: bool = False) -> None:
+        super().__init__("youcom", search_failure=search_failure)
+        self.fetch_outcome = fetch_outcome
+
+    def _respond(self, request: httpx.Request) -> httpx.Response:
+        if request.url.host == "tavily.example.test":
+            return super()._respond(request)
+        assert request.method == "POST" and str(request.url) == "https://api.you.com/mcp/free"
+        assert {"authorization", "x-api-key", "payment-signature"}.isdisjoint(request.headers)
+        call = json.loads(request.content)
+        params = call["params"]
+        if params["name"] == "you-search":
+            self.calls.append(("youcom", "search"))
+            assert params["arguments"] == {"query": "article query", "count": 10}
+            if self.search_failure:
+                return httpx.Response(403)
+            result = {"structuredContent": _new_web_search_payload("youcom")}
+        else:
+            assert params["name"] == "you-extract"
+            assert params["arguments"] == {"url": _NEW_WEB_TARGET}
+            self.calls.append(("youcom", "fetch"))
+            if self.fetch_outcome == "quota":
+                return httpx.Response(429)
+            if self.fetch_outcome == "tool_error":
+                result = {"isError": True, "content": [{"type": "text", "text": "unavailable"}]}
+            else:
+                result = {
+                    "structuredContent": {
+                        "output": {"contents": {"full_page": {"markdown": "Original MCP page."}}}
+                    }
+                }
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": call["id"], "result": result})
+
+
+@pytest.mark.parametrize("fetch_outcome", ["success", "quota", "tool_error"])
+async def test_youcom_mcp_search_admission_and_fetch_priority(
+    tmp_path: Path, fetch_outcome: str
+) -> None:
+    http = _YouComMCPWorkflowHTTP(fetch_outcome=fetch_outcome)
+    fallback = fetch_outcome != "success"
+    raw = _NEW_WEB_BODY if fallback else "Original MCP page."
+    expected = "Cleaned fallback article." if fallback else raw
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, "youcom", free_mcp=True)
+        workflow.llm.text_result = "Cleaned fallback article."
+        records = await workflow.search(provider="youcom")
+        assert records == [{"url": _NEW_WEB_TARGET, "abstract": "New abstract"}]
+        url = normalize_url(records[0]["url"])
+        before = workflow.store.get(url)
+        assert before is not None and (before.raw_content, before.content) == ("", "")
+        assert workflow.scheduler.provider_names == ("youcom", "tavily")
+        assert await workflow.fetch_orchestrator.url_fetch(str(url)) == expected
+
+    calls = [("youcom", "search"), ("youcom", "fetch")]
+    if fallback:
+        calls.append(("tavily", "fetch"))
+    assert http.calls == calls
+    after = workflow.store.get(url)
+    assert after is not None and after.available
+    assert (after.abstract, after.raw_content, after.content) == ("New abstract", raw, expected)
+    assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
+    if fallback:
+        assert [call[0].model for call in workflow.llm.text_calls] == ["clean"]
+        assert raw in workflow.llm.text_calls[0][1][-1]["content"]
+    else:
+        assert not workflow.llm.text_calls
+
+
+async def test_youcom_mcp_search_failure_preserves_other_provider_results(tmp_path: Path) -> None:
+    http = _YouComMCPWorkflowHTTP(search_failure=True)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+        workflow = _NewWebWorkflow(tmp_path, client, "youcom", free_mcp=True)
+        assert await workflow.search() == [{"url": _NEW_WEB_TARGET, "abstract": "Old abstract"}]
+    admitted = workflow.store.get(normalize_url(_NEW_WEB_TARGET))
+    assert admitted is not None and admitted.abstract == "Old abstract"
+    assert sorted(http.calls) == [("tavily", "search"), ("youcom", "search")]

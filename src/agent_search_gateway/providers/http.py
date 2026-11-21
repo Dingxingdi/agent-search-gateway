@@ -132,6 +132,7 @@ class ProviderResponseFailure(ExecutionFailure):
 
 
 RequestHeaders = Mapping[str, str] | Callable[[], Mapping[str, str]]
+ResponseDecoder = Callable[[httpx.Response], object]
 ResponseInspector = Callable[[httpx.Response], ProviderResponseFailure | None]
 ResponseDiagnosticExtractor = Callable[[httpx.Response], Mapping[str, object]]
 
@@ -175,6 +176,10 @@ class HttpJsonExecutor:
         protocol_attempt: int | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
+        response_decoder: ResponseDecoder | None = None,
+        max_response_bytes: int | None = None,
+        preview_bodies: bool = True,
+        inherit_client_defaults: bool = True,
     ) -> object:
         response, attempt, attempt_started, diagnostics = await self._request_response(
             method,
@@ -185,26 +190,68 @@ class HttpJsonExecutor:
             json_body=json_body,
             prepared_body=prepared_body,
             protocol_attempt=protocol_attempt,
+            max_response_bytes=max_response_bytes,
+            preview_bodies=preview_bodies,
+            inherit_client_defaults=inherit_client_defaults,
+            defer_diagnostic=response_decoder is not None,
             response_inspector=response_inspector,
             response_diagnostics=response_diagnostics,
         )
+        failure: ExecutionFailure | None
         try:
-            return response.json()
+            if response_decoder is None:
+                return response.json()
+            decoded = response_decoder(response)
         except ValueError as exc:
+            failure = ProtocolFailure(
+                ErrorCode.PROTOCOL_ERROR,
+                f"{self._provider_name}/{stage}: response was not valid JSON",
+                diagnostics={"category": "decode"},
+            )
+            failure.__cause__ = exc
+        except ExecutionFailure as exc:
+            failure = exc
+        else:
+            failure = None
+
+        endpoint = http_endpoint_for_log(url)
+        if response_decoder is not None:
+            fields = (
+                best_effort_diagnostics(lambda: response_diagnostics(response))
+                if response_diagnostics is not None
+                else {}
+            )
+            if failure is not None:
+                fields.update(safe_diagnostic_fields(failure.diagnostics))
+                fields.setdefault(
+                    "category",
+                    "protocol" if isinstance(failure, ProtocolFailure) else "provider_response",
+                )
+                if fields.get("semantic_result") in (None, "success", "accepted"):
+                    fields["semantic_result"] = "error"
+            else:
+                fields.setdefault("semantic_result", "success")
+            for name in ("status", "http_status", "response_bytes", "content_type"):
+                fields.pop(name, None)
+            diagnostics = {**fields, **diagnostics}
+            self._log_response_diagnostic(
+                stage, endpoint, attempt, attempt_started, diagnostics, protocol_attempt
+            )
+        if failure is not None:
+            failure.diagnostics = diagnostics
             self._log_failed(
                 stage,
-                http_endpoint_for_log(url),
+                endpoint,
                 attempt,
                 attempt_started,
-                "decode",
+                str(diagnostics.get("category", "decode"))
+                if response_decoder is not None
+                else "decode",
                 protocol_attempt=protocol_attempt,
                 diagnostics=diagnostics,
             )
-            raise ProtocolFailure(
-                ErrorCode.PROTOCOL_ERROR,
-                f"{self._provider_name}/{stage}: response was not valid JSON",
-                diagnostics=diagnostics,
-            ) from exc
+            raise failure
+        return decoded
 
     async def request_text(
         self,
@@ -260,7 +307,15 @@ class HttpJsonExecutor:
         protocol_attempt: int | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
+        max_response_bytes: int | None = None,
+        preview_bodies: bool = True,
+        inherit_client_defaults: bool = True,
+        defer_diagnostic: bool = False,
     ) -> tuple[httpx.Response, int, float, dict[str, object]]:
+        if max_response_bytes is not None and (
+            type(max_response_bytes) is not int or max_response_bytes <= 0
+        ):
+            raise ValueError("max_response_bytes must be a positive integer")
         if json_body is not None and prepared_body is not None:
             raise ValueError("json_body and prepared_body are mutually exclusive")
         attempt = 0
@@ -341,20 +396,25 @@ class HttpJsonExecutor:
 
         async def operation() -> httpx.Response:
             nonlocal attempt_started, response_fields
-            request = self._client.build_request(
+            timeout = self._retry_policy.request_timeout_seconds
+            build_request = self._client.build_request if inherit_client_defaults else httpx.Request
+            auth = httpx.USE_CLIENT_DEFAULT if inherit_client_defaults else None
+            request = build_request(
                 method,
                 url,
                 headers=None if callable(headers) else headers,
                 params=params,
                 json=json_body,
                 content=prepared_body.content if prepared_body is not None else None,
-                timeout=self._retry_policy.request_timeout_seconds,
+                extensions={"timeout": httpx.Timeout(timeout).as_dict()},
             )
 
             def start_attempt() -> None:
                 nonlocal attempt_started
                 if callable(headers):
                     request.headers.update(headers())
+                if max_response_bytes is not None:
+                    request.headers["Accept-Encoding"] = "identity"
                 if prepared_body is not None:
                     request.headers["Content-Type"] = "application/json"
                 log_event(
@@ -374,11 +434,52 @@ class HttpJsonExecutor:
                 start_attempt()
             else:
                 await self._wait_for_rate(self._rate_gate, stage, attempt, start_attempt)
+            response_fields = {}
             response = None
+            read_failure: ProtocolFailure | None = None
+            received_bytes = 0
+            body_complete = False
+            incomplete_category: str | None = None
             try:
-                response = await self._client.send(request, follow_redirects=False)
+                if max_response_bytes is None:
+                    response = await self._client.send(request, auth=auth, follow_redirects=False)
+                    received_bytes = len(response.content)
+                    body_complete = True
+                else:
+                    try:
+                        deadline = asyncio.get_running_loop().time() + timeout
+                        async with asyncio.timeout_at(deadline):
+                            response = await self._client.send(
+                                request, auth=auth, follow_redirects=False, stream=True
+                            )
+                        response = await self._read_bounded_response(
+                            response, max_response_bytes, stage, deadline
+                        )
+                        body_complete = response.is_success
+                    except ProtocolFailure as exc:
+                        if response is None:
+                            raise
+                        read_failure = exc
+                    except TimeoutError as exc:
+                        raise httpx.ReadTimeout(
+                            "Response deadline exceeded", request=request
+                        ) from exc
+            except httpx.TransportError:
+                incomplete_category = "transport"
+                raise
+            except asyncio.CancelledError:
+                incomplete_category = "cancelled"
+                raise
             finally:
                 transport_finished = self._monotonic()
+                if response is not None and response.is_success and max_response_bytes is not None:
+                    if body_complete:
+                        received_bytes = len(response.content)
+                    elif read_failure is not None:
+                        count = read_failure.diagnostics.get("response_bytes")
+                        received_bytes = count if isinstance(count, int) else 0
+                    else:
+                        received_bytes = response.num_bytes_downloaded
                 attempt_elapsed_ms = elapsed_ms(lambda: transport_finished, attempt_started)
                 if self._logger.isEnabledFor(logging.DEBUG):
                     with suppress(Exception):
@@ -390,25 +491,42 @@ class HttpJsonExecutor:
                             attempt=attempt,
                             transport="http",
                             protocol_attempt=protocol_attempt,
-                            request_body=lambda: request.content,
-                            prepared_body=prepared_body,
+                            request_body=(lambda: request.content) if preview_bodies else None,
+                            prepared_body=prepared_body if preview_bodies else None,
                             request_body_sent_bytes=len(request.content),
-                            response_body=lambda: response.content if response is not None else b"",
-                            response_body_bytes=len(response.content)
-                            if response is not None
-                            else 0,
+                            response_body=(lambda: response.content)
+                            if preview_bodies and body_complete and response is not None
+                            else None,
+                            response_body_bytes=received_bytes,
+                            response_incomplete=not body_complete,
                         )
                     # Exclude preview work from later failure/retry/decode timings,
                     # while retaining the existing response-processing duration.
                     attempt_started += self._monotonic() - transport_finished
-            response_fields = safe_diagnostic_fields(
-                {
-                    "status": response.status_code,
-                    "http_status": response.status_code,
-                    "response_bytes": len(response.content),
-                    "content_type": response.headers.get("content-type"),
-                }
-            )
+                if response is not None:
+                    response_fields = safe_diagnostic_fields(
+                        {
+                            "status": response.status_code,
+                            "http_status": response.status_code,
+                            "response_bytes": received_bytes,
+                            "content_type": response.headers.get("content-type"),
+                        }
+                    )
+                    if max_response_bytes is not None and incomplete_category is not None:
+                        response_fields.update(
+                            category=incomplete_category,
+                            semantic_result=(
+                                "unknown" if incomplete_category == "cancelled" else "error"
+                            ),
+                        )
+                        self._log_response_diagnostic(
+                            stage,
+                            log_endpoint,
+                            attempt,
+                            attempt_started,
+                            response_fields,
+                            protocol_attempt,
+                        )
             context: dict[str, object] = {
                 **response_fields,
                 **protocol_fields,
@@ -421,40 +539,63 @@ class HttpJsonExecutor:
             log_event(
                 self._logger, logging.DEBUG, "http_attempt_completed", exc_info=False, **context
             )
+            if read_failure is not None:
+                response_fields.update(category="protocol", semantic_result="error")
+                read_failure.diagnostics = response_fields
+                self._log_response_diagnostic(
+                    stage, log_endpoint, attempt, attempt_started, response_fields, protocol_attempt
+                )
+                self._log_failed(
+                    stage,
+                    log_endpoint,
+                    attempt,
+                    attempt_started,
+                    "protocol",
+                    protocol_attempt=protocol_attempt,
+                    diagnostics=response_fields,
+                )
+                raise read_failure
             failure: ProviderResponseFailure | None = None
             try:
-                if response_inspector is not None:
+                if response_inspector is not None and (
+                    max_response_bytes is None or response.is_success
+                ):
                     failure = response_inspector(response)
             finally:
-                extracted: dict[str, object] = {}
-                try:
-                    if response_diagnostics is not None:
-                        extracted = best_effort_diagnostics(lambda: response_diagnostics(response))
-                finally:
-                    inspector_fields = (
-                        self._provider_response_fields(failure) if failure is not None else {}
-                    )
-                    selected = {**extracted, **inspector_fields}
-                    for name in ("status", "http_status", "response_bytes", "content_type"):
-                        selected.pop(name, None)
-                    response_fields = {**selected, **response_fields}
-                    if failure is not None:
-                        response_fields.update(
-                            category="provider_response", semantic_result="error"
+                if not (defer_diagnostic and response.is_success and failure is None):
+                    extracted: dict[str, object] = {}
+                    try:
+                        if response_diagnostics is not None:
+                            extracted = best_effort_diagnostics(
+                                lambda: response_diagnostics(response)
+                            )
+                    finally:
+                        inspector_fields = (
+                            self._provider_response_fields(failure) if failure is not None else {}
                         )
-                    elif (
-                        not response.is_success
-                        and response_fields.get("semantic_result") == "success"
-                    ):
-                        response_fields.update(category="http_status", semantic_result="error")
-                    diagnostic_context = {**response_fields, **context}
-                    log_event(
-                        self._logger,
-                        logging.DEBUG,
-                        "provider_response_diagnostic",
-                        exc_info=False,
-                        **diagnostic_context,
-                    )
+                        selected = {**extracted, **inspector_fields}
+                        for name in ("status", "http_status", "response_bytes", "content_type"):
+                            selected.pop(name, None)
+                        response_fields = {**selected, **response_fields}
+                        if max_response_bytes is not None and not response.is_success:
+                            response_fields.update(category="http_status", semantic_result="error")
+                        elif failure is not None:
+                            response_fields.update(
+                                category="provider_response", semantic_result="error"
+                            )
+                        elif (
+                            not response.is_success
+                            and response_fields.get("semantic_result") == "success"
+                        ):
+                            response_fields.update(category="http_status", semantic_result="error")
+                        diagnostic_context = {**response_fields, **context}
+                        log_event(
+                            self._logger,
+                            logging.DEBUG,
+                            "provider_response_diagnostic",
+                            exc_info=False,
+                            **diagnostic_context,
+                        )
             if failure is not None:
                 raise failure
             if is_retryable_http_status(response.status_code):
@@ -516,8 +657,11 @@ class HttpJsonExecutor:
                 "transport",
                 protocol_attempt=protocol_attempt,
                 transport_type=type(exc).__name__,
+                diagnostics=response_fields,
             )
-            raise self._execution_failure(stage, "HTTP transport failure") from exc
+            failure = self._execution_failure(stage, "HTTP transport failure")
+            failure.diagnostics = response_fields
+            raise failure from exc
 
         if response.status_code < 200 or response.status_code >= 300:
             self._log_failed(
@@ -531,6 +675,51 @@ class HttpJsonExecutor:
             )
             raise self._status_failure(stage, response.status_code, response_fields)
         return response, attempt, attempt_started, response_fields
+
+    async def _read_bounded_response(
+        self, response: httpx.Response, limit: int, stage: str, deadline: float
+    ) -> httpx.Response:
+        def check_size(received: int) -> None:
+            if received > limit:
+                raise ProtocolFailure(
+                    ErrorCode.PROTOCOL_ERROR,
+                    f"{self._provider_name}/{stage}: response exceeded byte limit",
+                    diagnostics={"response_bytes": received},
+                )
+
+        close_deadline = deadline
+        try:
+            async with asyncio.timeout_at(deadline):
+                if not response.is_success:
+                    return response
+                encoding = response.headers.get("Content-Encoding", "identity").strip().lower()
+                if encoding != "identity":
+                    raise ProtocolFailure(
+                        ErrorCode.PROTOCOL_ERROR,
+                        f"{self._provider_name}/{stage}: unsupported content encoding",
+                    )
+                if response.is_stream_consumed:
+                    check_size(len(response.content))
+                    return response
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    check_size(len(body) + len(chunk))
+                    body.extend(chunk)
+                return httpx.Response(
+                    response.status_code,
+                    headers=response.headers,
+                    content=bytes(body),
+                    request=response.request,
+                )
+        except asyncio.CancelledError:
+            # Attempt immediate cleanup without delaying the caller's cancellation.
+            close_deadline = 0
+            raise
+        finally:
+            # Reuse the remaining attempt budget and preserve any original read failure.
+            with suppress(Exception):
+                async with asyncio.timeout_at(close_deadline):
+                    await response.aclose()
 
     async def _wait_for_rate(
         self, gate: RateGate, stage: str, attempt: int, start_attempt: Callable[[], None]
@@ -583,6 +772,29 @@ class HttpJsonExecutor:
                 f"{self._provider_name}/{stage}: {reason}",
                 reason=reason,
             ) from exc
+
+    def _log_response_diagnostic(
+        self,
+        stage: str,
+        endpoint: str,
+        attempt: int,
+        started: float,
+        diagnostics: Mapping[str, object],
+        protocol_attempt: int | None,
+    ) -> None:
+        log_event(
+            self._logger,
+            logging.DEBUG,
+            "provider_response_diagnostic",
+            provider=self._provider_name,
+            stage=stage,
+            endpoint=endpoint,
+            attempt=attempt,
+            elapsed_ms=elapsed_ms(self._monotonic, started),
+            exc_info=False,
+            **diagnostics,
+            **({"protocol_attempt": protocol_attempt} if protocol_attempt is not None else {}),
+        )
 
     def _log_failed(
         self,
