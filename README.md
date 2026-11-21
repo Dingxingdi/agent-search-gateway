@@ -5,7 +5,7 @@
 
 `agent-search-gateway` is a local foreground daemon plus a thin CLI for aggregated keyword search, LLM and Agent search, academic discovery, and fetching URLs admitted by search.
 
-The gateway keeps URL admission and body state in daemon memory. Restarting the daemon clears that state. The daemon communicates over a local Unix-domain socket, so this version targets Unix-like environments. It does not provide persistent URL state, remote daemon access, automatic repairs, or live provider checks in `doctor`.
+The gateway keeps URL admission and body state in daemon memory. Restarting the daemon clears that state. The daemon communicates over a local Unix-domain socket, so this version targets Unix-like environments. Persistent URL state, remote daemon access, and automatic repairs are unsupported. `doctor` checks the local installation and, when enabled, the configured open-webSearch daemon.
 
 ## Installation
 
@@ -34,7 +34,9 @@ For detailed daemon tracing, start it in DEBUG mode instead:
 agent-search-gateway start --debug
 ```
 
-`doctor` is local and makes no network requests. It validates configuration/environment resolution, local filesystem usability, and daemon socket state. A missing socket is reported as `[info] daemon not running`; that state is informational and does not make an otherwise healthy doctor run fail. `doctor` does not repair files or sockets and does not contact configured providers.
+`doctor` validates the configuration and required environment variables, checks directory writability, and inspects the gateway Unix socket. It makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A failed probe gives exit code 1. A missing gateway socket is informational (`[info] daemon not running`). A report with only `[ok]` and `[info]` checks gives exit code 0.
+
+A healthy response confirms daemon liveness only. Search engine and browser readiness, cloud API key validity, permissions, quotas and service availability, and Agent executable availability and login remain unverified. Some Web provider option values, including their types, are validated when the runtime is built.
 
 ## Configuration and runtime paths
 
@@ -62,7 +64,7 @@ For each Web provider, academic provider or OA resolver, set `rate_limits` to an
 
 Local rate waiting is bounded by `[retry].request_timeout_seconds` per attempt. Fetch can use another provider with both rate and concurrency available. If a candidate exhausts its rate-wait budget, Fetch can fall back to the remaining candidates. Waiting solely for concurrency, running another candidate, and server-directed `Retry-After` sleeps are outside that local budget.
 
-The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 31 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
+The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 32 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
 
 Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the complete serialized LLM JSON body, and `agent_prompt_bytes` defaults to **98304** for the single serialized Agent prompt argument. Both measure UTF-8 bytes. Token counts depend on the model. For oversized input the gateway keeps approximately 80% of the retained variable text from its head and 20% from its tail, with an omission marker. It preserves the system instructions, template and protected user focus. If the protected content and required framing cannot fit, preparation fails with `input_budget_unfit` before any send or spawn.
 
@@ -94,6 +96,7 @@ Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the 
 | open-webSearch | yes | yes |
 | Yuanbao | yes | no |
 | Zhihu | yes | no |
+| Baidu Qianfan | yes | no |
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
@@ -152,6 +155,30 @@ Use `keyword-search --provider NAME` to isolate an enabled Search provider.
 `url-fetch` has no `--provider` flag: isolate Fetch using a temporary configuration
 or the opt-in adapter checks below. Normal CLI Fetch still requires a URL admitted
 by search in the same gateway runtime.
+
+#### Baidu Qianfan
+
+The single `baiduqianfan` provider calls both Web Search and Agentic Search for
+every logical search. To enable Search, add this block to your configuration if
+it is absent, or edit its existing block:
+
+```toml
+[web_providers.baiduqianfan]
+enable_search = true
+enable_fetch = false
+api_url = "https://qianfan.baidubce.com"
+api_key_env = "BAIDUQIANFAN_API_KEY"
+rate_limits = [{ requests = 3, period_seconds = 1 }]
+```
+
+Export `BAIDUQIANFAN_API_KEY` in the daemon environment and restart the daemon.
+One logical search normally sends two physical HTTP requests, one per API.
+Retries add physical attempts, and both APIs share the configured 3/1s local
+window. Other clients can consume the same upstream allowance, so the local
+limit cannot guarantee free billing quotas or prevent charges.
+
+Web Search supplies summaries only. Agentic Search web-page `raw_content` passes through the existing `cheap_check` and `judge` checks during Search. Retained raw content later passes through `content_clean` and `safety` during Fetch. Media results retain an HTTP(S) link, title, and snippet; the gateway does not
+download or transcribe media.
 
 #### Enabling Zhihu and Yuanbao
 
@@ -630,6 +657,18 @@ filtered/defaulted list fails multi-engine coverage. A matching list with no
 partial failures still does not prove both engines succeeded; engines without
 observed hits remain unverified. The tests do not print raw requests, responses,
 queries, URL parameters, page text, or credentials.
+
+Run the Baidu Qianfan check with `BAIDUQIANFAN_API_KEY` set:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_baiduqianfan.py -v -rs -rP
+```
+
+This command calls only Baidu Qianfan. One logical search normally sends two HTTP
+requests, one to Web Search and one to Agentic Search. Retries consume additional
+requests. The two APIs may share a free allowance, and calls may incur charges.
+Both branches must successfully parse their results. A verified empty result is
+valid for either branch.
 
 ## Contributing and support
 

@@ -3,6 +3,7 @@
 from .contracts import ProviderCapabilities
 from .registry import ProviderRegistry, WebProviderRegistration
 from .web.anysearch import AnySearchAdapter
+from .web.baiduqianfan import BaiduQianfanAdapter
 from .web.brave import BraveAdapter
 from .web.brightdata import BrightDataAdapter
 from .web.decodo import DecodoAdapter
@@ -176,6 +177,12 @@ def build_default_registry() -> ProviderRegistry:
             OpenWebSearchAdapter,
             frozenset({"api_url", "engines"}),
             requires_api_key=False,
+        ),
+        WebProviderRegistration(
+            "baiduqianfan",
+            ProviderCapabilities(search=True, fetch=False),
+            BaiduQianfanAdapter,
+            frozenset({"api_url"}),
         ),
     )
     for registration in registrations:

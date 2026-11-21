@@ -164,7 +164,7 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
 @pytest.mark.parametrize(
     ("provider_data", "environment", "error_match"),
     [
@@ -185,6 +185,11 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
             "does not support fetch",
         ),
         (
+            {"enable_search": True, "api_key_env": "SERVICE_KEY", "rate_limits": 3},
+            {"SERVICE_KEY": "synthetic-service-value"},
+            "rate_limits must be an array of tables",
+        ),
+        (
             {"enable_search": True, "api_key_env": "SERVICE_KEY", "unknown": True},
             {"SERVICE_KEY": "synthetic-service-value"},
             "unknown config key",
@@ -200,6 +205,7 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
         "missing-env-value",
         "empty-env-value",
         "unsupported-fetch",
+        "invalid-rate-limits",
         "unknown-option",
         "disabled-unknown-option",
     ],
@@ -220,7 +226,7 @@ def test_service_key_search_config_rejects_invalid_provider(
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
 @pytest.mark.parametrize("api_url", [None, "https://service.example.test/gateway"])
 def test_service_key_search_config_preserves_only_explicit_options(
     provider_name: str,
@@ -249,7 +255,7 @@ def test_service_key_search_config_preserves_only_explicit_options(
     assert dict(provider.options) == options
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
 @pytest.mark.parametrize("api_key_env", [None, "UNAVAILABLE_SERVICE_KEY"])
 def test_disabled_service_key_search_provider_skips_credentials(
     provider_name: str,
@@ -276,6 +282,24 @@ def test_disabled_service_key_search_provider_skips_credentials(
     assert provider.api_key_env is None
     assert provider.secret is None
     assert dict(provider.options) == {"api_url": "https://disabled.example.test"}
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_baiduqianfan_example_key_is_required_only_for_enabled_search(enabled: bool) -> None:
+    key_env = "BAIDUQIANFAN_API_KEY"
+    config = {"web_providers": {"baiduqianfan": {"enable_search": enabled, "api_key_env": key_env}}}
+    environment = {key_env: "example-service-key"} if enabled else {}
+    [provider] = resolve_web_provider_config(
+        config, build_default_registry(), environment
+    ).providers
+
+    assert provider.enable_search is enabled
+    assert provider.enable_fetch is False
+    if enabled:
+        assert provider.api_key_env == key_env
+        assert provider.secret is not None and provider.secret.reveal() == environment[key_env]
+    else:
+        assert provider.api_key_env is None and provider.secret is None
 
 
 def test_disabled_parallel_requires_no_credential_and_preserves_allowed_options() -> None:

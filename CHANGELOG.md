@@ -8,6 +8,15 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- Add the opt-in `baiduqianfan` keyword search provider. It queries Baidu Qianfan Web Search and Agentic Search concurrently and returns results from a successful branch when the other fails.
+- Check open-webSearch daemon liveness in `doctor` when Search or Fetch is enabled. One credential-free `GET /health` checks the service, and a failed probe gives exit code 1.
+
+### Changed
+
+- Clarify Zhihu rate limits. Zhihu has no published uniform fixed QPS, so the gateway leaves the request window and minimum interval unset by default.
+
 ## [1.0.0] - 2026-11-20
 
 ### Added

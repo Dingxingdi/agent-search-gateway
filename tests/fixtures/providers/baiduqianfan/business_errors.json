@@ -1,0 +1,37 @@
+{
+  "invalid_argument": {
+    "code": "InvalidArgument"
+  },
+  "daily_quota": {
+    "code": "QUOTA_USER_DAILY_FREE"
+  },
+  "insufficient_balance": {
+    "code": "BILLING_INSUFFICIENT_BALANCE"
+  },
+  "search_qps": {
+    "code": "RATE_LIMIT_SEARCH_QPS"
+  },
+  "internal_error": {
+    "code": "InternalError"
+  },
+  "numeric": {
+    "code": 216003
+  },
+  "unknown": {
+    "code": "private-fixture-code"
+  },
+  "object": {
+    "code": {
+      "value": "private-fixture-value"
+    }
+  },
+  "numeric_zero": {
+    "code": 0
+  },
+  "string_zero": {
+    "code": "0"
+  },
+  "null": {
+    "code": null
+  }
+}

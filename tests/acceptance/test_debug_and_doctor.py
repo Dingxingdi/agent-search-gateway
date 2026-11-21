@@ -279,6 +279,59 @@ async def test_normal_mode_equivalent_workflow_creates_no_debug_log(tmp_path: Pa
     assert not paths.debug_log_file.exists()
 
 
+@pytest.mark.parametrize(
+    ("status", "line", "expected_code"),
+    [
+        (200, "[ok] open-webSearch daemon healthy", 0),
+        (503, "[fail] open-webSearch daemon unhealthy (503)", 1),
+    ],
+)
+async def test_doctor_cli_enabled_open_websearch_reports_health_without_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, status: int, line: str, expected_code: int
+) -> None:
+    from functools import partial
+    from subprocess import Popen
+
+    from agent_search_gateway.runtime import Runtime
+
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    with paths.config_file.open("a") as target:
+        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("doctor unexpectedly built the runtime, ran a search, or spawned a process")
+
+    monkeypatch.setattr(Runtime, "build", forbidden)
+    monkeypatch.setattr(SearchOrchestrator, "keyword_search", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", forbidden)
+    monkeypatch.setattr(Popen, "__init__", forbidden)
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, json={"status": "ok", "data": {"daemon": "running"}})
+
+    transport = httpx.MockTransport(respond)
+    monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
+    stdout, stderr = StringIO(), StringIO()
+    code = await run_command(
+        build_parser().parse_args(["doctor"]),
+        paths,
+        environ={environment_name(): "present"},
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    assert [(request.method, str(request.url)) for request in requests] == [
+        ("GET", "http://127.0.0.1:3210/health")
+    ]
+    assert stdout.getvalue().splitlines()[-2:] == [line, "[info] daemon not running"]
+    assert stderr.getvalue() == ""
+    assert code == expected_code
+
+
 async def test_doctor_cli_acceptance_is_local_aggregating_and_side_effect_free(
     tmp_path: Path,
 ) -> None:

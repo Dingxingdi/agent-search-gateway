@@ -1,0 +1,50 @@
+{
+  "references": [
+    {
+      "type": "web",
+      "url": "https://example.test/web?x=1#part",
+      "title": "  网页标题  ",
+      "snippet": "  原文摘要\n第二行  ",
+      "content": "Only a short excerpt."
+    },
+    {
+      "type": "image",
+      "url": "https://example.test/photo.jpg"
+    },
+    {
+      "type": "video",
+      "url": "https://example.test/movie.mp4"
+    },
+    {
+      "type": "image",
+      "image": {
+        "url": "https://example.test/nested-image.jpg"
+      }
+    },
+    {
+      "type": "video",
+      "url": "",
+      "video": {
+        "url": "https://example.test/nested-video.mp4"
+      }
+    },
+    {
+      "type": "image",
+      "url": "https://example.test/top-image",
+      "title": "Original image title",
+      "snippet": "Original image snippet",
+      "image": {
+        "url": "https://example.test/ignored-image.jpg"
+      }
+    },
+    {
+      "type": "video",
+      "url": "https://example.test/top-video",
+      "title": "Original video title",
+      "snippet": "Original video snippet",
+      "video": {
+        "url": "https://example.test/ignored-video.mp4"
+      }
+    }
+  ]
+}
