@@ -872,7 +872,7 @@ async def test_baiduqianfan_caller_cancellation_awaits_asynchronous_branch_clean
             if repeat_cancel:
                 # Let search start awaiting the remaining branch after Web finishes.
                 await asyncio.sleep(0)
-                search.cancel("caller cancelled")
+                search.cancel("second cancellation during cleanup")
                 await asyncio.sleep(0)
             release_cleanup.set()
             with pytest.raises(asyncio.CancelledError, match="caller cancelled"):

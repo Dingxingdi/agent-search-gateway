@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 
 import httpx
 
@@ -73,11 +74,9 @@ class BaiduQianfanAdapter:
                     task.cancel()
             cleanup = asyncio.gather(*tasks, return_exceptions=True)
             while not cleanup.done():
-                try:
+                # Defer repeated cancellation until both branch finalizers finish.
+                with suppress(asyncio.CancelledError):
                     await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    # Repeated caller cancellation must let branch finalizers finish.
-                    continue
             raise
         results = web.result(), agentic.result()
         first, second = results
