@@ -132,20 +132,31 @@ async def test_baiduqianfan_rejected_body_preserves_admitted_url_and_abstract(
     )
 
 
-async def test_baiduqianfan_url_only_media_keeps_labels_without_body_processing(
+@pytest.mark.parametrize("with_title", [False, True], ids=["url-only", "title-only"])
+async def test_baiduqianfan_media_preserves_abstract_without_body_processing(
     tmp_path: Path,
+    with_title: bool,
 ) -> None:
+    def media(source: str, kind: str) -> dict[str, object]:
+        url = f"https://example.com/{source}-{kind}"
+        record: dict[str, object] = (
+            {"type": kind, kind: {"url": url}} if source == "web" else {"url": url}
+        )
+        if with_title:
+            record["title"] = f"{source} {kind} title"
+        return record
+
     http = RecordingJsonExecutor(
         [
             {
                 "references": [
-                    {"type": "image", "image": {"url": "https://example.com/web-image"}},
-                    {"type": "video", "video": {"url": "https://example.com/web-video"}},
+                    media("web", "image"),
+                    media("web", "video"),
                 ]
             },
             {
-                "image_result": {"images": [{"url": "https://example.com/agentic-image"}]},
-                "video_result": {"videos": [{"url": "https://example.com/agentic-video"}]},
+                "image_result": {"images": [media("agentic", "image")]},
+                "video_result": {"videos": [media("agentic", "video")]},
             },
         ]
     )
@@ -157,10 +168,9 @@ async def test_baiduqianfan_url_only_media_keeps_labels_without_body_processing(
     path = Path(await orchestrator.keyword_search("query", request_id="15151515"))
 
     expected = [
-        ("web-image", "Image"),
-        ("web-video", "Video"),
-        ("agentic-image", "Image"),
-        ("agentic-video", "Video"),
+        (f"{source}-{kind}", f"{source} {kind} title" if with_title else kind.title())
+        for source in ("web", "agentic")
+        for kind in ("image", "video")
     ]
     assert [json.loads(line) for line in path.read_text().splitlines()] == [
         {"url": f"https://example.com/{suffix}", "abstract": label} for suffix, label in expected

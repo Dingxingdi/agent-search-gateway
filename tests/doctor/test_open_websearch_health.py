@@ -1,4 +1,7 @@
 import asyncio
+import gzip
+import json
+from collections.abc import AsyncIterator
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -159,6 +162,8 @@ async def test_health_accepts_exact_success_envelope(
     [
         ("http://example.test", "http://example.test/health"),
         ("http://example.test/", "http://example.test/health"),
+        (" http://example.test ", "http://example.test/health"),
+        (" https://example.test/prefix/  ", "https://example.test/prefix/health"),
         ("https://example.test:8443/service", "https://example.test:8443/service/health"),
         ("https://example.test/service/", "https://example.test/service/health"),
         ("https://example.test/app%2Fapi/?q=x#y", "https://example.test/app%2Fapi/health"),
@@ -191,6 +196,7 @@ async def test_health_preserves_path_prefix_and_strips_query_fragment(
         "http:///service",
         "http://:80",
         "http://exa mple.test",
+        "http://example.test\t",
         "http://exa\tmple.test",
         "http://exa\x7fmple.test",
         "http://example.test:no",
@@ -277,11 +283,68 @@ async def test_health_requires_exact_success_envelope(
     )
 
 
+@pytest.mark.parametrize("extra", [0, 1], ids=["at-limit", "over-limit"])
+async def test_doctor_limits_decoded_health_body_and_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: int
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    with paths.config_file.open("a") as target:
+        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+
+    envelope = b'{"status":"ok","data":{"daemon":"running"}}'
+    compressed = gzip.compress(envelope.ljust(64 * 1024 + extra))
+    consumed_tail = False
+
+    class Chunks(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal consumed_tail
+            yield compressed[:10]
+            yield compressed[10:]
+            consumed_tail = True
+            yield b""
+
+    response = httpx.Response(200, headers={"Content-Encoding": "gzip"}, stream=Chunks())
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client)
+    report = await doctor.run_doctor(paths, environ={environment_name(): "present"})
+
+    expected = (
+        DoctorCheck(DoctorStatus.FAIL, "open-webSearch daemon unhealthy (invalid_health_response)")
+        if extra
+        else DoctorCheck(DoctorStatus.OK, "open-webSearch daemon healthy")
+    )
+    assert report.checks[-2:] == (expected, DoctorCheck(DoctorStatus.INFO, "daemon not running"))
+    assert consumed_tail is (extra == 0)
+    assert response.is_closed and client.is_closed
+
+
+async def test_health_rejects_success_if_parsing_crosses_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(200, json={"status": "ok", "data": {"daemon": "running"}})
+    client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client)
+    loop = asyncio.get_running_loop()
+    start = loop.time()
+    clock = Mock(return_value=start)
+    monkeypatch.setattr(loop, "time", clock)
+    parse = json.loads
+
+    def slow_parse(*args: Any, **kwargs: Any) -> Any:
+        clock.return_value = start + 3
+        return parse(*args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", slow_parse)
+    result = await _probe_open_websearch_health("https://example.test")
+    assert result == DoctorCheck(DoctorStatus.FAIL, "open-webSearch daemon unhealthy (timeout)")
+    assert response.is_closed and client.is_closed
+
+
 async def test_health_handles_recursive_json_decode_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    response = httpx.Response(200)
-    monkeypatch.setattr(response, "json", Mock(side_effect=RecursionError("fake-detail")))
+    response = httpx.Response(200, content=b"[" * 2000 + b"]" * 2000)
     transport = httpx.MockTransport(lambda request: response)
     monkeypatch.setattr(httpx, "AsyncClient", partial(httpx.AsyncClient, transport=transport))
 

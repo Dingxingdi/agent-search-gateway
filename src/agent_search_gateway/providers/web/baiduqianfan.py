@@ -267,9 +267,10 @@ class BaiduQianfanAdapter:
         normalize_url(original_url)
         title = optional_string(record.get("title"), self.name, stage, "result.title")
         snippet = optional_string(record.get("snippet"), self.name, stage, "result.snippet")
+        if label and not title.strip():
+            title = label
+            if not snippet.strip():
+                snippet = label
         return KeywordSearchHit(
-            url=original_url,
-            title=label if label and not title.strip() else title,
-            snippet=label if label and not snippet.strip() else snippet,
-            raw_content=raw_content,
+            url=original_url, title=title, snippet=snippet, raw_content=raw_content
         )

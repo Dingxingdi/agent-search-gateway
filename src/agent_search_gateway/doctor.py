@@ -1,6 +1,7 @@
 """Configuration, filesystem, and daemon diagnostics for the gateway CLI."""
 
 import asyncio
+import json
 import os
 import secrets
 from collections.abc import Awaitable, Callable, Mapping
@@ -56,6 +57,7 @@ DirectoryProbe = Callable[[Path], DoctorCheck]
 SocketProbe = Callable[[Path], Awaitable[SocketProbeResult]]
 
 _OPEN_WEBSEARCH_HEALTH_TIMEOUT = 2.0
+_MAX_HEALTH_BODY_BYTES = 64 * 1024
 
 
 def _open_websearch_health_url(raw_api_url: object) -> httpx.URL | None:
@@ -65,7 +67,7 @@ def _open_websearch_health_url(raw_api_url: object) -> httpx.URL | None:
     if any(ord(char) < 32 or ord(char) == 127 for char in raw_api_url):
         return None
     try:
-        base = urlsplit(raw_api_url)
+        base = urlsplit(raw_api_url.strip())
         if (
             base.scheme not in {"http", "https"}
             or not base.hostname
@@ -87,23 +89,45 @@ async def _check_health_status(response: httpx.Response) -> None:
         raise httpx.HTTPStatusError("unhealthy status", request=response.request, response=response)
 
 
+async def _healthy_daemon_response(response: httpx.Response) -> bool:
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        if len(body) + len(chunk) > _MAX_HEALTH_BODY_BYTES:
+            return False
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (ValueError, RecursionError):
+        return False
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return False
+    data = payload.get("data")
+    return isinstance(data, dict) and data.get("daemon") == "running"
+
+
 async def _probe_open_websearch_health(raw_api_url: object) -> DoctorCheck:
     url = _open_websearch_health_url(raw_api_url)
     if url is None:
         return DoctorCheck(
             DoctorStatus.FAIL, "open-webSearch daemon unhealthy (invalid_health_url)"
         )
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _OPEN_WEBSEARCH_HEALTH_TIMEOUT
     try:
         async with (
-            asyncio.timeout(_OPEN_WEBSEARCH_HEALTH_TIMEOUT),
+            asyncio.timeout_at(deadline),
             httpx.AsyncClient(
                 follow_redirects=False,
                 trust_env=False,
                 timeout=_OPEN_WEBSEARCH_HEALTH_TIMEOUT,
                 event_hooks={"response": [_check_health_status]},
             ) as client,
+            client.stream("GET", url) as response,
         ):
-            response = await client.get(url)
+            healthy = await _healthy_daemon_response(response)
+        # Synchronous JSON decoding can cross the deadline before the loop dispatches cancellation.
+        if loop.time() >= deadline:
+            raise TimeoutError
     except (TimeoutError, httpx.TimeoutException):
         return DoctorCheck(DoctorStatus.FAIL, "open-webSearch daemon unhealthy (timeout)")
     except httpx.TransportError:
@@ -113,16 +137,9 @@ async def _probe_open_websearch_health(raw_api_url: object) -> DoctorCheck:
             DoctorStatus.FAIL, f"open-webSearch daemon unhealthy ({exc.response.status_code})"
         )
     except httpx.DecodingError:
-        payload = None
-    else:
-        try:
-            payload = response.json()
-        except (ValueError, RecursionError):
-            payload = None
-    if isinstance(payload, dict) and payload.get("status") == "ok":
-        data = payload.get("data")
-        if isinstance(data, dict) and data.get("daemon") == "running":
-            return DoctorCheck(DoctorStatus.OK, "open-webSearch daemon healthy")
+        healthy = False
+    if healthy:
+        return DoctorCheck(DoctorStatus.OK, "open-webSearch daemon healthy")
     return DoctorCheck(
         DoctorStatus.FAIL, "open-webSearch daemon unhealthy (invalid_health_response)"
     )
