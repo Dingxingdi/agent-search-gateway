@@ -9,12 +9,19 @@ from agent_search_gateway.runtime import Runtime
 from tests.doctor._support import environment_name, write_valid_config
 
 
-async def test_doctor_does_not_build_runtime_or_construct_http_client(
+@pytest.mark.parametrize("configured", [False, True], ids=["unconfigured", "disabled"])
+async def test_doctor_without_enabled_open_websearch_skips_runtime_and_http_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
 ) -> None:
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
+    if configured:
+        with paths.config_file.open("a") as target:
+            target.write(
+                "[web_providers.open_websearch]\nenable_search = false\nenable_fetch = false\n"
+            )
 
     def forbidden_runtime_build(*args: object, **kwargs: object) -> Runtime:
         raise AssertionError("doctor must not build Runtime")

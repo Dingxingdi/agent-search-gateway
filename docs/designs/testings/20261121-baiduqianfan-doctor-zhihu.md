@@ -34,13 +34,15 @@
 | BQ-03 | 两个分支分别提供正确官方成功 fixture | 两组 URL 都转成 KeywordSearchHit；固定分支顺序汇总；无多余 HTTP 请求 |
 | BQ-04 | 使用 Event 阻塞两个模拟 HTTP 请求 | 任一分支完成前两个分支都已发起，证明实际并行而不是串行 |
 | BQ-05 | Web Search 包含网页、图片、视频 URL | 读取官方支持的顶层或指定嵌套 URL；有效 HTTP(S) URL 保留；媒体命中正文为空 |
-| BQ-06 | Agentic 包含 web_pages、images、videos 和卡片 | 仅返回带真实 URL 的条目；没有 URL 的卡片不伪造；无媒体二进制处理 |
+| BQ-06 | Agentic 包含 web_pages、images、videos 和卡片 | 仅返回带真实 URL 的条目；卡片仅校验 cards 数组，不扫描内部 URL；无媒体二进制处理 |
 | BQ-07 | Agentic 网页含 snippet、content | snippet 映射摘要，content 映射 raw_content（不视作已清洗 content）；Web Search 的短节选不伪装全文 |
 | BQ-08 | 中文、特殊字符、原样 query | 两个分支接收同一输入；无新语义改写、字节截断或错误 URL query 参数拼接 |
-| BQ-09 | 两分支合法空结果 | 返回 []，不误报协议失败或整体失败 |
+| BQ-09 | 两分支合法空结果 | 返回 []。官方 Agentic 成功示例中 `image_result.images = null`、`video_result.videos = null` 均表示对应媒体列表为空。2026-11-21 实测的 `card_result.cards = null` 表示无卡片；与网页同现时保留网页和候选摘要，仅此卡片容器时返回空命中及全零摘要 |
 | BQ-10 | 有效与坏条目混合（缺 URL、非法 scheme、错误字段类型） | 坏条目只单条拒绝，其余保留；CandidateCounts received/accepted/rejected 正确 |
 | BQ-11 | 两个分支返回重复/带追踪参数的 URL | 现有 SearchOrchestrator 和 URLStore 负责规范化去重；不要求 adapter 额外去重 |
 | BQ-12 | raw_content 正文命中进入 Search -> URL Fetch | cheap_check/judge/content-clean 及既有安全检查继续生效；不会绕过正文清洗或把 URL-only 图片当成文本 |
+
+Agentic 的 `received` 等于实际遍历的 `web_pages`、`images` 和 `videos` 数组长度之和。可选模态省略或媒体列表显式为 null 时贡献零项。卡片不进入候选计数，即使含有深层 URL；仅卡片成功时命中为空，所有计数为零。坏候选只影响该条记录，最终 `received = accepted + rejected` 且 `unprocessed = 0`。
 
 对缺少 title/snippet 但 URL 有效的媒体结果，验证填写诚实的类型标签，使旧编排器不会因 empty_abstract 丢弃条目；不改变 KeywordSearchHit 契约。
 
@@ -53,7 +55,7 @@
 | BQ-15 | 一路成功且返回 []、另一路失败 | 逻辑搜索成功返回 []，不把有效零结果当失败 |
 | BQ-16 | 两路都 HTTP/协议/业务失败 | 现有 ExecutionFailure / ALL_PROVIDERS_FAILED；逻辑 provider_failed 一次；不对整个 search 二次重试 |
 | BQ-17 | HTTP 200 但含明确上游错误 code | 当作业务失败而非成功空命中，错误诊断仅记录安全字段 |
-| BQ-18 | 非 JSON、缺必需 envelope、错误 result list 类型 | 分支失败；另一分支若正常则可降级成功 |
+| BQ-18 | 非 JSON、缺必需 envelope、网页列表或整个结果容器为 null、已出现的容器缺少列表字段或列表字段类型非法（BQ-09 的三个显式空值除外） | 分支失败；另一分支若正常则可降级成功 |
 | BQ-19 | HTTP 408、5xx、传输断连、超时 | 继续用现有 RetryPolicy；尝试次数上限与 Retry-After 行为不变 |
 | BQ-20 | HTTP 429 + RATE_LIMIT_SEARCH_QPS | 可重试的频率限制，使用全局退避和共享 rate gate |
 | BQ-21 | HTTP 429 + QUOTA_USER_DAILY_FREE 或 BILLING_INSUFFICIENT_BALANCE | 用既有 response_inspector 分类为 non-retryable；不重复发送；另一分支仍可成功 |

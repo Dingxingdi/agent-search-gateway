@@ -1,4 +1,5 @@
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 import pytest
 
@@ -6,12 +7,17 @@ from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import UNAVAILABLE_MESSAGE, ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
+from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import ChatMessage, URLFetchCandidate
+from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
+from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.support.fakes import FakeURLFetchProvider
+from tests.support.http import RecordingJsonExecutor
 
 
 class _FlowClient:
@@ -23,6 +29,7 @@ class _FlowClient:
         self.fail_safety = False
         self.fail_focus = False
         self.focus_calls = 0
+        self.calls: list[tuple[str, str]] = []
 
     async def complete_json(
         self,
@@ -30,6 +37,7 @@ class _FlowClient:
         messages: Sequence[ChatMessage],
     ) -> Mapping[str, object]:
         text = messages[-1]["content"]
+        self.calls.append((invocation.model, text))
         if invocation.model == "judge-model":
             if "semantic-reject" in text:
                 return {"ok": False, "reason": "semantic"}
@@ -43,6 +51,7 @@ class _FlowClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> str:
+        self.calls.append((invocation.model, messages[-1]["content"]))
         if invocation.model == "clean-model":
             if self.fail_clean:
                 raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "clean transport")
@@ -58,22 +67,26 @@ class _FlowClient:
         return None
 
 
-def _build(
-    store: URLStore,
-    client: _FlowClient,
-    providers: list[FakeURLFetchProvider],
-) -> FetchOrchestrator:
+def _flow_stages(client: _FlowClient) -> LLMStages:
     judge = LLMInvocation("llm", "judge-model", {})
     safety = LLMInvocation("llm", "safety-model", {})
     clean = LLMInvocation("llm", "clean-model", {})
     focus = LLMInvocation("llm", "focus-model", {})
-    stages = LLMStages(
+    return LLMStages(
         {"llm": client},
         judge=judge,
         safety=safety,
         content_clean=clean,
         focus_summary=focus,
     )
+
+
+def _build(
+    store: URLStore,
+    client: _FlowClient,
+    providers: list[FakeURLFetchProvider],
+) -> FetchOrchestrator:
+    stages = _flow_stages(client)
     scheduler = FetchScheduler(
         providers,
         ProviderQuotaManager(
@@ -83,6 +96,78 @@ def _build(
         stages,
     )
     return FetchOrchestrator(store=store, scheduler=scheduler, stages=stages)
+
+
+@pytest.mark.parametrize("safety_ok", [True, False])
+async def test_baiduqianfan_agentic_raw_content_uses_existing_clean_and_safety_pipeline(
+    tmp_path: Path,
+    safety_ok: bool,
+) -> None:
+    raw_content = "Original page text with useful factual information."
+    http = RecordingJsonExecutor(
+        [
+            {"references": []},
+            {
+                "web_page_result": {
+                    "web_pages": [
+                        {
+                            "url": "https://example.com/agentic-body",
+                            "title": "Original page",
+                            "snippet": "Admitted abstract",
+                            "content": raw_content,
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    adapter = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    store = URLStore()
+    client = _FlowClient()
+    client.safety_ok = safety_ok
+    search = SearchOrchestrator(
+        keyword_providers=[adapter],
+        llm_invocations=(),
+        quotas=ProviderQuotaManager(web_limits={"baiduqianfan": 1}, llm_limits={}),
+        stages=_flow_stages(client),
+        store=store,
+        result_writer=ResultWriter(tmp_path / "results"),
+    )
+
+    await search.keyword_search("query", request_id="17171717")
+
+    url = normalize_url("https://example.com/agentic-body")
+    snapshot = store.get(url)
+    assert snapshot is not None and snapshot.abstract == "Admitted abstract"
+    assert (snapshot.raw_content, snapshot.content) == (raw_content, "")
+    assert [model for model, _ in client.calls] == ["judge-model"]
+    assert raw_content in client.calls[0][1]
+
+    webpage_fetch = FakeURLFetchProvider(
+        "webpage-fetch",
+        failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "Unexpected webpage fetch"),
+    )
+    fetch = _build(store, client, [webpage_fetch])
+
+    result = await fetch.url_fetch(str(url))
+
+    assert result == ("cleaned body" if safety_ok else UNAVAILABLE_MESSAGE)
+    assert [model for model, _ in client.calls] == ["judge-model", "clean-model", "safety-model"]
+    assert raw_content in client.calls[1][1]
+    assert "cleaned body" in client.calls[2][1]
+    assert webpage_fetch.calls == []
+    assert len(http.requests) == 2
+    refreshed = store.get(url)
+    assert refreshed is not None
+    assert refreshed.raw_content == raw_content
+    assert refreshed.content == "cleaned body"
+    assert refreshed.available is safety_ok
+    if not safety_ok:
+        assert raw_content not in result and "cleaned body" not in result
+        assert await fetch.url_fetch(str(url)) == UNAVAILABLE_MESSAGE
+        assert len(client.calls) == 3
 
 
 def _admit(store: URLStore, suffix: str) -> str:

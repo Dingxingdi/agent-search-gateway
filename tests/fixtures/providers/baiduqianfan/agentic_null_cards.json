@@ -1,0 +1,25 @@
+{
+  "web_page_result": {
+    "web_pages": [
+      {
+        "url": "https://example.test/library-hours",
+        "title": "Library hours",
+        "content": "The library opens at nine.",
+        "snippet": "Opening times",
+        "publish_date": "2026-11-20",
+        "website": "Town library",
+        "icon": "https://example.test/icon.png",
+        "authority_score": 1
+      }
+    ]
+  },
+  "image_result": {
+    "images": null
+  },
+  "video_result": {
+    "videos": null
+  },
+  "card_result": {
+    "cards": null
+  }
+}

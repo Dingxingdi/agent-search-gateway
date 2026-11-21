@@ -8,16 +8,19 @@ from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
-from agent_search_gateway.providers.contracts import KeywordSearchHit
+from agent_search_gateway.providers.contracts import KeywordSearchHit, KeywordSearchProvider
+from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.support.fakes import FakeKeywordSearchProvider, FakeLLMClient
+from tests.support.http import RecordingJsonExecutor
 
 
 def _build(
-    tmp_path: Path, providers: Sequence[FakeKeywordSearchProvider]
+    tmp_path: Path, providers: Sequence[KeywordSearchProvider]
 ) -> tuple[SearchOrchestrator, URLStore, FakeLLMClient]:
     store = URLStore()
     judge = LLMInvocation("judge_only", "review-model")
@@ -142,3 +145,38 @@ async def test_keyword_filter_does_not_disable_other_alias_judge(tmp_path: Path)
     assert client.json_calls[0][0].provider == "judge_only"
     record = store.get(normalize_url("https://example.com/exa"))
     assert record is not None and record.raw_content == body
+
+
+async def test_baiduqianfan_selection_calls_only_one_logical_provider(tmp_path: Path) -> None:
+    http = RecordingJsonExecutor(
+        [
+            {"references": [{"url": "https://example.com/web", "snippet": "Web result"}]},
+            {
+                "web_page_result": {
+                    "web_pages": [
+                        {"url": "https://example.com/agentic", "snippet": "Agentic result"}
+                    ]
+                }
+            },
+        ]
+    )
+    baidu = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    others = _providers()
+    orchestrator, store, _ = _build(tmp_path, [*others, baidu])
+
+    path = Path(
+        await orchestrator.keyword_search("query", request_id="12121212", provider="baiduqianfan")
+    )
+
+    assert all(not provider.calls for provider in others)
+    assert [request.stage for request in http.requests] == ["web_search", "agentic_search"]
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"url": "https://example.com/web", "abstract": "Web result"},
+        {"url": "https://example.com/agentic", "abstract": "Agentic result"},
+    ]
+    assert store.get(normalize_url("https://example.com/web")) is not None
+    assert store.get(normalize_url("https://example.com/agentic")) is not None
+    assert orchestrator.quotas.get_web("baiduqianfan").max_observed_in_use == 1
+    assert all(orchestrator.quotas.get_web(p.name).max_observed_in_use == 0 for p in others)

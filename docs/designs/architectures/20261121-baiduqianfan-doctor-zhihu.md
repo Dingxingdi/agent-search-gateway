@@ -61,7 +61,7 @@ Official references:
 - Rejected: 在 Provider Protocol 中增加厂商特有参数和全局模式字段。
 
 #### D3 — 仅输出真实 URL
-- Description: Web Search 解析 references；媒体顶层 URL 不存在时仅使用官方定义的嵌套 image.url / video.url 作为后备。Agentic 分别解析 web_pages、images、videos。所有候选须为合法的 HTTP(S) URL。原有 SearchOrchestrator 继续负责标准化与最终去重。无 URL 卡片、非法条目按原有拒绝统计忽略。
+- Description: Web Search 解析 references；媒体顶层 URL 不存在时仅使用官方定义的嵌套 image.url / video.url 作为后备。Agentic 分别解析 web_pages、images、videos。所有候选须为合法的 HTTP(S) URL。原有 SearchOrchestrator 继续负责标准化与最终去重。卡片不进入候选计数；2026-11-21 实测的 `card_result.cards = null` 表示无卡片，同批网页照常解析。非法候选按原有拒绝规则统计。
 - Rationale: 现有结果契约就是 URL-based，既满足多模态链接又不引入二进制协议。
 - Trade-off: 图片尺寸、媒体时长、权威分数、发布时间和无链接卡片不会保留。
 - Rejected: 伪造链接、扩展 KeywordSearchHit 或在适配器自行复制去重逻辑。

@@ -10,14 +10,221 @@ from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import ChatMessage, KeywordSearchHit
+from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
+from tests.orchestrators.test_keyword_provider_filtering import _build as _build_keyword
 from tests.support.fakes import FakeKeywordSearchProvider
+from tests.support.http import RecordingJsonExecutor
 from tests.support.logging import structured_test_logger
+
+
+async def test_baiduqianfan_results_use_existing_url_normalization_and_dedup(
+    tmp_path: Path,
+) -> None:
+    web_urls = [
+        "https://example.com/same",
+        "  HTTPS://EXAMPLE.COM/case  ",
+        "https://www.google.com/goto?url=https%3A%2F%2Fexample.com%2Fpaper%3Fx%3D1",
+        "https://example.com/tracked?utm_source=one",
+    ]
+    agentic_urls = [
+        "https://example.com/same",
+        "https://example.com/case",
+        "https://example.com/paper?x=1",
+        "https://example.com/tracked?utm_source=two",
+        "https://example.com/paper?x=2",
+    ]
+    http = RecordingJsonExecutor(
+        [
+            {"references": [{"url": url, "snippet": f"Web {i}"} for i, url in enumerate(web_urls)]},
+            {
+                "web_page_result": {
+                    "web_pages": [
+                        {"url": url, "snippet": f"Agentic {i}"}
+                        for i, url in enumerate(agentic_urls)
+                    ]
+                }
+            },
+        ]
+    )
+    adapter = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    orchestrator, store, _ = _build_keyword(tmp_path, [adapter])
+
+    path = Path(await orchestrator.keyword_search("query", request_id="13131313"))
+
+    expected = [
+        ("https://example.com/same", "Web 0"),
+        ("https://example.com/case", "Web 1"),
+        ("https://example.com/paper?x=1", "Web 2"),
+        ("https://example.com/tracked?utm_source=one", "Web 3"),
+        ("https://example.com/tracked?utm_source=two", "Agentic 3"),
+        ("https://example.com/paper?x=2", "Agentic 4"),
+    ]
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"url": url, "abstract": abstract} for url, abstract in expected
+    ]
+    for url, abstract in expected:
+        snapshot = store.get(normalize_url(url))
+        assert snapshot is not None and snapshot.abstract == abstract
+    assert store.get(normalize_url(web_urls[2])) is None
+
+
+@pytest.mark.parametrize(
+    ("raw_content", "reason", "judge_calls"),
+    [("  \t ", "cheap_check", 0), ("Rejected original text.", "judge_rejected", 1)],
+)
+async def test_baiduqianfan_rejected_body_preserves_admitted_url_and_abstract(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    raw_content: str,
+    reason: str,
+    judge_calls: int,
+) -> None:
+    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
+    http = RecordingJsonExecutor(
+        [
+            {"references": []},
+            {
+                "web_page_result": {
+                    "web_pages": [
+                        {
+                            "url": "https://example.com/rejected",
+                            "snippet": "Retained abstract",
+                            "content": raw_content,
+                        }
+                    ]
+                }
+            },
+        ]
+    )
+    adapter = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    orchestrator, store, client = _build_keyword(tmp_path, [adapter])
+    client.json_result = {"ok": False}
+
+    path = Path(await orchestrator.keyword_search("query", request_id="14141414"))
+
+    assert json.loads(path.read_text()) == {
+        "url": "https://example.com/rejected",
+        "abstract": "Retained abstract",
+    }
+    snapshot = store.get(normalize_url("https://example.com/rejected"))
+    assert snapshot is not None and snapshot.available
+    assert snapshot.abstract == "Retained abstract"
+    assert (snapshot.raw_content, snapshot.content) == ("", "")
+    assert len(client.json_calls) == judge_calls
+    if judge_calls:
+        assert raw_content in client.json_calls[0][1][-1]["content"]
+    assert any(
+        getattr(record, "gateway_event", None) == "body_rejected"
+        and vars(record)["gateway_fields"]["provider"] == "baiduqianfan"
+        and vars(record)["gateway_fields"]["reason"] == reason
+        for record in caplog.records
+    )
+
+
+async def test_baiduqianfan_url_only_media_keeps_labels_without_body_processing(
+    tmp_path: Path,
+) -> None:
+    http = RecordingJsonExecutor(
+        [
+            {
+                "references": [
+                    {"type": "image", "image": {"url": "https://example.com/web-image"}},
+                    {"type": "video", "video": {"url": "https://example.com/web-video"}},
+                ]
+            },
+            {
+                "image_result": {"images": [{"url": "https://example.com/agentic-image"}]},
+                "video_result": {"videos": [{"url": "https://example.com/agentic-video"}]},
+            },
+        ]
+    )
+    adapter = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    orchestrator, store, client = _build_keyword(tmp_path, [adapter])
+
+    path = Path(await orchestrator.keyword_search("query", request_id="15151515"))
+
+    expected = [
+        ("web-image", "Image"),
+        ("web-video", "Video"),
+        ("agentic-image", "Image"),
+        ("agentic-video", "Video"),
+    ]
+    assert [json.loads(line) for line in path.read_text().splitlines()] == [
+        {"url": f"https://example.com/{suffix}", "abstract": label} for suffix, label in expected
+    ]
+    for suffix, label in expected:
+        snapshot = store.get(normalize_url(f"https://example.com/{suffix}"))
+        assert snapshot is not None and snapshot.abstract == label
+        assert (snapshot.raw_content, snapshot.content) == ("", "")
+    assert client.json_calls == []
+    assert client.text_calls == []
+    assert len(http.requests) == 2
+
+
+@pytest.mark.parametrize(
+    ("web_fails", "agentic_fails"), [(True, False), (False, True), (True, True)]
+)
+async def test_baiduqianfan_emits_one_logical_provider_terminal_event(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    web_fails: bool,
+    agentic_fails: bool,
+) -> None:
+    caplog.set_level("DEBUG")
+    failure = ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "Synthetic branch failure")
+    http = RecordingJsonExecutor(
+        [
+            failure
+            if web_fails
+            else {"references": [{"url": "https://example.com/web", "snippet": "Web result"}]},
+            failure
+            if agentic_fails
+            else {
+                "web_page_result": {
+                    "web_pages": [
+                        {"url": "https://example.com/agentic", "snippet": "Agentic result"}
+                    ]
+                }
+            },
+        ]
+    )
+    adapter = BaiduQianfanAdapter(
+        name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
+    )
+    orchestrator, _, _ = _build_keyword(tmp_path, [adapter])
+
+    if web_fails and agentic_fails:
+        with pytest.raises(ExecutionFailure) as error:
+            await orchestrator.keyword_search("query", request_id="16161616")
+        assert error.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    else:
+        path = Path(await orchestrator.keyword_search("query", request_id="16161616"))
+        branch = "agentic" if web_fails else "web"
+        assert json.loads(path.read_text())["url"] == f"https://example.com/{branch}"
+
+    events = [
+        vars(record)["gateway_event"]
+        for record in caplog.records
+        if getattr(record, "gateway_fields", {}).get("provider") == "baiduqianfan"
+    ]
+    both_failed = web_fails and agentic_fails
+    assert events.count("provider_completed") == (0 if both_failed else 1)
+    assert events.count("provider_failed") == (1 if both_failed else 0)
+    assert events.count("provider_partial_failure") == (0 if both_failed else 1)
+    assert len(http.requests) == 2
 
 
 class _JudgeClient:

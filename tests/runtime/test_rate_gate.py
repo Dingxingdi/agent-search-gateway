@@ -2,9 +2,14 @@ import asyncio
 import math
 from itertools import count
 
+import httpx
 import pytest
 
 from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
+from agent_search_gateway.models import RetryPolicy
+from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.rate_limit import (
     InitialRateBudget,
     RateGate,
@@ -283,3 +288,142 @@ async def test_initial_budget_requires_an_owning_task_even_for_a_loop_callback()
 
     asyncio.get_running_loop().call_soon(callback)
     assert await observed is None
+
+
+def _baidu_adapter(
+    client: httpx.AsyncClient,
+    gate: RateGate,
+    clock: ManualClock,
+    *,
+    max_attempts: int = 1,
+    timeout: float = 5,
+) -> BaiduQianfanAdapter:
+    return BaiduQianfanAdapter(
+        name="baiduqianfan",
+        secret=SecretValue("synthetic"),
+        http_executor=HttpJsonExecutor(
+            client,
+            RetryPolicy(max_attempts, 0, 0, timeout),
+            provider_name="baiduqianfan",
+            rate_gate=gate,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        ),
+    )
+
+
+async def test_baiduqianfan_two_searches_share_three_request_window() -> None:
+    clock = ManualClock()
+    gate = window_gate(clock, 3, 1)
+    sends: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        payload: dict[str, object] = (
+            {"references": []}
+            if request.url.path.endswith("/web_search")
+            else {"web_page_result": {"web_pages": []}}
+        )
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = _baidu_adapter(client, gate, clock)
+        async with asyncio.TaskGroup() as tasks:
+            first = tasks.create_task(adapter.search("first query"))
+            second = tasks.create_task(adapter.search("second query"))
+            await clock.advance_to(0)
+            await clock.advance_to(0)
+            assert sends == [0, 0, 0]
+            assert len(clock.sleepers) == 1
+            assert not (first.done() and second.done())
+            await clock.advance_to(0.999)
+            assert sends == [0, 0, 0]
+            await clock.advance_to(1)
+        assert first.result() == second.result() == []
+    assert sends == [0, 0, 0, 1]
+
+
+async def test_baiduqianfan_branch_retry_reserves_shared_rate_permit() -> None:
+    clock = ManualClock()
+    gate = window_gate(clock, 2, 1)
+    sends: list[tuple[str, float]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        sends.append((path, clock.now))
+        if path.endswith("/web_search") and sum(p == path for p, _ in sends) == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        payload: dict[str, object] = (
+            {"references": []}
+            if path.endswith("/web_search")
+            else {"web_page_result": {"web_pages": []}}
+        )
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = _baidu_adapter(client, gate, clock, max_attempts=2)
+        async with asyncio.TaskGroup() as tasks:
+            search = tasks.create_task(adapter.search("retry shares physical budget"))
+            await clock.advance_to(0)
+            await clock.advance_to(0)
+            await clock.advance_to(0)
+            assert [sent_at for _, sent_at in sends] == [0, 0]
+            assert set(clock.sleepers.values()) == {1}
+            await clock.advance_to(0.999)
+            assert len(sends) == 2
+            await clock.advance_to(1)
+        assert search.result() == []
+    assert [sent_at for _, sent_at in sends] == [0, 0, 1]
+    assert [path.rsplit("/", 1)[1] for path, _ in sends].count("web_search") == 2
+
+
+async def test_baiduqianfan_rate_wait_timeout_does_not_send_blocked_attempt(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+    clock = ManualClock()
+    gate = window_gate(clock, 1, 1)
+    sends: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(request.url.path)
+        item = {
+            "url": "https://example.test/surviving-branch",
+            "title": "Surviving title",
+            "content": "Surviving body",
+        }
+        payload: dict[str, object] = (
+            {"references": [item]}
+            if request.url.path.endswith("/web_search")
+            else {"web_page_result": {"web_pages": [item]}}
+        )
+        return httpx.Response(200, json=payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        adapter = _baidu_adapter(client, gate, clock, max_attempts=2, timeout=0.5)
+        async with asyncio.TaskGroup() as tasks:
+            search = tasks.create_task(adapter.search("preserve successful sibling"))
+            await clock.advance_to(0)
+            await clock.advance_to(0)
+            assert len(sends) == 1
+            await clock.advance_to(0.499)
+            assert len(sends) == 1
+            await clock.advance_to(0.5)
+        assert [hit.url for hit in search.result()] == ["https://example.test/surviving-branch"]
+        await clock.advance_to(1)
+        assert len(sends) == 1
+    timeouts = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "rate_limit_wait_timeout"
+    ]
+    assert len(timeouts) == 1
+    assert timeouts[0]["reason"] == "rate_limit_wait_timeout"
+    [partial] = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_partial_failure"
+    ]
+    assert partial["branch"] != sends[0].rsplit("/", 1)[1]
+    assert partial["error_type"] == "ExecutionFailure"
+    assert not clock.sleepers

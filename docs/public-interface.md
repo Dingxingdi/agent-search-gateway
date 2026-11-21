@@ -100,6 +100,8 @@ adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 ## Diagnostic interfaces
 
+`doctor` makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A healthy response confirms daemon liveness only. A failed probe produces a `[fail]` check and exit code 1. A missing gateway Unix socket is independently reported as `[info] daemon not running`. A report containing only `[ok]` and `[info]` checks exits with code 0.
+
 `doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `1.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
 DEBUG diagnostics cover Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations.

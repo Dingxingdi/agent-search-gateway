@@ -1,0 +1,18 @@
+{
+  "web_page_result": {
+    "web_pages": [
+      {
+        "url": "https://example.test/agentic",
+        "title": "Agentic title",
+        "snippet": "Agentic snippet",
+        "content": "Original page text."
+      }
+    ]
+  },
+  "image_result": {
+    "images": null
+  },
+  "video_result": {
+    "videos": null
+  }
+}

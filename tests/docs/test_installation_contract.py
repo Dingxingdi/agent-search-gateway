@@ -36,7 +36,12 @@ def test_readme_documents_debug_and_doctor_operational_contract() -> None:
     assert "response_preview_truncated" in readme
     assert "authentication values" in readme
     assert "final-output-only" in readme
-    assert "no network" in readme
+    assert "no network requests when `open_websearch` is absent" in readme
+    assert "both Search and Fetch are disabled" in readme
+    assert "either capability enabled" in readme
+    assert "one credential-free `GET /health`" in readme
+    assert "failed probe gives exit code 1" in readme
+    assert "daemon liveness only" in readme
     assert "daemon not running" in readme
     assert "informational" in readme
 

@@ -16,14 +16,14 @@
 - 工作树：`/home/agent/agent-search-gateway/.worktrees/design-baiduqianfan-doctor-zhihu-20261121`。
 - 分支：`design-baiduqianfan-doctor-zhihu-20261121`。
 - 设计提交：`d794a70c44f0c4093958861b17fd1668f7ff4565`；业务基线：`e712f10bdb376fa63837af1365207264ce5a22e6`。
-- 本文件是实施计划。本文的任务、测试预期和命令尚未执行，不表示功能已经实现。
+- 本计划的 15 项任务已执行完成。阶段性失败、写入阻塞的解决过程及最终验收结果见末尾实施记录。
 - 继续使用该工作树；开始执行时重新加载适用指令、核对工作树和未提交变化。所有编辑以最新读取的 SHA-256 防止覆盖其他会话的修改，新增文件禁止覆盖同名文件。
 - 不修改另一个 You.com 工作树，不切换主仓库分支，不覆盖 `.ai-bridge`。只提交本任务文件。
 - 核心生产改动限于新增百度适配器、默认注册表和 `doctor.py`。复用现有配置解析、HTTP 执行器、RateGate、编排器、URLStore 和结果协议。
 - 不新增依赖、百度 Fetch、分支开关、公共多模态类型、通用多分支框架、云端在线鉴权、Agent 命令探测或进程管理。
 - 本次不发布版本、不创建 PR、不更新用户真实配置或凭据。实现阶段的 PR/发布另按用户任务处理。
 
-## 已核对的现有调用链
+## 已核对的基线调用链
 
 `CLI -> daemon -> SearchOrchestrator -> KeywordSearchProvider.search(query) -> HttpJsonExecutor -> KeywordSearchHit -> URL 规范化/去重 -> URLStore/ResultWriter`。
 
@@ -140,13 +140,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_zhihu.py
 - Modify: `docs/designs/testings/20261121-baiduqianfan-doctor-zhihu.md` BQ-09/BQ-18 说明
 - Inspect: `src/agent_search_gateway/providers/web/zhihu.py:80-124`、`tests/support/http.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先同步官方 nullable 媒体说明，并写最小脱敏 fixture；它们使用 `example.test` URL、合成标题/原文和假的 key。新增 `test_baiduqianfan_search_posts_both_official_payloads`：真实 executor + MockTransport 按路径返回两个独立 fixture，调用一次 `search`，断言两条结果、两次 POST、准确路径、同一 Bearer、不同请求 body 和固定分支顺序。之后单独补 `test_baiduqianfan_appends_both_paths_to_configured_base` 与 `test_baiduqianfan_preserves_query_text`，覆盖默认根、自定义路径前缀及末尾斜杠、中文/特殊字符 query。
 
 预期行为失败：尚未发送两个协议正确的请求/返回两组命中；不是模块导入失败。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'official_payloads or configured_base or query_text' -v
@@ -154,7 +154,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：正在新增的行为断言 FAIL，其余已实现的增量测试 PASS。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 constructor 保存 name、SecretValue、同一 JsonRequester、校验后的 base URL
@@ -167,7 +167,7 @@ Web 成功解析 references 内的网页，Agentic 成功解析 web_pages
 
 使用 common 中已有 endpoint/configured_string/字段校验 helper，不注册 provider、不修改 Runtime。Agentic fixture 中官方 nullable 媒体不能导致成功网页丢失。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/web/test_zhihu.py -q
@@ -176,7 +176,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：目标与离线全量 PASS；live 仍 SKIP。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只抽取适配器内部重复的固定 headers/endpoint 代码；不提取跨 provider 框架。若发生重构，复跑 Step 4 两条命令；否则沿用刚取得的验证结果。
 
@@ -188,13 +188,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `tests/fixtures/providers/baiduqianfan/README.md`
 - Inspect: `src/agent_search_gateway/providers/web/doubao.py:150-173`、`src/agent_search_gateway/url_normalization.py:33-49`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_baiduqianfan_maps_web_search_url_bearing_results`：fixture 同时含网页、只有 URL 的图片/视频、指定嵌套后备 URL、顶层与嵌套均有 URL 的媒体。验证顶层优先、准确媒体标签、所有媒体正文为空、Web 的 snippet/content 片段不成为 raw_content。
 
 随后逐个加入 `test_baiduqianfan_rejects_bad_web_candidates_without_losing_siblings`：非 object、缺失/空 URL、ftp/javascript URL、非法 hostname/port、错误文本字段类型与合法项混合；合法兄弟项全部保留。`test_baiduqianfan_preserves_duplicate_urls` 断言 adapter 保留原 URL 及重复项，留给编排器去重。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'web_search_url or bad_web_candidates or duplicate_urls' -v
@@ -202,7 +202,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：媒体/坏记录边界尚未实现的断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 严格读取 references 数组
@@ -217,7 +217,7 @@ Web raw_content/content 始终为空；不把 2000 字片段当全文
 
 不扫描 hover_pic、icon、未知深层对象或卡片。没有合法 URL 的条目逐条忽略，不导致同级合法项失败。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/web/test_doubao.py tests/unit/test_url_normalization.py -q
@@ -226,7 +226,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：各 URL/媒体断言 PASS，现有 URL 语义不变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 common 和 normalize_url 的既有错误/拒绝原因，不新增 URL 规范化实现。若调整代码，复跑 Step 4。
 
@@ -238,7 +238,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `tests/fixtures/providers/baiduqianfan/README.md`
 - Modify: `docs/designs/testings/20261121-baiduqianfan-doctor-zhihu.md` 候选计数/空模态说明
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_baiduqianfan_maps_agentic_modalities_and_raw_content`：网页、图片、视频、卡片同时出现；网页 content 只进入 raw_content，cleaned content 为空；媒体 URL/标签保留且不带正文。
 
@@ -246,7 +246,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 新增 `test_baiduqianfan_rejects_bad_agentic_candidates_without_losing_siblings`，按 webpage/image/video 参数化，在同一模态中混入非 object、缺 URL、非法 URL、错误文字字段，同时保留同列表与其他模态的合法项。断言合法项保留、聚合 received=accepted+rejected 且 unprocessed=0；错误网页 content 类型只拒绝该记录，媒体正文仍为空。Web 解析器的坏记录测试不能替代这一组。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'agentic_modalities or empty_and_null or card_only or bad_agentic_candidates' -v
@@ -254,7 +254,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：尚未覆盖的媒体/空结果或 raw_content 映射 FAIL；官方 nullable 成功 fixture 不得因测试写错而成为假 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 仅枚举已知结果容器；整体必须至少包含一个可识别的有效结果容器
@@ -268,7 +268,7 @@ card_result 验证必要容器形状后忽略内容；不按卡片 type 枚举�
 
 明确 `{}`、`{"unexpected":[] }` 或坏容器不是“合法空结果”。只对已经证实的 images/videos null 放宽。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -q
@@ -277,7 +277,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：原文、媒体、空数组、nullable、仅卡片全部 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只有当两种解析器出现实际重复时，抽取适配器内部单候选转换 helper；保留独立 envelope 校验。若重构，复跑 Step 4。
 
@@ -289,13 +289,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `tests/fixtures/providers/baiduqianfan/README.md`
 - Inspect: `src/agent_search_gateway/providers/http.py:114-136,191-207,424-465`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_baiduqianfan_invalid_envelope_is_a_branch_failure`，按分支参数化非 JSON、顶层数组、缺 references/全部已知容器、错误容器/非 null 列表类型。测试初期可直接调用两个私有分支边界，聚合降级由 Task 5 验证。
 
 新增 `test_baiduqianfan_http_200_business_error_is_not_empty_success`：顶层 InvalidArgument、InternalError、数值错误码、未知非空 code、错误 code 类型，同时放入看似成功的数据，确保失败优先；正常无 code 仍成功。使用真实 executor 检查 inspector 生效，不用 RecordingJsonExecutor 代替。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'invalid_envelope or business_error' -v
@@ -303,7 +303,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：原本错误地返回 []/命中的分支现在需要失败，当前行为断言 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 response inspector 只依据已确认的顶层 code
@@ -317,7 +317,7 @@ HTTP 200 非 JSON 留给既有 decode -> ProtocolFailure
 
 不添加未经证实的 `error.code` 回退、成功 code=0 白名单、上游 message 日志或全局重试改动。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/test_http_executor.py -q
@@ -326,7 +326,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：200 业务错误/结构错误失败，合法空和坏记录隔离仍 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 让两个分支复用一个百度私有错误分类函数，通过闭包绑定 stage；不修改公共 inspector 类型。若重构，复跑 Step 4。
 
@@ -336,13 +336,13 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `src/agent_search_gateway/providers/web/baiduqianfan.py`、`tests/providers/web/test_baiduqianfan.py`
 - Inspect: `src/agent_search_gateway/providers/web/zhihu.py:80-124`、`tests/providers/web/test_zhihu.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_baiduqianfan_starts_both_branches_before_either_finishes`：两个分支各自设置 entered Event 并等待 release Event；只有两个 entered 都已发生才释放，证明实际并行，不依赖耗时比较。
 
 新增 `test_baiduqianfan_preserves_successful_branch_after_sibling_failure`，分别覆盖 Web/Agentic 失败和成功分支为空/非空；失败可为 HTTP 403、200 业务错误、协议异常。新增 `test_baiduqianfan_aggregates_two_failures_using_fixed_first_branch`，交换完成顺序仍按 Web→Agentic 选择安全代表原因。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'starts_both or sibling_failure or two_failures' -v
@@ -350,7 +350,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：普通 gather 在一支失败时丢失另一支成功结果，或双失败错误语义不符合现有 provider 失败契约。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 仿照 Zhihu 的 run_branch：只捕获 Exception，返回 hits 或普通异常
@@ -363,7 +363,7 @@ create_task 两支，然后 gather，固定处理顺序 Web -> Agentic
 
 HTTP 层各自重试与逻辑 provider 终态保持原职责。adapter 不提前去重。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/web/test_zhihu.py -q
@@ -372,7 +372,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：并发、单支空成功、两个方向的部分失败和双失败均 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅复用知乎现有控制流模式，不抽取通用框架，不替换为改变取消/降级语义的 TaskGroup。若重构，复跑 Step 4。
 
@@ -382,7 +382,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `src/agent_search_gateway/providers/web/baiduqianfan.py`、`tests/providers/web/test_baiduqianfan.py`
 - Inspect: `src/agent_search_gateway/providers/web/zhihu.py:91-97`、`tests/providers/web/test_zhihu.py` 取消用例
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 逐个新增：
 
@@ -391,7 +391,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - `test_baiduqianfan_retry_sleep_cancellation_stops_later_requests`：取消发生于既有重试等待时，不能继续发送下一次请求。
 - 所有取消情形不记录 provider_partial_failure，也不伪造成功结果。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/web/test_zhihu.py -k cancellation -v
@@ -399,7 +399,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：百度尚未实现的清理断言 FAIL；知乎原有取消回归 PASS。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 外层 gather 捕获 asyncio.CancelledError
@@ -411,7 +411,7 @@ await gather(全部子任务, return_exceptions=True) 完成清理
 
 不吞掉取消、不把 CancelledError 转成普通分支失败；防止二次 cancel 打断已经进入的异步 finally。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/web/test_zhihu.py tests/providers/test_http_executor.py -q
@@ -420,7 +420,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：父子取消、retry wait 取消和所有旧取消测试 PASS，无遗留任务。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 保持清理代码靠近双任务创建/gather，避免增加任务注册器。若重构，复跑 Step 4。
 
@@ -431,7 +431,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `tests/fixtures/providers/baiduqianfan/business_errors.json`
 - Inspect: `src/agent_search_gateway/providers/http.py:424-465,665-669`、`tests/providers/test_http_executor.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 使用真实 executor + MockTransport，按分支参数化：
 
@@ -444,7 +444,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 QPS case 的 `Retry-After` 应与普通 backoff 明显不同，用注入 sleep/时钟记录等待；只断言 retryable=True 不能证明保留了服务端等待。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k '429 or retry_policy or non_retryable_http' -v
@@ -452,7 +452,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：quota/balance 仍被通用 429 重试；其他沿用公共策略的用例可能首次即 PASS，按回归记录。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 inspector 读取已知顶层 code
@@ -467,7 +467,7 @@ if status == 200 and 明确业务错误:
 
 不要将 QPS/未知 429 包装为 retryable ProviderResponseFailure：这会改走不保留响应 Retry-After 的执行器路径。不要添加百度自己的 retry loop、每日额度计数或付费回退。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/providers/test_http_executor.py tests/unit/test_retry.py -q
@@ -476,7 +476,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：已知不可重试额度每支一次；QPS/未知 429、408/5xx/transport 按既有策略重试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 提取百度私有已知码集合即可；不扩张全局 reason allowlist 或全局 429 规则。若重构，复跑 Step 4。
 
@@ -486,7 +486,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `src/agent_search_gateway/providers/web/baiduqianfan.py`、`tests/providers/web/test_baiduqianfan.py`
 - Inspect: `src/agent_search_gateway/providers/diagnostics.py:74-110,167-238`、`tests/observability/test_provider_diagnostics.py`、`tests/observability/test_redaction.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_baiduqianfan_logs_only_safe_branch_diagnostics`，caplog 检查成功分支各一条 `provider_candidates_summary`，received=accepted+rejected，unprocessed=0，stage 名准确，合法空分支也有零计数 summary。
 
@@ -494,7 +494,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 DEBUG 的 HTTP body preview 沿用现有截断脱敏规则；不要新增“所有 DEBUG 都不得含 query”的伪约束，也不要把现有安全 preview 的允许行为误判为泄漏。真实 key/Authorization/token sentinel 在最终格式化输出中必须不可见。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py -k 'safe_branch_diagnostics or exception_text' -v
@@ -502,7 +502,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqia
 
 预期：缺失 summary、安全分类不完整或无意传入 raw message 的断言 FAIL。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个成功分支维护一个 CandidateCounts，处理完后发一次 summary
@@ -515,7 +515,7 @@ HTTP attempt 日志继续由 executor 发；provider 终态继续由 orchestrato
 
 `ProviderResponseFailure` 的 partial reason 可能是既有 `execution_failure`；不要为了输出新的 reason 修改公共协议，具体业务区别保留在安全 known code 中。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/web/test_baiduqianfan.py tests/observability -q
@@ -524,7 +524,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：计数完整，adapter 事件无未经审核内容，既有 body preview 和脱敏回归通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只合并已重复的百度安全诊断构建代码，不增加新的日志层。若重构，复跑 Step 4。
 
@@ -537,7 +537,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Modify: `tests/docs/test_documented_config.py:30-103,344-391,494-522`
 - Inspect: `src/agent_search_gateway/config.py:25-33,95-109,145-244`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_default_registry_adds_one_baiduqianfan_search_only_provider`，断言唯一注册、factory 类型、search=True/fetch=False、requires_api_key=True、仅 api_url 专有配置。原四个新 provider 的顺序断言改为精确切片 `[20:24]`，再独立验证尾部仅百度；不改前 24 个顺序。
 
@@ -545,7 +545,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 文档契约新增百度默认关闭和 3/1s 窗口；独立验证启用 Search、保持 Fetch=false。不能把百度直接加入要求 Search+Fetch 的新四 provider 启用矩阵。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_providers.py tests/docs/test_documented_config.py -v
@@ -553,7 +553,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_registry.py 
 
 预期：百度未注册/示例缺表/参考页缺行的真实契约 FAIL。每次只新增当前增量测试，再实施对应变更。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 在 registrations 末尾追加 `WebProviderRegistration("baiduqianfan", ProviderCapabilities(search=True, fetch=False), BaiduQianfanAdapter, frozenset({"api_url"}))`。保留 requires_api_key 默认 true，不修改 config.py。
 
@@ -578,7 +578,7 @@ README 增加百度能力行、env 名、固定双分支、raw_content/媒体链
 
 文档测试保持完整覆盖：总行数预期 32；旧行 Verified 继续 2026-11-19，百度新增行是 2026-11-21，以按 provider 的日期期望校验。不要为通过统一日期断言而伪造重新核验全部旧 provider。expected_windows 增加百度，示例 provider 集合增加百度。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/providers/test_registry.py tests/unit/test_config_web_providers.py tests/docs -q
@@ -587,7 +587,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：registry/config/docs 一起 PASS；知乎 policy 仍无固定窗口/间隔，百度 disabled 不要求 key。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用 Search-only 配置测试矩阵；保持旧四双能力 provider 的用例不受影响。若重构，复跑 Step 4。按本任务整体完成后再提交，避免注册数量与文档断言暂时不一致的提交。
 
@@ -599,7 +599,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Inspect: `src/agent_search_gateway/runtime.py:222-286`、`tests/support/controlled.py:29-54`、`tests/providers/test_http_executor.py:632-714`
 - Production change: 原则上无；只有测试证明百度适配器绕过已注入 executor 时才修正该适配器
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 单独新增 `test_baiduqianfan_runtime_owns_one_executor_and_gate`：显式 Search=true/Fetch=false，构建 Runtime；只有一个百度搜索 adapter、零百度 fetch adapter、一个 executor/gate，两个分支都使用此 executor，关闭时 client 只释放一次。不要把百度加入现有假设双能力的 `_ADAPTERS` 矩阵。
 
@@ -607,7 +607,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 新增 `test_baiduqianfan_branch_retry_reserves_shared_rate_permit` 和 `test_baiduqianfan_rate_wait_timeout_does_not_send_blocked_attempt`：重试再次计 permit；等待超预算的分支没有发出 HTTP，沿用 rate_limit_wait_timeout，兄弟支仍可成功。删除 rate_limits 后无隐含 3 QPS 限制。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_rate_gate.py tests/providers/web/test_baiduqianfan.py -k 'baiduqianfan and (executor or gate or window or permit or rate_wait)' -v
@@ -615,7 +615,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime/test_new_web_runtim
 
 预期：如果 adapter 未完整复用 executor/gate，接线断言 FAIL；正确复用时可首次 PASS，记录为 RATE-01～05 的回归证据，不修改已正确的公共组件。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 每个分支直接调用 self._http.request_json，不 new client/executor/gate
@@ -627,7 +627,7 @@ Runtime 默认 factory 装配一次百度 adapter
 
 gate identity 可沿用现有断言：executor 的 gate 与 `runtime.quotas.get_rate("web", "baiduqianfan")` 是同一实例。该私有断言只补充实际四次 HTTP 时间行为，不能单独代替行为验证。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/runtime tests/providers/web/test_baiduqianfan.py tests/providers/test_http_executor.py -q
@@ -636,7 +636,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：共享窗口、重试和预算规则 PASS；删除配置仍沿用原无限频率语义。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只复用已有 ManualClock、_ClientFactory、runtime 构建辅助，保留原四提供商用例。无生产重构需求；发生测试重构则复跑 Step 4。
 
@@ -648,7 +648,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Inspect: `tests/orchestrators/test_keyword_search_state.py:82-207`、`tests/orchestrators/test_url_fetch_flow.py:17-85`
 - Production change: 无编排器/URLStore 协议改动
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 增加真实百度 adapter 参与的薄连接用例：
 
@@ -658,7 +658,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - 增量覆盖 cheap_check/judge 拒绝正文但保留已准入 URL/摘要，以及 safety 拒绝不能返回正文；URL-only 媒体不进入新媒体处理链。
 - 通过 caplog 验证单支失败仍只有一次逻辑 provider_completed；双失败只有一次 provider_failed。adapter 的 partial_failure 不算第二个终态。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_keyword_provider_filtering.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py -k baiduqianfan -v
@@ -666,7 +666,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators/test_keyword_
 
 预期：若 raw_content/title/snippet 映射错误、去重被绕过或终态重复，对应断言 FAIL；其余既有流程可以直接作为 PASS 回归。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 SearchOrchestrator 仍消费 KeywordSearchHit
@@ -678,7 +678,7 @@ Baidu adapter 只纠正已被测试定位的映射错误
 
 连接测试使用现有受控 LLM client/flow fixture 和同一个 URLStore；不要在测试中复制整套生产 pipeline，也不要为了新 provider 改公共 orchestrator。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/orchestrators tests/acceptance/test_gateway_workflows.py tests/observability/test_provider_event_logging.py -q
@@ -687,7 +687,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：筛选、去重、缓存原文清洗、安全拒绝与终态计数 PASS，JSONL 结果契约不变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用现有受控 fixtures，保留职责边界。无生产改动时直接记录证据；若调整 fixture/映射，复跑 Step 4。
 
@@ -699,7 +699,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Inspect: `src/agent_search_gateway/providers/web/open_websearch.py:72-90`、`tests/doctor/_support.py`
 - Docs: [open-webSearch HTTP API](https://github.com/Aas-ee/open-webSearch/blob/main/docs/http-api.md)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 直接测试私有异步探针（暂不改 run_doctor 路由），用 MockTransport 捕获请求：
 
@@ -712,7 +712,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 所有含 userinfo/query 的安全哨兵只用保留的 `example.test` 域和合成 token。断言错误不回显原地址。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_health.py -k 'success_envelope or path_prefix or invalid_url or credentials' -v
@@ -720,7 +720,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_
 
 预期：健康 GET/安全 URL 处理尚未提供的行为断言 FAIL；模块/函数接口壳不包含网络实现。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 _probe_open_websearch_health(raw_api_url: object):
@@ -738,7 +738,7 @@ _probe_open_websearch_health(raw_api_url: object):
 
 本项目选择健康探针直连、禁重定向且不继承环境代理；官方 localhost 示例也建议绕过 shell proxy。实现不扩展 TLS、代理或兼容性配置。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor -q
@@ -747,7 +747,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：合法 GET/URL/凭证边界 PASS；尚未接入 run_doctor 时旧本地检查仍通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 健康代码留在现有 doctor 模块，必要时一个私有 URL helper 足够；不引入通用 HealthClient。若重构，复跑 Step 4。
 
@@ -756,7 +756,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 **Files:**
 - Modify: `src/agent_search_gateway/doctor.py`、`tests/doctor/test_open_websearch_health.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 逐个增加：
 
@@ -765,7 +765,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - `test_health_has_total_deadline_without_retry`：异步 transport 等待 Event，测试注入很小的私有时限，验证完整 await 有界结束且只尝试一次；不真实等两秒，不只检查 HTTPX timeout 属性。
 - `test_health_cancellation_propagates_and_closes_client`：请求已进入后取消父 task，传播 CancelledError，client 被关闭，不伪造 OK/FAIL。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_health.py -k 'requires_exact or classifies or total_deadline or cancellation' -v
@@ -773,7 +773,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_
 
 预期：未处理的失败/总时限/取消边界 FAIL。测试人为抛出的异常必须来自受控 transport，不能访问真实网络。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 使用 asyncio.timeout(2.0) 包住整段异步探测，给出总墙钟预算
@@ -788,7 +788,7 @@ CancelledError 原样传播，async with 关闭 client
 
 不要捕获 BaseException，不自动启动进程，不给健康探测套 HTTP executor 的重试/限流。意外实现错误继续由现有 CLI internal-error 边界处理。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor tests/cli/test_cli.py -q
@@ -797,7 +797,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：失败分类、总超时、无重试和取消清理 PASS。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 失败文案使用固定短类别，避免散落原始异常插值；若重构，复跑 Step 4。
 
@@ -810,7 +810,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Docs: `README.md`、`docs/public-interface.md`、`CHANGELOG.md`
 - Inspect: `tests/doctor/_support.py`、`tests/doctor/test_socket.py`、`tests/doctor/test_filesystem.py`、`tests/cli/test_cli.py:538-648`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先新增 `test_doctor_probes_enabled_open_websearch_once`：Search-only、Fetch-only、both 都只调用一次私有异步探针；省略 api_url 使用 adapter 默认地址，自定义值原样交给探针验证，非法显式 None 不能被当作未启用。
 
@@ -824,7 +824,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 所有启用场景通过 monkeypatch 私有探针或 MockTransport 隔离，不读取用户 home 配置，不启动/终止 daemon。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_health.py tests/doctor/test_config.py tests/doctor/test_no_network.py tests/acceptance/test_debug_and_doctor.py -k 'doctor and (open_websearch or health or config or network)' -v
@@ -832,7 +832,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor/test_open_websearch_
 
 预期：旧 run_doctor 没有探测已启用服务，健康 FAIL/启用判定的断言 RED；旧离线分支保持 PASS。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 _configuration_checks:
@@ -860,7 +860,7 @@ run_doctor:
 
 更新已有 installation contract 测试，同时保留 “no network” 的有条件承诺并断言新增例外；不仅删除旧断言。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/doctor tests/cli/test_cli.py tests/acceptance/test_debug_and_doctor.py tests/docs -q
@@ -869,7 +869,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 
 预期：DOC-01～15 全部覆盖；未启动 open-webSearch 为 FAIL，网关未启动 INFO 不遮蔽它；默认测试仍不访问公网/真实本地 HTTP 服务。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅抽取 private config result/health helper；不扩展全体 Web options 校验，不校验其他 provider 的真实连通性。旧 socket 最后一行、三个目录顺序和 Agent 静态分支保持通过。若重构，复跑 Step 4。
 
@@ -881,7 +881,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - Docs: `README.md` Opt-in live integration checks
 - Inspect: `tests/integration/test_live_new_web_providers.py`、`tests/unit/test_live_smoke_validation.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先在 unit 文件用 MockTransport 驱动拟新增的 smoke runner，不发送真实请求，验证：
 
@@ -891,7 +891,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q
 - `test_baidu_smoke_skips_missing_credentials_without_network`：缺 key 跳过、不构造 client；配置齐全后的鉴权/额度/协议失败不能被 SKIP 掩盖。
 - 现有 module-level `WEB_SEARCH_RUN_INTEGRATION` opt-in 与普通测试隔离保持一致。unit 测试显式注入 fake client/环境，不因复用 live helper 真正联网。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_live_baiduqianfan_validation.py -v
@@ -899,7 +899,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_live_baiduqianfan
 
 预期：smoke 的两分支证明、安全报告或缺 key 行为尚未实现，针对性的行为断言 FAIL；live 测试本身仍默认 SKIP。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 live 模块沿用现有 opt-in marker，只用 BAIDUQIANFAN_API_KEY
@@ -919,7 +919,7 @@ live 模块沿用现有 opt-in marker，只用 BAIDUQIANFAN_API_KEY
 
 README 给出只运行此文件的显式命令和额度含义；不把两种免费额度描述为必然独立或保证不会产生费用。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest tests/unit/test_live_baiduqianfan_validation.py tests/integration/test_live_baiduqianfan.py -q -rs
@@ -934,7 +934,7 @@ env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_baidu
 
 它会消耗两个分支的调用额度，重试可能增加物理请求。只记录实际观察到的分支成功/失败，不因未运行而报告 live PASS，不输出任何 key 值。手工 CLI 验证可使用现有 `keyword-search "Python 官方文档" --provider baiduqianfan`，但需由实施者在其已启用该 provider 的隔离/已授权运行环境中执行，不自动修改用户配置或启动共享 daemon。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅复用现有 smoke 模式和必要的私有 helper，避免给生产适配器增加测试专用状态/API。若重构，复跑 Step 4 的离线命令；无需为了测试重构反复消耗真实额度。
 
@@ -997,15 +997,39 @@ uv build
 | 文档完整、旧 provider/CLI/JSONL 回归 | 9、11、14、最终质量门 |
 | 显式 opt-in live、两接口结果区分、默认 CI 离线 | 15 |
 
-### 实施记录模板
+### 各 Task 实施记录（含阶段性结果）
 
 每个 Task 完成后补充真实证据，不预填 PASS。有效 RED 需要记录具体失败断言；既有能力首次已绿记录为“回归，生产改动为零”。未运行的 live 必须写未运行及原因。
 
 | Task | RED 或既有回归证据 | GREEN / 定向回归 | 全量测试/质量门 | 提交 |
 |---|---|---|---|---|
-| 1～15（实施时逐项展开） | 待执行 | 待执行 | 待执行 | 待执行 |
+| 1 | 双 POST 行为 RED：实际 0 次请求，预期 2 次；base/query 测试首次即绿，属既有回归 | 百度与知乎 87 passed | 全量 3559 passed / 18 skipped；受影响文件 Ruff/格式/mypy 通过 | 统一实施提交 |
+| 2 | 媒体后备、坏记录隔离、ftp 校验、空白 URL 后备、网页文本保留均经历有效 RED/GREEN；其他边界首次绿记回归 | 百度/豆包/URL 定向 155 passed | 全量 3584 passed / 18 skipped；Ruff/格式/mypy 通过；一次 Antigravity 时序失败单测及全量复跑恢复 | 统一实施提交 |
+| 3 | 缺媒体、可选/null 模态、仅卡片及三模态坏记录均有效 RED/GREEN；四项容器边界首次绿 | 百度 41 passed | 全量 3597 passed / 18 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 4 | 两分支 HTTP 200 InvalidArgument 曾 DID NOT RAISE；业务诊断和畸形码有效 RED/GREEN，坏 envelope 复用既有回归 | 百度+HTTP 238 passed | 全量 3620 passed / 18 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 5 | HTTP 403 丢成功兄弟及双失败误返回空均有效 RED/GREEN；并发首次绿 | 百度+知乎 163 passed；部分失败 12 组合、双失败 2 顺序通过 | 全量 3635 passed / 18 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 6 | 分支取消未等待兄弟 finally、重复 cancel 打断异步 finally 均有效 RED/GREEN；retry wait 取消首次绿 | 百度+知乎+HTTP 341 passed | 全量 3639 passed / 18 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 7 | quota/balance 两分支共 4 个有效 RED/GREEN；28 个既有 HTTP/retry 回归首次绿，6 个实测 Retry-After | 百度+HTTP+retry 312 passed | 全量 3671 passed / 18 skipped；Ruff/格式/mypy 通过；Antigravity 时序用例单测及全量复跑恢复 | 统一实施提交 |
+| 8 | 7 个计数/日志边界回归首次绿；QPS 耗尽重试的已知错误码丢失有效 RED/GREEN | 百度+日志 575 passed | 全量 3679 passed / 18 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 9 | 注册尾部缺失及示例缺表有效 RED；初次执行时 4 个既存文件的编辑受工具保护阻塞 | 注册+配置 277 passed；首次含文档 304 passed / 6 failed；用户明确授权 Bash 后补齐 12 处修改，相关文档/配置/Runtime 48 passed | 原阶段全量 3691 passed / 7 failed / 18 skipped；阻塞现已解决，最终全量 3813 passed / 19 skipped；未降低测试断言 | 统一实施提交 |
+| 10 | 5 个实际行为回归通过，生产改动零；超时用例曾误写异常类型后修正，不计功能 RED | Runtime+百度+HTTP 420 passed / 1 个既知旧注册列表 failed | 全量 3702 passed / 7 个既知阻塞 failed / 18 skipped；2 个测试文件 Ruff/格式/mypy 通过 | 统一实施提交 |
+| 11 | 10 个真实百度适配器连接案例全部首次绿；筛选/URL 去重/query 身份/正文拒绝/媒体/终态/缓存清洗安全均为既有回归，生产改动零 | 编排+网关验收+provider 日志 316 passed | 全量 3712 passed / 7 个既知阻塞 failed / 18 skipped；3 个测试文件 Ruff/格式/mypy/diff 检查通过 | 统一实施提交 |
+| 12 | 6 个未发 GET、3 个 URL 拼接、18 个非法地址及 1 个客户端隔离均有效 RED/GREEN；其余 2 个 URL 回归首次绿 | 新增健康探针 30 passed；doctor 48 passed | 全量 3742 passed / 7 个既知阻塞 failed / 18 skipped；2 个文件 Ruff/格式/mypy 通过 | 统一实施提交 |
+| 13 | 13 个坏正文、12 个传输/HTTP 分类及总时限均有效 RED/GREEN；取消首次绿 | doctor+CLI 157 passed | 全量 3769 passed / 7 个既知阻塞 failed / 18 skipped；2 个文件 Ruff/格式/mypy 通过；总时限测试注入 0.02s 且 client 关闭 | 统一实施提交 |
+| 14 | 4 个启用/URL 接线用例 await=0 RED→GREEN；解析一次/跳过/聚合/CLI/离线回归通过 | doctor+CLI+验收+文档首次 209 passed / 7 个文档 failed；README 两处条件联网合同现已补齐并通过回归 | 原阶段全量 3784 passed / 8 个写入阻塞 failed / 18 skipped；最终全量 3813 passed / 19 skipped；Ruff/格式/mypy 通过 | 统一实施提交 |
+| 15 | 两支协议证明、合法空结果、安全输出、缺 key、logger 恢复和 Retry-After 总时限均有真实 RED/GREEN；首次 live 发现 cards=null，已窄化复现并修复 | 离线 12 passed / 1 opt-in skipped；真实 smoke 1 passed：Web HTTP 200、40/40 verified；Agentic HTTP 200、10/10 verified；各 1 次请求；README smoke 段落已补齐 | 最终全量 3813 passed / 19 skipped；Ruff/格式/mypy、文档构建、打包、隔离 CLI 检查通过；本次补文档未重复真实请求 | 统一实施提交 |
 
-### 实施完成判定
+### 独立审查修复记录
+
+- 百度适配器 Tasks 1–8 独立只读审查发现 3 项具体边界：调用方重复取消打断分支异步清理；超深 JSON 的 429 在检查器解码时丢失 Retry-After；媒体后备 URL 合法但文本字段错误被误计为 missing_url。
+- 三项均有修复前行为失败证据，并通过新的独立实现代理修正；新增 6 个离线回归用例，定向 755 passed，受影响文件 Ruff/格式/mypy 通过。
+- 修复后全量为 3697 passed / 7 个既知写入保护阻塞 failed / 18 skipped；未引入新失败。独立复核运行 6 个新增用例及 1 个原有单次取消对照，7 passed；结论 No findings。
+
+- Doctor 独立审查发现损坏 gzip 正文导致报告中断，以及无效 Location 遮蔽非 200 状态两项边界；新实现代理以真实 HTTPX + MockTransport 公开 run_doctor 的 3 个 RED/GREEN 用例修复。
+- 修复后 doctor/CLI/验收 186 passed，全量 3799 passed / 8 个既知阻塞 failed / 19 skipped；Ruff/格式/mypy/diff 检查通过。原审查者复跑 3 项，No findings。
+- 独立日志审查确认正式 CLI 与项目 debug 配置未引入 HTTPX 原始 URL 日志；不对外部宿主主动启用第三方 INFO/DEBUG 作全局禁日志承诺。
+
+### 验收标准（已通过）
 
 - 一个 baiduqianfan 注册，无新增 fetch 能力或分支配置；示例环境名准确、默认关闭。
 - 两 API 并行且部分失败可降级，合法零结果、双失败、取消和清理均有证明。
@@ -1015,3 +1039,30 @@ uv build
 - 知乎只补真实说明，未捏造固定 QPS；现有相关测试通过。
 - 所有离线门和可选 live 结果分别记录，凭据/原始响应不进入提交或不安全日志。
 - 最终提交仅本任务改动；无版本发布或共享进程操作。
+
+### 真实接口兼容修复与最终验收
+
+- 首次真实 smoke 的 Web 分支正常；Agentic 返回 HTTP 200，但 cards=null 与原有严格列表校验冲突。只读结构诊断确认 `card_result` 是对象且显式含有 `cards: null`；未输出或保存原始响应、网页内容或密钥。
+- 新实现代理先得到有效 RED，再仅扩展显式存在的 `card_result.cards = null` 为空卡片；缺失 cards、整个容器 null、错误类型及顶层业务错误码仍保持失败。官方成功示例的 cards 为数组；cards=null 单独标为本次线上观察，未将其伪称为官方文档约定。
+- 新增合成 fixture 与 6 个回归用例；38 个边界、321 个 provider/executor/live 验证和 10 个编排用例通过。独立只读复审结论 No findings，无额外真实请求。
+- 最终真实双接口 smoke：Web 与 Agentic 均 HTTP 200、各 1 次请求，分别 received/hits=40/40 与 10/10；pytest 1 passed in 3.14s。此结果证明本次双接口调用与解析成功，不等同于对所有账号或未来服务可用性的保证。
+
+| 最终质量门 | 实际结果 |
+|---|---|
+| `uv run ruff format --check src tests scripts` | 通过，236 files already formatted |
+| `uv run ruff check .` | 通过 |
+| `uv run mypy src tests scripts` | 通过，233 source files |
+| `uv audit --locked --preview-features audit-command` | 通过，23 个包无已知漏洞或不利项目状态 |
+| 计划要求的定向离线回归 | 2718 passed |
+| `env WEB_SEARCH_RUN_INTEGRATION=0 uv run pytest -q` | 3813 passed / 19 skipped，无失败 |
+| `uv run python scripts/build_docs.py` | 通过 |
+| `uv build` | 通过，生成 1.0.0 sdist 和 wheel；未变更版本 |
+| 新 wheel 的隔离 CLI `--help` 与 `start --help` | 均通过；未安装到全局或启动 daemon |
+
+### 写入阻塞的解决与最终复核
+
+- 原先 `config.example.toml`、`README.md`、`docs/provider-rate-limits.md`、`tests/runtime/test_runtime_assembly.py` 的专用编辑调用被 LocalHost secret-looking guard 拒绝。用户随后明确授权直接使用 Bash 写入；重新加载适用指令、确认目标工作树和 Bash full 配置后，由新的实现代理完成这四个文件的 12 处精确修改。
+- 写入使用最新 SHA-256、唯一旧文本匹配、符号链接检查及写前并发复核，并保留原文件模式和 inode。反向还原这 12 处替换后得到各原文件 SHA，证明其余字节未变；没有从脱敏读取副本重建整份文件。
+- 四文件定向验收为 48 passed，原有 8 个失败全部消除。独立复核另指出 README 的媒体说明应包含保留的标题和摘要；新实现代理只改该句，文档回归 27 passed，复审 No findings。
+- 最终全量为 3813 passed / 19 skipped，计划要求的定向回归为 2718 passed。全量测试后的最后一处修改仅为上述 README 表述，已另跑 27 项文档回归，并重建文档与发行包、通过两个隔离 CLI 检查。生产实现及测试代码未再改变。
+- 15 项任务均已完成；本记录随统一实施提交保存，具体提交标识以本分支 Git 历史为准。未推送、创建 PR 或发布，未改变版本号、用户实际配置、凭据、共享进程或其他工作树。
