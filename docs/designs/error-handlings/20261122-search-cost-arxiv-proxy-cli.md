@@ -72,7 +72,7 @@ HTTPX 的 trust_env=False 同时跳过 HTTP(S)_PROXY 和 SSL_CERT_FILE/SSL_CERT_
 
 - 输入仍是普通自然语言关键词，既有 Paper Search 层先验证非空。
 - Provider 只将输入按 **字面词/双引号短语** 编译为字段表达式；不直接拼接用户的 AND/OR/括号为 API 语法。
-- 特殊字符、冒号、括号、反斜线、引号必须做安全字面化/转义；未闭合引号或多个连续引号采用宽容的字面输入处理，不引入与其他 Academic Provider 不一致的新公开错误码。实现须保证生成的查询表达式不会包含注入的布尔结构。
+- 特殊字符、冒号、括号、反斜线及引号只采用经官方解析链验证的安全字面化；生成的表达式不能包含用户注入的字段或布尔结构。对无法安全、无损表示的输入（包括不能保留为单个词项的嵌入/未闭合引号、上游会改写的日期字面量，以及不能保留的短语空白），在 HTTP 调用前返回现有 `ProtocolFailure(PROTOCOL_ERROR)`，不回显原始查询、不默默删除或替换字符。此最小行为调整经 2026-11-22 用户确认；不新增公开错误码，其他 Provider 继续走已有聚合流程。
 - 对无有效术语的非空输入沿用已有 Provider 故障路径；不修改 PaperOrchestrator 的统一异常汇总逻辑。
 - query_fields 只允许 ti/abs；非法字段、重复或空数组在启动时拒绝。max_results 1..100；sort_by 限于 relevance/submittedDate/lastUpdatedDate；sort_order 限于 ascending/descending。
 - 只执行一次原有 arXiv HTTP 请求，不在 429 后增加新的松弛检索请求；保留现有 RateGate 和 Retry-After 处理。

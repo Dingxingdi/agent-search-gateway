@@ -16,10 +16,10 @@
 - 目标工作树：`/home/agent/agent-search-gateway/.worktrees/design-firecrawl-arxiv-provider-proxy-cli-20261122`。
 - 分支：`design-firecrawl-arxiv-provider-proxy-cli-20261122`。
 - 规划基线：`fccbef763cbc6f1aff1f3ae6cb886417348d8bfe`；其父提交 `e712f10` 为 v1.0.0。
-- 本文件是实施计划。所有任务复选框表示未来实施工作；当前没有实现生产代码或运行这些测试。
+- 任务 1–15 均已完成。示例配置与运行时契约、完整离线测试及贡献指南中的全部检查已通过。各任务记录描述当时的执行状态，实施改动汇总为 Task 15 的一个本地提交。
 - 已加载全局指令；主仓库和工作树的根 `AGENTS.md` 不存在，工作树中未发现更深层 `AGENTS.md/CLAUDE.md/GEMINI.md`。
 - 延用这个工作树，不新建工作树，不切换主仓库分支，不修改实际用户配置或重启共享守护进程。
-- 三份 spec 中的“待审核、未提交”是遗留状态文字；本计划依据用户明确要求继续编写，不据此重新发起设计确认，也不顺手修改 spec。
+- 三份 spec 中的“待审核、未提交”是遗留状态文字。实施中用户已明确选择 arXiv 不可无损表示输入的“受控失败”，对应边界已同步到三份 spec 和本计划；其余设计范围保持。
 
 ### 已核对的最近调用证据
 
@@ -110,17 +110,17 @@ Task 1 先产出有证据的特殊字符策略。不能通过删除引号/反斜
 - Docs: `docs/designs/plans/20261122-search-cost-arxiv-proxy-cli.md` 的“特殊字符验证门”及 Task 10
 - Docs: 本文末的 arXiv 官方手册及固定版本源码链接
 
-- [ ] **Step 1: 写出失败场景及验证输入**
+- [x] **Step 1: 写出失败场景及验证输入**
 
 先列输入/预期 token 表：完整短语、短语内多空格、未闭合/连续引号、独立 AND/OR/ANDNOT/NOT、`au:example`、括号、百分号、Unicode、连字符、字面反斜线与嵌入双引号组合。要求每个输入词/短语只成为一个 literal，用户不能增加字段或布尔节点。保留 spec 中短语内部字符的要求。
 
-- [ ] **Step 2: 验证证据，不用模拟服务替代语法证明**
+- [x] **Step 2: 验证证据，不用模拟服务替代语法证明**
 
 阅读官方手册 §5.1 与完整前置处理/解析链。若使用本地重现，在临时验证目录保留输入、生成查询、实际解析出的词项/字段/操作符及结果；不向生产代码引入 Lark 或上游服务依赖。用上述反例检验候选 serializer，指出到底在哪一层失败。普通 HTTP 200、响应回显查询或自编 parser 的通过都不足以证明词项未被改写。
 
 必要的实际 arXiv 验证仅使用公开 API、合成短查询及 `max_results=1`，遵守至少三秒间隔；不使用共享 daemon、不运行全 Provider smoke、不把真实请求作为默认测试依赖。当前用户已授权针对性 smoke，无需仅因该可选步骤重复请求许可；若要改变 spec 则仍需明确决策。
 
-- [ ] **Step 3: 定义最小可实现策略**
+- [x] **Step 3: 定义最小可实现策略**
 
 ~~~text
 verified_literal_policy:
@@ -132,7 +132,7 @@ verified_literal_policy:
 
 策略确定后把明确输入/输出及证据写到 Task 10 测试中。若上游无法支持 spec 的无损要求，记录反例与最小可选归一策略，提交这一具体差异供确认；不得静默删除字符，Task 10/11/13 的 arXiv 验收保持未完成。
 
-- [ ] **Step 4: 核实普通查询路径可独立进行**
+- [x] **Step 4: 核实普通查询路径可独立进行**
 
 运行现有基线：
 
@@ -142,9 +142,27 @@ uv run pytest tests/providers/academic/test_arxiv.py -q
 
 预期：原有映射、HTTP 重试和 XML 诊断测试通过。此处是证据/基线任务，没有生产变更，不宣称已经证明新 compiler 正确。
 
-- [ ] **Step 5: 整理验证结论**
+- [x] **Step 5: 整理验证结论**
 
 只保留生成算法所必需的规则与具体反例。生产测试使用固定用例，不抓取当前网页或依赖联网；不把研究用 parser 复制成新的运行时系统。
+
+#### 2026-11-22 固定版本的实际解析结果
+
+在官方 commit `f53ed1707d80a877e72ec989b2156c2e7bb01d87` 的 Docker 指定版本 CPython 3.10.9 上，以锁定的 Lark 0.12.0、Werkzeug 2.3.5 运行原始代码。HTTPX 0.28.1 创建 GET 参数，经 Werkzeug 解码一次，走默认的 `adapt_query` 和 `ClassicAPIQuery(...).phrase`。两份上游测试模块共 24 项通过。59 组离线对照比较实际字段、操作符及每个叶子的完整值，其中 35 个候选保留全部预期，24 个候选被拒绝或改写。执行记录在本工作树 `.pytest_cache/arxiv-literal-f53-pyn9371n/` 的 `verify_literals.py` 和 `results-padded.json`。项目原有 `env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/academic/test_arxiv.py -q` 为 11 passed。该实验未连接线上 arXiv。
+
+| 输入或候选写法 | 固定版本产生的结果 |
+|---|---|
+| `graph transformers`、单字段、字段逆序、`"graph   neural networks" molecular` | 字段之间仅有预期的 OR，词组间仅有预期的 AND。短语中连续的三个空格保留。 |
+| 独立 `AND`、`OR`、`ANDNOT`、`NOT`，以及 `au:example`、`(graph)`、`50%`、`%22` | 每项外包一对双引号，分别只产生 ti/abs 两个相同正文的叶子。Unicode `图谱`、`state-of-the-art` 裸写也保真。 |
+| `TeX\alpha`、`end\`、以单个反斜线结尾的完整短语 | 普通词可裸写。短语 `graph model\` 生成字段字面量 `"graph model\ "` 时，仅新增的末尾空格被 transformer 剥掉，单个反斜线保留。该方法另对括号、字段样式和连续反斜线验证通过。直接紧贴闭引号会报 BadRequest，JSON 双写会保留多余反斜线。 |
+| 字面 `a"b`、`a""b`、`"open`、`end"`、`a\"b` | JSON 转义后，前置 tokenizer 已经拆词，随后报 BadRequest。直接包引号的 `a""b` 产生 ti/a、all/b、abs/a、all/b 四个叶子。将 `a"b` 写作 `a%22b` 得到的正文是 `a%22b`。 |
+| `"  edge  "`、短语内 CR/LF、`lastUpdatedDate:example`、`"submittedDate:[2020 TO 2021]"` | 实际正文分别变成 `edge`、空格、`submittedDate:example`。日期范围会被前置重写，产生额外 all 字段和 OR。词间多空格、制表符和普通反斜线没有这些改写。 |
+
+10A 可先实现普通 Unicode 词、连字符词和边缘无空白的成对普通短语，保留短语内的空格、字段次序与现有四个参数。10B 可采用上表已验证的特殊词写法。含字面双引号、原样保留的短语边缘空白或 CR/LF、命中全局日期别名或日期范围重写的输入仍无法满足现有无损契约。缺少单叶证据的输入不能通过原样拼接、百分号替换或删除字符放行。
+
+**已确认的最小规范调整（2026-11-22）。** 用户通过 `arxiv_literal_policy` 明确选择“受控失败”：仅对官方解析链无法安全、无损表示的 arXiv 输入，在发出 HTTP 前返回既有 `ProtocolFailure(PROTOCOL_ERROR)`；不回显原始查询、不删除字符、不有损归一，其他 Provider 继续既有流程。三份 spec 已同步此边界。普通词/完整短语与上表已验证特殊字面量继续支持，不能用新拒绝行为替代它们。Task 1 的前置决策完成；Task 10B 及 Task 11/13 应按新边界实现并完成测试后再标完成。
+
+见本文参考资料 3–6，以及固定版本的 [请求控制器](https://github.com/arXiv/arxiv-search/blob/f53ed1707d80a877e72ec989b2156c2e7bb01d87/search/controllers/classic_api/__init__.py#L140-L163)、[查询对象](https://github.com/arXiv/arxiv-search/blob/f53ed1707d80a877e72ec989b2156c2e7bb01d87/search/domain/classic_api/classic_query.py#L20-L25) 和[前置处理测试](https://github.com/arXiv/arxiv-search/blob/f53ed1707d80a877e72ec989b2156c2e7bb01d87/search/domain/classic_api/tests/test_classic_search_query.py)。
 
 ### Task 2: 四类 HTTP Provider 解析 use_proxy
 
@@ -155,13 +173,13 @@ uv run pytest tests/providers/academic/test_arxiv.py -q
 - Test: `tests/unit/test_config_academic_providers.py`
 - Test: `tests/unit/test_config_llm.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在各现有测试文件增加 `test_*_provider_use_proxy_defaults_true`、`test_*_provider_use_proxy_is_strict_boolean` 等单行为用例。四类均覆盖省略/true/false；拒绝 `"false"`、0、1、None、空数组/对象。输入 None 通过直接字典构造，TOML 本身没有 null。
 
 检查 options 不含 use_proxy；LLMInvocation.extra_body 不含它。Web 的禁用、无 Key、带 Key 三个返回分支全部覆盖；Academic 禁用及 OA 未启用仍验证显式字段类型但不强求凭据；未被引用的 LLM 表继续按既有策略忽略。用已有旧构造兼容测试证明末尾默认字段不会挤占 rate_policy 的位置。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py -k use_proxy -q
@@ -169,7 +187,7 @@ uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_aca
 
 预期：当前 Web/Academic/OA 把 use_proxy 当未知选项，LLM 尚无对应字段或未拒绝非法类型；失败应定位新行为，不是配置缺少测试 Key。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 _resolve_use_proxy(table, label) -> bool:
@@ -186,7 +204,7 @@ keep use_proxy outside options and invocation extra_body
 
 不要复用默认 False 的 `_optional_bool` 而漏改默认值，也不要更改现有 enable_search/enable_fetch 的默认。旧构造参数顺序保持，新值在解析构造处用 keyword 传入。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py -q
@@ -194,9 +212,11 @@ uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_aca
 
 预期：全部通过，旧启用/鉴权/速率规则不变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只复用一个带字段路径的布尔解析 helper；不增加 Provider 基类或泛型 schema。运行同一组测试及 `uv run mypy src tests scripts`，确认旧位置构造与新增 bool 的类型一致。
+
+**执行记录（2026-11-22）：** 四类 use_proxy 按行为完成 RED/GREEN；聚焦用例 129 passed，计划目标组合 711 passed；`uv run mypy src tests scripts` 通过 228 个文件，相关四文件 ruff check / format --check 通过。保留旧位置构造、frozen、禁用/未引用规则和 options/extra_body 隔离。未提交。
 
 ### Task 3: 创建保留 CA 的直连 HTTP 客户端
 
@@ -206,7 +226,7 @@ uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_aca
 - Create/Test: `tests/runtime/test_provider_proxy.py`
 - Docs: HTTPX environment/SSL 文档及固定版本源码链接
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 通过 Runtime.build 的现有入口，配置仅一个真实启用的 HTTP Provider 为 false，注入记录 kwargs 且返回真实 AsyncClient(MockTransport) 的工厂。断言 false 构造收到 `trust_env=False` 和真实 SSLContext；`verify_mode == ssl.CERT_REQUIRED`、`check_hostname is True`。true/省略路径仍调用零参数工厂。
 
@@ -219,7 +239,7 @@ uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_aca
 - false + 仅支持零参数的工厂，受控失败且绝不再调用一次无参数工厂。
 - 全部启用项都为 true、只有禁用项为 false 时，不额外预构建直连 context。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py -k "ssl or factory" -q
@@ -227,7 +247,7 @@ uv run pytest tests/runtime/test_provider_proxy.py -k "ssl or factory" -q
 
 预期：旧代码始终 `factory()`，没有 direct 参数；新增行为断言失败。SSLContext 测试不得仅断言一个假对象。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 before constructing any HTTP client:
@@ -255,7 +275,7 @@ _create_http_client(factory, *, use_proxy, direct_ssl_context, label):
 
 SSL_CERT_DIR 的 CA 可在 TLS 握手时惰性加载。目录不存在或不是目录时可先作最小路径检查并受控报错；有效目录不能因 `cert_store_stats()==0` 被错误判坏。测试区分构造错误与握手验证错误，两者均不可降级或换 CA。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py tests/runtime/test_runtime_assembly.py -q
@@ -264,9 +284,17 @@ uv run mypy src tests scripts
 
 预期：新的 direct/TLS 断言及原零参数工厂测试通过。测试用 monkeypatch 自动恢复环境，不改共享 os.environ。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 helper 保持在 runtime.py；不加新传输模块或第三方依赖。只在有 direct 客户端时构建一次 context，可安全供独立客户端引用；不改变各连接池所有权。复跑本任务目标测试。
+
+**执行记录（2026-11-22）：** 21 个新增断言 RED、2 个兼容用例保持通过；直连/CA 与原 runtime assembly 组合 44 passed；mypy 229 文件通过，两个变更文件 ruff 和 format --check 通过。CA 预检覆盖四类配置，实际客户端接线本任务仅 Web，其他家族交 Task 4。未提交。
+
+**复审修正（2026-11-22）：** 修复 SSL_CERT_DIR 多目录列表被当成单一路径而误拒绝的 P2：按 os.pathsep 检查非空目录，原始列表交由 TLS 加载，SSL_CERT_FILE 优先不变。新增测试 RED 4 failed / 45 passed，修复后代理组 49 passed、完整 runtime 162 passed；真实本地 HTTPS 测试确认第二目录 CA 完成证书与主机名验证。mypy 229 文件、相关 ruff/format 通过；只读复审重跑 7 项 CA/TLS 用例通过，锁定 HTTPX 0.28.1 上原问题关闭。
+
+**最低版本兼容修正（2026-11-22）：** 隔离加载官方 HTTPX 0.27.0 wheel 复现多目录被上游静默忽略：代理测试 4 failed / 45 passed，包含真实私有 CA 握手失败。仅在没有 FILE 且 DIR 含路径分隔符时，使用 ssl.create_default_context(capath=原始目录串)，避免替换或叠加默认公共 CA。修复后 0.27.0 和 0.28.1 的完整代理组分别 49 passed，锁定版完整 runtime 162 passed；mypy 229 文件及相关 ruff/format 通过。仅增 runtime.py 三行，未改依赖/lockfile。
+
+**主机名策略复审修正（2026-11-22）：** 标准库多目录上下文与 HTTPX 0.27 的 Common Name 回退设置存在差异。新增同一受信 CN-only / 无 SAN 证书的本地 HTTPS 对照：旧实现单目录拒绝、重复目录接受；修复后从当前 HTTPX 公开上下文继承 hostname_checks_common_name，实际 direct context 仍只信任所配置目录。0.27 单/双目录均拒绝，0.28 单/双目录均接受，分别保留各版本原行为。两版完整代理组各 50 passed，锁定版完整 runtime 163 passed；mypy 229 文件及相关 ruff/format 通过。只读定点复审确认 P2 已关闭。
 
 ### Task 4: 将共享客户端工厂接入 Web、Academic、OA、LLM
 
@@ -278,7 +306,7 @@ helper 保持在 runtime.py；不加新传输模块或第三方依赖。只在�
 - Test: `tests/runtime/test_academic_runtime_assembly.py`
 - Read: `src/agent_search_gateway/providers/http.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 配置混合 Runtime：Web zhihu=false、firecrawl=true，Academic arxiv=true，OA unpaywall=false，LLM primary=false/secondary=true。逐个绑定工厂返回的客户端与对应 executor/client，避免只比较没有归属的调用顺序。
 
@@ -286,7 +314,7 @@ helper 保持在 runtime.py；不加新传输模块或第三方依赖。只在�
 
 正常 Runtime.aclose 连续调用两次，每个已创建客户端只关闭一次。DEBUG runtime_built 仅包含带命名空间的 Provider 名称及 use_proxy 布尔模式；合成代理凭据不进入日志。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py -k "families or isolation or close or logging" -q
@@ -294,13 +322,13 @@ uv run pytest tests/runtime/test_provider_proxy.py -k "families or isolation or 
 
 预期：尚未接入的家族仍创建默认客户端，模式归属断言失败；保持老的 close-once 用例作为回归基线。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 把准备好的 direct_ssl_context 传入四个内部 builder，在原构造 HttpJsonExecutor 的位置调用同一个 helper，参数取对应 config.use_proxy。Web/Academic/OA 的 RateGate 注册、quota、retry 和 kwargs options 更新顺序保持。
 
 LLM 直接读取 LLMProviderConfig.use_proxy，不从 invocation.extra_body 取值。日志可在已有 runtime_built 添加四个安全布尔摘要，名称按 Web/Academic/OA/LLM 区分，不读取/格式化实际代理地址。External Agent runner 完全不接这套 helper。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py tests/runtime/test_runtime_assembly.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_agent_runtime_assembly.py -q
@@ -308,9 +336,11 @@ uv run pytest tests/runtime/test_provider_proxy.py tests/runtime/test_runtime_as
 
 预期：四类覆盖、关闭、重试/RateGate 原测试全部通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 去掉重复客户端构造分支；保留旧 HttpJsonExecutor API 和各 Adapter 签名中与代理无关的部分。复跑 `uv run pytest tests/runtime -q`，以 mypy 检查四个 builder 对 context/工厂类型的传递一致。
+
+**执行记录（2026-11-22）：** 三个未接线家族先出现缺少 direct 参数的 RED；接线后四类矩阵通过。目标组合 108 passed、完整 runtime 144 passed，mypy 229 文件和相关 ruff/format 通过。真实日志 formatter 验证四类 `name:true/false` 摘要可见且不含代理地址或凭据。客户端隔离、Search/Fetch 复用及 close-once 回归通过。未提交。
 
 ### Task 5: 用本地代理证明真实路由和 NO_PROXY 行为
 
@@ -319,7 +349,7 @@ uv run pytest tests/runtime/test_provider_proxy.py tests/runtime/test_runtime_as
 - Test: `tests/runtime/test_provider_proxy.py`
 - Read: `src/agent_search_gateway/runtime.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 在同一 pytest 事件循环启动两个 loopback server：目标返回 TARGET，假 HTTP proxy 返回 PROXY 并记录 request line。使用真实 HTTPX 默认 transport；不要用 MockTransport 证明代理是否生效，因为显式 transport 会绕开默认环境代理选择。
 
@@ -330,7 +360,7 @@ uv run pytest tests/runtime/test_provider_proxy.py tests/runtime/test_runtime_as
 - use_proxy=true 且 NO_PROXY 包含 loopback 目标：收到 TARGET。
 - HTTP_PROXY 与 ALL_PROXY 的 HTTP 路由分别覆盖；HTTPS_PROXY 的构造选择由 Task 3/4 验证，必要时用受控 CONNECT server 单独测试，不访问真实 HTTPS 服务。
 
-- [ ] **Step 2: Run test to verify the expected distinction**
+- [x] **Step 2: Run test to verify the expected distinction**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py -k routing -q
@@ -338,11 +368,11 @@ uv run pytest tests/runtime/test_provider_proxy.py -k routing -q
 
 旧实现 false 与 true 都会走代理，此为独立可观察的 RED。若 Task 3/4 已实施，这组用例会直接通过，记录为集成回归，不改坏代码制造红灯。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 复用 Runtime 的真实配置路径与 helper，不新增生产逻辑。给本地 server/task 设置短的测试保护 deadline，并在 finally 中关闭 listener、writer 和 client；所有目标仍为本机。以测试看到的响应来源证明隔离，同时检查环境在单个用例结束后恢复。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/runtime/test_provider_proxy.py -q
@@ -350,9 +380,11 @@ uv run pytest tests/runtime/test_provider_proxy.py -q
 
 预期：路由用例确定、无需公网、无泄漏 pending task。若失败，仅修正本次 helper 的参数传递或测试环境隔离。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅在该新测试文件内提取重复 loopback fixture，不给生产对象增加测试专用属性；复跑本文件，不扩展成通用代理测试框架。
+
+**执行记录（2026-11-22）：** HTTP_PROXY / ALL_PROXY × env_proxy / direct / NO_PROXY 六个真实 loopback 路由回归全部通过；使用 Runtime.build 默认工厂及真实 HTTPX transport。完整代理文件 37 passed，mypy 229 文件、ruff 与 format --check 通过。资源关闭与用例内环境恢复已验证，无生产改动。未提交。
 
 ### Task 6: 注册并验证 Firecrawl 的四项配置
 
@@ -364,7 +396,7 @@ uv run pytest tests/runtime/test_provider_proxy.py -q
 - Test: `tests/unit/test_config_web_providers.py`
 - Test: `tests/providers/web/test_firecrawl.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_firecrawl_options_are_validated_before_runtime` 及分字段参数化用例，使用真实 registry 和 resolve_web_provider_config；对配置合法性断言 ConfigFailure.code 和完整字段路径。
 
@@ -379,7 +411,7 @@ uv run pytest tests/runtime/test_provider_proxy.py -q
 
 Firecrawl 禁用时仍遵循原有“先验证已注册 options，再跳过凭据”的时机。其他 Web Provider 传这些新键仍失败；use_proxy 仍独立于 options。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/unit/test_config_web_providers.py -k firecrawl -q
@@ -387,7 +419,7 @@ uv run pytest tests/unit/test_config_web_providers.py -k firecrawl -q
 
 预期：合法字段被旧白名单拒绝；白名单扩展后非法值用例暴露缺失验证。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 只扩大 Firecrawl 的 allowed_config_keys。_validate_options 在已有未知键检查之后调用 Firecrawl 专属验证；search_limit 复用 _positive_int 后限制 <=100；选择数组先检查列表/元素类型再去重，避免 unhashable 值抛出未转换 TypeError。
 
@@ -402,7 +434,7 @@ scrape_parsers: Sequence[str] = ()
 
 配置解析负责 TOML 值的严格校验，Adapter 只保存默认/已验证值并把序列复制为 tuple。不要把这四项提升成所有 Web 配置的数据类字段，不透传任意 Firecrawl JSON。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/unit/test_config_web_providers.py tests/providers/test_registry.py tests/providers/web/test_firecrawl.py -q
@@ -410,9 +442,11 @@ uv run pytest tests/unit/test_config_web_providers.py tests/providers/test_regis
 
 预期：配置用例和现有 Adapter 行为测试通过；本任务还没有改变 Search/Fetch 负载。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 如与 Task 9 重复，可复用一个小的 choice-list 校验 helper，但不抽象成 schema 框架；保留 Provider 专属标签与允许值。运行本组测试及 mypy。
+
+**执行记录（2026-11-22）：** 合法注册项、严格显式值和真实 registry→Adapter 构造分别完成 RED/GREEN；config_web + registry + firecrawl 535 passed；mypy 229 文件与五个变更文件 ruff/format 通过。序列保存为 tuple，Search/Fetch 负载留 Task 7/8 修改。未提交。
 
 ### Task 7: Firecrawl Search 永远只请求和映射元数据
 
@@ -424,7 +458,7 @@ uv run pytest tests/unit/test_config_web_providers.py tests/providers/test_regis
 - Read: `tests/fixtures/providers/firecrawl/search.json`
 - Read: `src/agent_search_gateway/orchestrators/search.py`（_stage_keyword_hit）
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 更新现有 `test_firecrawl_adapter_maps_v2_search_and_scrape_payloads` 的 Search 断言：原 38–46 行正文改为空；原 54–58 行的 scrapeOptions 改为元数据参数。此任务暂时保留旧 Fetch 负载断言，交 Task 8 修改。
 
@@ -438,7 +472,7 @@ uv run pytest tests/unit/test_config_web_providers.py tests/providers/test_regis
 
 继续使用含正文的原 fixture 作为“意外正文被忽略”证据；元数据最小响应可直接构造字典，不必额外创建 fixture 文件。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_firecrawl.py -k search -q
@@ -446,7 +480,7 @@ uv run pytest tests/providers/web/test_firecrawl.py -k search -q
 
 预期：旧实现存在 scrapeOptions/非空正文，或因非字符串正文误拒绝有效结果。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 search_body = {
@@ -464,7 +498,7 @@ preserve counts and existing error diagnostics
 
 删除读取/校验 Search 正文字段的代码，而不只是最后把正文覆盖为空。_stage_keyword_hit 在无正文时已经返回可采纳的 _StagedKeyword，发生 body_skipped/no_body，先于 cheap_check 和 judge；无需改通用 Pipeline。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_firecrawl.py tests/providers/web/test_search_result_tolerance.py tests/orchestrators/test_keyword_search_pipeline.py tests/orchestrators/test_keyword_search_state.py -q
@@ -472,9 +506,11 @@ uv run pytest tests/providers/web/test_firecrawl.py tests/providers/web/test_sea
 
 预期：Search 元数据正常采纳，其他 Provider 的正文路径保持；剩余 Fetch 旧行为仍由下一任务处理。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 Search 与 Fetch 的正文解析各自清晰；只让 Fetch 调用 _page_body，不把 Firecrawl 特例放进通用 Orchestrator。复跑上述组。
+
+**执行记录（2026-11-22）：** Search 行为 RED 10 failed / 1 passed / 7 deselected；仅删除 Search 的隐式 scrape 和正文映射，加入显式 limit/highlights。目标 Provider/keyword orchestrator 四文件 168 passed；mypy 229 文件、相关三文件 ruff/format 通过。原含正文 fixture 保留，异常正文类型也不再影响元数据，Fetch 尚留 Task 8。未提交。
 
 ### Task 8: Firecrawl Fetch 显式 formats/parsers，保留空正文与错误路径
 
@@ -486,7 +522,7 @@ Search 与 Fetch 的正文解析各自清晰；只让 Fetch 调用 _page_body，
 - Read: `src/agent_search_gateway/providers/http.py`、`src/agent_search_gateway/scheduler/fetch.py`
 - Regression: `tests/providers/test_http_executor.py`、`tests/unit/test_retry.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 更新现有组合测试的 Fetch 负载断言（原 59–62 行），默认必须显式发送：
 
@@ -511,7 +547,7 @@ Search 与 Fetch 的正文解析各自清晰；只让 Fetch 调用 _page_body，
 
 这里断言的是 Adapter/Executor 边界的具体异常；Scheduler 边界另行断言 `execution_failure` outcome 和继续下一个候选，不把两个层级的异常/结果混为可任选的契约。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/web/test_firecrawl.py -q
@@ -519,7 +555,7 @@ uv run pytest tests/providers/web/test_firecrawl.py -q
 
 预期：负载测试因旧 formats 和缺少 parsers 失败。base64-only 和已有错误分类可能直接通过，是回归保护，不要求改坏正确逻辑。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 fetch_body = {
@@ -535,7 +571,7 @@ if no markdown/rawHtml:
 
 _page_body 已经忽略 rawBase64；不新增 PDF/base64 解码。HTTP 错误分类继续由共享 executor 决定。Scheduler 的 execution failure 会继续尝试下一可用候选；不能把空正文改成成功或直接把 PDF 交给 LLM。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/web/test_firecrawl.py tests/providers/test_http_executor.py tests/unit/test_retry.py tests/scheduler/test_fetch_outcomes.py -q
@@ -543,9 +579,11 @@ uv run pytest tests/providers/web/test_firecrawl.py tests/providers/test_http_ex
 
 预期：新请求参数及既有错误/日志测试通过。只断言无隐式 scrape、parser 配置明确；不从 mock 推导 credits 数字。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 重复的受控响应/请求记录使用文件内 helper，真实 HTTP 请求只替换 transport，保留 executor/retry/diagnostics。确认没有生产改动落到 providers/http.py 或 scheduler/fetch.py。
+
+**执行记录（2026-11-22）：** Fetch 负载 RED 17 failed / 31 passed；仅接入配置 formats/parsers，默认 markdown 与空 parser。目标 Firecrawl/HTTP executor/retry/scheduler 260 passed，搜索容错 129 passed；mypy 229 文件、相关二文件 ruff/format 通过。真实 executor 验证 402 一次、429 遵循 Retry-After、5xx 按原上限、invalid JSON 一次、success=false；rawBase64-only 保持空正文故障及安全诊断，无额外 retry/解码。组合 fallback 留 Task 13。未提交。
 
 ### Task 9: 注册 arXiv 查询选项并严格校验
 
@@ -558,7 +596,7 @@ uv run pytest tests/providers/web/test_firecrawl.py tests/providers/test_http_ex
 - Test: `tests/providers/academic/test_registry_defaults.py`
 - Test: `tests/providers/academic/test_arxiv.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_config_accepts_arxiv_search_options`、`test_config_rejects_invalid_arxiv_search_options`、`test_arxiv_options_are_not_shared_with_other_providers`。矩阵：
 
@@ -569,7 +607,7 @@ uv run pytest tests/providers/web/test_firecrawl.py tests/providers/test_http_ex
 - 非 arXiv Academic 和 OA 仍拒绝这些键。
 - 省略选项时构造默认依次为 ti+abs、10、relevance、descending。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/unit/test_config_academic_providers.py tests/providers/academic/test_registry_defaults.py -k arxiv -q
@@ -577,13 +615,13 @@ uv run pytest tests/unit/test_config_academic_providers.py tests/providers/acade
 
 预期：旧白名单拒绝合法新键；添加白名单后值校验用例仍能暴露错误。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 arXiv registration 使用原 `_ALLOWED_OPTIONS` 与四个新键的并集，其他 registration 不变。_validate_academic_options 在未知/保留键检查后，仅对 name=arxiv 校验对应字段。重复字段报错，保留合法输入顺序。
 
 ArxivProvider 构造函数新增 Sequence[str]/int/str/str 参数及表中默认值；query_fields 保存 tuple。使用已有 _positive_int 再限制 <=100；复用 Task 6 的小型数组验证逻辑即可。不引入 author/category 或 CLI 专属字段。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/unit/test_config_academic_providers.py tests/providers/academic/test_registry_defaults.py tests/providers/academic/test_arxiv.py tests/runtime/test_academic_runtime_assembly.py -q
@@ -591,9 +629,13 @@ uv run pytest tests/unit/test_config_academic_providers.py tests/providers/acade
 
 预期：配置及构造成功，现有旧查询行为尚未因本任务改变。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 确认四个 option 名、构造参数名、私有保存字段在后续任务一致。配置值不泄漏至公共 PaperSearchRequest；运行 mypy 和本组测试。
+
+**执行记录（2026-11-22）：** 合法选项/注册 RED 22 failed / 1 passed → 24 passed；严格显式值 RED 90 failed / 48 passed → 配置/注册 423 passed；constructor/registry/list 快照 RED 3 failed → 目标四组 438 passed。mypy 229 文件、相关六文件 ruff/format 通过。只改 arXiv 配置白名单、专属验证和构造保存；GET 查询及固定参数保持，交 Task 10/11。resolved.options 的原输入列表别名与 Firecrawl 同类 P3，由后续独立修复关闭。未提交。
+
+**数组快照复审修正（2026-11-22）：** 三个新数组在校验成功后保存 tuple，仅作用于 Firecrawl scrape_formats/scrape_parsers 与 arXiv query_fields。修改原始输入列表不会改变已解析配置，也不修改调用方表/列表；省略默认项仍不填充，TOML 输入仍严格接受 list。真实 registry/factory 行为 RED 4 failed → 4 passed；配置、registry、adapter、runtime 目标组合 1061 passed，mypy 229 文件及相关五文件 ruff/format 通过。Firecrawl 断言实际 /v2/scrape 请求，arXiv 断言 factory 字段快照；出站接线仍交 Task 10/11。
 
 ### Task 10: 编译普通词、短语及经验证的安全字面量
 
@@ -607,7 +649,7 @@ uv run pytest tests/unit/test_config_academic_providers.py tests/providers/acade
 - Test: `tests/providers/academic/test_arxiv.py`
 - Docs: arXiv 官方用户手册 §5.1；Task 1 验证结论
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 通过已有 ArxivProvider.search 和受控 HTTP 回应，先对出站 search_query 写行为断言，避免 helper 尚不存在造成 import error。将下列场景拆成独立参数化用例：
 
@@ -621,11 +663,11 @@ uv run pytest tests/unit/test_config_academic_providers.py tests/providers/acade
 
 **10A：** 上表普通词/完整短语用例，加上 phrase 内多空格、字段自定义顺序和 Unicode 的确定性测试，可先独立实现和验证。
 
-**10B：** 按 Task 1 的结论加入特殊字符矩阵：AND/OR/ANDNOT/NOT、冒号、括号、百分号、连字符、反斜线、连续/未闭合/嵌入引号。除了字符串快照，还验证用户不能增加语法节点；未通过验证门时不将这些用例静默跳过并宣称本任务完成。
+**10B：** 按 Task 1 的结论加入特殊字符矩阵：AND/OR/ANDNOT/NOT、冒号、括号、百分号、连字符、反斜线、连续/未闭合/嵌入引号。可表示输入除字符串快照外，还验证用户不能增加语法节点；不可安全、无损表示的反例按用户已批准边界断言既有 ProtocolFailure 且 HTTP 调用为零。不能静默跳过特殊用例，也不能用删除字符或有损归一代替验证。
 
 空白/空短语导致无有效词项时，应在 HTTP 调用之前走现有 provider ProtocolFailure，不能发 `all:`、空 search_query 或通配搜索。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/academic/test_arxiv.py -k "query_compiler or literal or quote or unsearchable" -q
@@ -633,7 +675,7 @@ uv run pytest tests/providers/academic/test_arxiv.py -k "query_compiler or liter
 
 预期：现有 `all:{query}` 负载与字段组合不符，或特殊输入被透传为语法。不接受拼写/import 错误作为 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 在 arxiv.py 内新增私有纯函数，固定接口：
 
@@ -661,7 +703,7 @@ return " AND ".join(groups)
 
 只有 compiler 生成字段、括号和连接符。不要使用默认 shlex.split；不要复制 _clean 的全串空白折叠。将 search 的 search_query 接到 _compile_query；传 HTTPX params 原串，不手工 quote_plus、不二次 percent encode。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 更新旧查询结构断言：
 
@@ -674,9 +716,11 @@ uv run pytest tests/providers/academic/test_arxiv.py -q
 
 预期：查询、短语、字面化、错误与所有 Atom 断言通过。若 Task 1 的特殊字符门尚未通过，本任务不能被标为完成；普通词子用例通过不能替代全部验收。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 scanner/serializer/compiler 只在同一 Provider 文件内分成少量私有函数，必要时 token 用明确的不可变 tuple/dataclass；不引入查询 DSL、全局 parser 或 LLM 重写。复跑本文件，确认字段/词序输出 deterministic。
+
+**执行记录（2026-11-22）：** 10A 行为 RED 12 failed → arXiv 全文件 28 passed；10B RED 17 failed / 26 passed → 全文件 59 passed，相关 arXiv/registry/runtime 111 passed。用户批准的不可表示字面量及未配对 Unicode 代理码点均在 HTTP 前走安全 ProtocolFailure。生产 compiler 实际生成的 56 组查询，经 HTTPX→Werkzeug→固定 upstream adapt_query/ClassicAPIQuery 解析，56 棵操作树与 126 个叶子的字段、顺序、完整值全部一致；%22 的一次编码为 %2522，未作二次编码。mypy 229 文件及相关二文件 ruff/format 通过。此为固定 commit 离线证据，非线上部署版本证明；临时验证仍在 Task 1 同一 .pytest_cache 目录。只接 search_query，结果数/排序留 Task 11。未提交。
 
 ### Task 11: arXiv 参数接通并保留一次逻辑检索及全部响应契约
 
@@ -689,13 +733,13 @@ scanner/serializer/compiler 只在同一 Provider 文件内分成少量私有函
 - Test: `tests/runtime/test_academic_runtime_assembly.py`
 - Regression: `tests/providers/test_http_executor.py`、`tests/runtime/test_rate_gate.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增 `test_arxiv_uses_configured_search_options`：query_fields=["abs"]、max_results=25、sort_by=submittedDate、sort_order=ascending，检查完整 GET params 与默认值差异。Runtime 测试从真实 TOML 字典解析到 Adapter，再发一次模拟请求，避免只测直接构造。
 
 继续检查 `request.url.params["search_query"]` 与原始编译串一致；特殊 Unicode/百分号没有双重编码。成功且无需重试时只一条 GET；结果不足不发第二轮宽松查询。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/providers/academic/test_arxiv.py tests/runtime/test_academic_runtime_assembly.py -k "configured_search_options or arxiv_options" -q
@@ -703,13 +747,13 @@ uv run pytest tests/providers/academic/test_arxiv.py tests/runtime/test_academic
 
 预期：旧硬编码 max_results/sortBy/sortOrder 与配置值不符。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 保持一次 `self._executor.request_text("GET", ...)`，把四项参数从 self._query_fields/_max_results/_sort_by/_sort_order 接入。stage="paper_search"、response_diagnostics、_parse_response 和 _map_entry 保持。
 
 “一次逻辑检索”不等于“禁止共享 executor 重试”。`test_arxiv_honors_shared_retry_after` 的两次 HTTP 尝试断言必须保留；`test_arxiv_http_failure_propagates_without_adapter_retry` 仍证明没有 Adapter 层第二重 retry。保留 Atom XML/非法 envelope、作者、DOI/arXiv ID、URL/PDF URL、主题、日期、候选计数等现有断言。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/providers/academic/test_arxiv.py tests/providers/academic/test_registry_defaults.py tests/runtime/test_academic_runtime_assembly.py tests/providers/test_http_executor.py tests/runtime/test_rate_gate.py tests/academic -q
@@ -717,9 +761,13 @@ uv run pytest tests/providers/academic/test_arxiv.py tests/providers/academic/te
 
 预期：新参数生效；429/Retry-After 与 RateGate、原 PaperSearchHit 映射全部保持。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 不对结果做额外客户端截断/排序，不加分页或检索放宽；结果数/排序由同一 arXiv API 请求参数控制。检查生产 diff 仅在查询和构造路径，复跑目标组。
+
+**执行记录（2026-11-22）：** 配置参数 direct 行为 RED 2 failed，最小三行接线后 2 passed；新增真实 resolve_config→Runtime→Adapter→HttpJsonExecutor→MockTransport 组合验证。目标回归 298 passed，最终 arXiv 单文件 64 passed；mypy 229 文件及相关 ruff/format 通过。精确验证完整参数、Unicode/% 一次编码、一条成功 GET、空/少量结果无第二轮、保留上游结果数量/顺序及原 retry/Atom 契约。原 runtime 测试文件因工具对既存内容扫描拒绝编辑，采用安全替代：Runtime 新场景放在同任务已允许的 test_arxiv.py，原 runtime 文件不改并作为回归执行；未通过其他工具绕过拒绝。未提交。
+
+**arXiv 独立复审修正（2026-11-22）：** 修复 P2：合法 5,399 字符输入在字段展开后触发的本地 httpx.InvalidURL，现由 Adapter 映射为固定安全 ProtocolFailure(PROTOCOL_ERROR)，from None，真实 executor/MockTransport 证实 HTTP 为零；CLI→NDJSON 完整往返验证该输入在公共入口可达。修复 P3：四项 arXiv 专属配置校验限定 AcademicProviderRegistration，不影响合法同名 OA 扩展的注册白名单。新增行为 RED 2 failed → GREEN 2 passed；七组目标回归 721 passed，mypy 229 文件及相关四文件 ruff/format 通过；compiler、共享重试、Atom 逻辑不变。
 
 ### Task 12: CLI 默认无限等待，同时保留显式超时和清理
 
@@ -730,7 +778,7 @@ uv run pytest tests/providers/academic/test_arxiv.py tests/providers/academic/te
 - Regression: `tests/unit/test_protocol_codec.py`、`tests/cli/test_cli.py`、`tests/daemon/`
 - Read: `src/agent_search_gateway/cli.py`、`src/agent_search_gateway/daemon.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 将现有 `test_socket_timeout_depends_on_request_type_and_honors_override` 改名为 `test_socket_client_defaults_to_unbounded_wait_and_honors_override`。保留六种 request（五种业务加 shutdown）与 None/0.01/42.0 的覆盖；额外区分省略参数与显式 None。
 
@@ -748,7 +796,7 @@ assert seen == [override]
 
 保持其受控 wait_for recorder，以保存的真实 wait_for 给测试套短保护时间，不能真的等待 600 秒。独立回归用例验证显式 0.01 超时仍抛 ProtocolFailure、客户端 writer 关闭且服务端读到 EOF；把已有 Agent 专属 EOF/取消用例参数化到五种业务。合法 ErrorResponse、成功响应、缺换行、非法 JSON/UTF-8、超大帧保留既有协议测试。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 uv run pytest tests/unit/test_socket_client.py::test_socket_client_defaults_to_unbounded_wait_and_honors_override -q
@@ -756,7 +804,7 @@ uv run pytest tests/unit/test_socket_client.py::test_socket_client_defaults_to_u
 
 预期：旧代码对非 Agent 的 None 记录 600.0；显式数值和 Agent 原样通过。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 删除 _RESPONSE_TIMEOUT_SECONDS 及解释旧策略的注释，删除 send_request 中 None+非 Agent 的赋值分支。保留：
 
@@ -770,7 +818,7 @@ wait_for(..., None) 已有无限等待语义，无需再写一套分支。None �
 
 cli.py 的 SocketClient 仍为双位置参数 Callable；run_command 不新增 timeout keyword，以免破坏注入替身。daemon.py 不增加断开 watcher，后台可继续完成并写结果；daemon 自己的 shutdown grace 和 Agent deadline 不变。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/unit/test_socket_client.py tests/unit/test_protocol_codec.py tests/cli/test_cli.py tests/daemon -q
@@ -778,9 +826,11 @@ uv run pytest tests/unit/test_socket_client.py tests/unit/test_protocol_codec.py
 
 预期：默认超时、显式数值、EOF、取消、资源清理与 request_id/停机回归全部通过。取消/EOF 等既有正确行为的新覆盖可以直接通过。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 测试中的 asyncio.wait_for monkeypatch 仅用于参数观察；事件等待和清理使用保存的真实函数，避免 Awaitable[bytes] recorder 被误用于 Event.wait() 的 bool。清理服务端 task/listener，复跑目标组，不引入 fake 全局时钟或十分钟测试。
+
+**执行记录（2026-11-22）：** 默认等待矩阵 RED 10 failed / 14 passed → 24 passed；五类业务的显式超时/EOF/取消均验证 writer 关闭与 handler/listener 清理。生产仅删除旧 600 常量/注释及 None→600 分支，共五行，目标 socket/codec/CLI/daemon 268 passed。全 mypy 首次发现已删常量的旧文档测试引用，按整体计划授权提前同步该用例：旧用例 AttributeError RED，移除过期私有常量断言并保留 Agent 配置预算契约后，文档测试文件 22 passed。mypy 229 文件、相关三文件 ruff/format 全通过。CLI/daemon 生产行为其余不变，未提交。
 
 ### Task 13: 串起真实 Adapter、Runtime、CLI 与 fallback 的离线验收
 
@@ -791,7 +841,7 @@ uv run pytest tests/unit/test_socket_client.py tests/unit/test_protocol_codec.py
 - Read: `tests/support/fakes.py`、`tests/support/controlled.py`
 - Regression: `tests/orchestrators/test_keyword_search_state.py`、`tests/orchestrators/test_url_fetch_flow.py`、`tests/scheduler/test_fetch_outcomes.py`
 
-- [ ] **Step 1: Write the failing tests as separate scenarios**
+- [x] **Step 1: Write the failing tests as separate scenarios**
 
 新增三个聚焦场景，每个场景用真实配置解析、Runtime、Adapter、Store/ResultWriter，只有上游 HTTP 响应用 MockTransport。不要以 FakeKeywordSearchProvider 替代 FirecrawlAdapter 来“证明”出站成本行为。
 
@@ -818,7 +868,7 @@ uv run pytest tests/unit/test_socket_client.py tests/unit/test_protocol_codec.py
 3. 对多关键字和引号短语使用 Task 10 的确定期望；字段/排序自定义使用 Task 11 配置。
 4. 这不是检索相关性评分；只证明官方语法与已有输出契约正确接通。
 
-- [ ] **Step 2: Run test to verify meaningful behavior**
+- [x] **Step 2: Run test to verify meaningful behavior**
 
 ~~~bash
 uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py -q
@@ -826,7 +876,7 @@ uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py -q
 
 若这些场景在 Task 7/8/10/11 前运行，预期暴露隐式正文、错误参数或不支持配置；若前序已完成，应直接通过作为组合验收。不要为了让它们先红而回退共享文件或修改其他 Agent 的代码。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 只组织测试 fixture，不改生产 Pipeline。mock HTTP 仍经过真实 HttpJsonExecutor；LLM 端使用完整的受控 OpenAI response envelope。用实际 JSONL/Store/请求记录断言最终行为。
 
@@ -834,7 +884,7 @@ uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py -q
 
 长执行的超时回归由 Task 12 的参数观察证明旧 600 秒限制已消除；本测试只控制“响应稍后完成”及结果返回，不真实等待十分钟、不把测试保护 deadline 当作产品超时。
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ~~~bash
 uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py tests/scheduler/test_fetch_outcomes.py tests/cli tests/daemon -q
@@ -842,9 +892,11 @@ uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/orchest
 
 预期：真实配置/Adapter 到输出闭环全部通过，后台断线行为与 spec 一致；临时 socket、客户端、HTTP executor、server task 均关闭。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅在新测试文件提取小型配置/响应 helper。保留有意义的跨模块行为断言，不添加只检查私有字段存在、重复 mock 调用或 README 文本的测试。复跑该文件后进入文档任务。
+
+**执行记录（2026-11-22）：** 新增 `tests/acceptance/test_search_cost_arxiv_proxy_cli.py` 的 9 项离线组合验收，真实配置、Runtime、HTTP executor、Adapter、Store、CLI、daemon/socket 与 ResultWriter 全部接通，仅上游 HTTP 使用 MockTransport。验证了两种元数据 Search 均不调用 cheap_check/LLM、显式 Fetch 与缓存、base64-only 的既有 fallback 顺序、Tavily 正文的正向 cheap_check/judge、三组 arXiv 参数与原 JSONL、已批准的 arXiv 受控失败不影响 Crossref，以及客户端断开后写入结果。新文件 9 passed；计划指定回归组 132 passed；mypy 检查 230 个源文件、相关 Ruff/格式检查均通过。已自审并确认临时 socket 与 HTTP 客户端清理；没有生产代码、真实 API 或共享 daemon 变更。
 
 ### Task 14: 更新配置示例、用户文档和 Unreleased
 
@@ -857,13 +909,13 @@ uv run pytest tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/orchest
 - Modify/Test: `tests/docs/test_documented_config.py`
 - Regression: `tests/docs/test_installation_contract.py`、`tests/docs/test_open_source_contract.py`
 
-- [ ] **Step 1: 固定可执行的示例契约**
+- [x] **Step 1: 固定可执行的示例契约**
 
 复用 tests/docs/test_documented_config.py 的 load_toml、_stub_environment 和真实 resolve_config/Runtime 方式，扩展已有配置测试以验证四类 use_proxy、Firecrawl/arXiv 选项能进入实际运行时；不要新增全文逐句匹配的文档测试。
 
 将示例知乎配置设为 use_proxy=false 后，基于示例构造 Runtime 的测试工厂必须支持 trust_env/verify。当前该文件约 467、707 行有零参数工厂，逐处核对是否仍使用含知乎的完整配置；需要时加具有明确类型的 keyword 参数并传给 AsyncClient(MockTransport)。默认 true 的其他旧零参数测试不需要批量重写。
 
-- [ ] **Step 2: Run existing checks and observe configuration gaps**
+- [x] **Step 2: Run existing checks and observe configuration gaps**
 
 ~~~bash
 uv run pytest tests/docs/test_documented_config.py -q
@@ -871,7 +923,7 @@ uv run pytest tests/docs/test_documented_config.py -q
 
 纯文档修改无需人为制造 RED；新增示例运行时行为断言若先写，应因缺少示例字段或无法接受 direct 工厂参数而失败，不能放宽全局测试断言掩盖问题。
 
-- [ ] **Step 3: 更新具体内容**
+- [x] **Step 3: 更新具体内容**
 
 config.example.toml：
 
@@ -897,7 +949,7 @@ CHANGELOG.md：
 
 - 在 Unreleased 简短列出 Firecrawl 默认成本行为、arXiv 查询/选项、Provider 代理、CLI 默认等待四项；不升版本、不发布、不称已修复上游池泄漏。
 
-- [ ] **Step 4: Run existing checks**
+- [x] **Step 4: Run existing checks**
 
 ~~~bash
 uv run pytest tests/docs -q
@@ -906,9 +958,13 @@ uv run python scripts/build_docs.py
 
 预期：示例可解析/可组装，现有安装和公开接口契约保持，文档构建成功。检查构建结果只含预期文档产物，不盲目提交其他生成变化。
 
-- [ ] **Step 5: 人工一致性检查**
+- [x] **Step 5: 人工一致性检查**
 
 限定 README、public-interface 和 config.example 搜索“600”“Other socket”“Non-Agent”，核实语义而非全局替换数字；其他速率/缓存配置中的 600 保留。三份历史 spec 与旧历史设计文件不批量改写。核对默认值、费用表述、use_proxy 覆盖范围、重启/中断语义，无需为这些文字再造镜像测试。
+
+**执行记录（2026-11-22，已完成）：** 已更新配置示例、README、公开接口文档、Unreleased 和示例 Runtime 契约。初次文档回归为 31 passed、2 failed，两个新增用例指出示例缺少 `use_proxy`；原生 edit 的内容检查一度拒绝 README/配置示例写入。用户随后明确授权使用 LocalHost Bash。实施者核对工作树路径、两目标与既有公开补丁的 SHA-256、无越界/symlink，执行 `git apply --check`，紧邻写入再次比较哈希后仅应用该已审阅补丁（15 个 hunk，11038 bytes）；检查与应用均 exit 0，没有重建脱敏文件或改变工具/全局配置。
+
+应用后 `config.example.toml` SHA-256 为 `010ff13d64fc76c73777b98a91257e155e7161fb36e38d1f3c48f6f2bdf32963`，README 为 `f1407c2ec8ca811506fb1d0a8681662f523adb33d30c1d2af50315de2582ddf4`。`test_documented_config.py` 24 passed，`tests/docs` 33 passed；此前失败的 example/custom-direct 两组均完整跑到真实配置、Runtime、五个 HTTP 客户端、七次请求和关闭断言，验证四类 proxy/direct、Firecrawl 负载、arXiv 参数、知乎双分支、OA 与 LLM。文档构建 exit 0，Ruff 格式 233 文件、lint 和 mypy 231 个源文件均通过。限定一致性搜索已清除旧 socket 600 秒说明，保留合法限流/缓存数值；新 README anchor、费用边界和 CLI 中断语义与公开接口文档一致。两个旧零参工厂因实际配置不含知乎而保留。Task 15 核对了两份文档与补丁的 SHA-256，并以 `git apply --reverse --check` 验证补丁已应用。提交前已删除该 11038 字节的临时补丁。
 
 ### Task 15: 最终回归、可选定向 smoke 和实施交付
 
@@ -918,11 +974,11 @@ uv run python scripts/build_docs.py
 - Read: `CONTRIBUTING.md`
 - Update: 本计划任务状态和验证记录（只填写实际发生的结果）
 
-- [ ] **Step 1: 确认范围和门状态**
+- [x] **Step 1: 确认范围和门状态**
 
 用差异审阅确认生产文件范围；Task 1/10 字面化门必须有明确结果。未解决时报告受影响边界，不能勾选 arXiv 全部完成。确认未修改真实配置、shared daemon、其他工作树、retry 参数、连接池或取消协议。
 
-- [ ] **Step 2: 执行定向回归**
+- [x] **Step 2: 执行定向回归**
 
 ~~~bash
 uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/providers/web/test_firecrawl.py tests/providers/academic/test_arxiv.py tests/unit/test_socket_client.py -q
@@ -931,7 +987,7 @@ uv run pytest tests/runtime tests/cli tests/daemon tests/providers tests/accepta
 
 预期：目标测试全部通过。失败时只补充能定位剩余风险的测试，不重复无关长测试。
 
-- [ ] **Step 3: 执行仓库规定的完整检查**
+- [x] **Step 3: 执行仓库规定的完整检查**
 
 ~~~bash
 uv run ruff format --check src tests scripts
@@ -943,7 +999,7 @@ uv run python scripts/build_docs.py
 
 预期：format/lint/typecheck/docs 均 exit 0；pytest 全部通过、已有 opt-in live 测试按原规则跳过。类型检查范围采用 CONTRIBUTING 的 src/tests/scripts，不缩成仅 src。当前没有 packaging/依赖改动，无需额外 uv build 或改 lockfile。
 
-- [ ] **Step 4: 需要时做定向 smoke**
+- [x] **Step 4: 需要时做定向 smoke**
 
 普通验收足以离线完成。现有用户授权允许针对性 smoke，但此计划不要求为完成测试额外消耗 Firecrawl 额度。
 
@@ -958,9 +1014,30 @@ agent-search-gateway keyword-search "测试主题" --provider zhihu
 
 默认不运行 Firecrawl 真正 Scrape，也不触发全 Provider 测试；若后续用户明确要求费用验证，再先检查出站负载与调用范围。所有报告只包含脱敏 request_id、阶段、状态和计数。
 
-- [ ] **Step 5: 提交实施结果**
+- [x] **Step 5: 提交实施结果**
 
-记录命令、真实通过/失败/跳过数及环境问题，区分“定义了测试”和“运行通过”。只提交本任务变更，按项目约定写清默认行为变化。此计划的创建提交只包含本文件；实施、PR、合并、发布属于后续工作。
+在本地实施提交中保存本次生产、测试、示例、文档与验证记录。
+
+**最终验证记录（2026-11-22）：** 独立审阅确认生产修改仅限本计划七个文件（+290/-39）；依赖、锁文件、CLI/daemon、共享 HTTP 重试、连接池及公开 schema 没有额外改动。Task 1/10 的字面输入策略已按用户明确选择关闭，不存在未决设计确认。未调用真实 Provider API，未更改真实配置或共享 daemon；离线验证足够，未执行可选 live smoke。
+
+| 实际检查 | 最终结果 |
+|---|---|
+| Step 2 第一组定向 pytest | 1170 passed，exit 0 |
+| Step 2 第二组 runtime/CLI/daemon/providers/验收 pytest | 1789 passed，exit 0 |
+| 两对 Runtime → daemon 日志顺序最小回归 | 各 2 passed |
+| `uv run ruff format --check src tests scripts` | 233 files already formatted，exit 0 |
+| `uv run ruff check .` | All checks passed，exit 0 |
+| `uv run mypy src tests scripts` | 231 source files，exit 0 |
+| `env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest -v` | 4238 passed、18 skipped，共 4256 项，19.98 秒，exit 0 |
+| `uv run python scripts/build_docs.py` | exit 0 |
+
+补齐文档前，全量测试为 4236 passed、2 failed、18 skipped。两个失败的示例运行时契约（`example` 和 `custom-direct`）随 Task 14 的文档与示例更新转绿，完整测试保留了全部断言。为避免 verbose 输出超过 LocalHost 的 120000 字节上限，验证进程捕获同一 pytest 命令的完整输出，只回传失败项和汇总，并返回 pytest 的实际退出码。
+
+第二组定向初次出现 1788 passed、1 failed：两个旧 Runtime 测试调用 `structured_test_logger` 后未恢复全局 `agent_search_gateway.runtime` logger，导致随后 daemon 脱敏测试收不到日志。两对最小顺序均复现 1 passed、1 failed。对原测试文件的普通 import 编辑也遭内容保护拒绝，原文件保持不变；改为正常新建 `tests/runtime/conftest.py`，在函数级 fixture 的 finally 中还原原 handler 对象及顺序、level、propagate，并关闭测试新增 handler。未改写受保护旧文件或 helper，也未弱化 daemon 断言。两对最小顺序、1789 项原广域顺序及全量套件均实际复验，独立原评审者已关闭该问题。
+
+最终复验的首轮为 4237 passed、1 failed、18 skipped，失败项是 `tests/providers/agent/test_antigravity_lifecycle.py::test_terminal_exit_cleans_remaining_descendants[nonzero-nonzero_exit]`。该用例单独重跑 1 passed（0.18 秒），随后再次执行完整命令得到上表结果。两次重跑之间没有修改代码、测试或断言。此次 Antigravity 失败的根因未确认。
+
+本节随实施改动保存为一个本地提交，包含七个生产文件、十二个测试文件及八个文档和配置示例文件，共 27 个。提交标识以 Git 记录为准。
 
 ## Spec 覆盖核对
 

@@ -85,7 +85,7 @@
 
 #### 决策 F：arXiv 查询编译与配置保持 Provider 内聚
 
-- **Description**：ArxivProvider 内新增纯函数/私有辅助，将规范化后的查询切成普通词与双引号短语；每个词/短语在 query_fields 的每个字段生成 field:term，再以 OR 连接字段，以 AND 连接词组。例如：graph transformers → (ti:graph OR abs:graph) AND (ti:transformers OR abs:transformers)。显式短语 "graph neural networks" 原样作为一个 term；所有用户输入按字面处理，不允许变成任意 arXiv 操作符。用 HTTPX params 编码。
+- **Description**：ArxivProvider 内新增纯函数/私有辅助，将规范化后的查询切成普通词与双引号短语；每个词/短语在 query_fields 的每个字段生成 field:term，再以 OR 连接字段，以 AND 连接词组。例如：graph transformers → (ti:graph OR abs:graph) AND (ti:transformers OR abs:transformers)。显式短语 "graph neural networks" 原样作为一个 term；用户输入必须保持字面意义，不允许变成任意 arXiv 操作符。经官方解析链验证不能安全、无损表示的输入，在发出 HTTP 请求前以现有 Provider ProtocolFailure 受控失败，不删除字符或默默归一，其他 Provider 的执行不受影响。用 HTTPX params 编码。此边界经 2026-11-22 用户确认。
 - **Rationale**：与官方语法一致，默认提高多个关键词共同匹配的精度；不对通用 paper-search 增加 Provider 专属参数。
 - **Trade-offs**：与 all: 的宽泛匹配相比，长自然语言可能降低召回；本版不自动发起额外放宽检索。
 - **Rejected Alternatives**：将原串直接包进 all:；LLM 重写；在 CLI 增加 ti/abs/au/cat 专属参数。
@@ -199,7 +199,8 @@ Daemon -> FetchOrchestrator.url_fetch(url):
 CLI sends PaperSearchRequest(query, provider?) unchanged
 Daemon -> PaperSearchOrchestrator -> ArxivProvider.search(query):
     terms = tokenize_literal_terms_and_quoted_phrases(query)
-    if unmatched quote: treat the quote as literal input, not an API operator
+    if any term cannot be safely and losslessly serialized:
+        raise existing provider ProtocolFailure before any HTTP request
     if no effective term after normalization: use existing provider-failure path
     for term in terms:
         field_query = OR(field + ":" + literalized(term) for field in query_fields)

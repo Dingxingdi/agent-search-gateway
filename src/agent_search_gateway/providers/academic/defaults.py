@@ -20,7 +20,13 @@ _ALLOWED_OPTIONS = frozenset({"api_url"})
 def build_default_academic_registry() -> AcademicProviderRegistry:
     registry = AcademicProviderRegistry()
     registrations = (
-        AcademicProviderRegistration("arxiv", ArxivProvider, _ALLOWED_OPTIONS, "none", "none"),
+        AcademicProviderRegistration(
+            "arxiv",
+            ArxivProvider,
+            _ALLOWED_OPTIONS | {"query_fields", "max_results", "sort_by", "sort_order"},
+            "none",
+            "none",
+        ),
         AcademicProviderRegistration(
             "semantic_scholar",
             SemanticScholarProvider,

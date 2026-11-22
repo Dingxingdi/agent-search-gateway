@@ -38,7 +38,7 @@ agent-search-gateway start --debug
 
 ## Configuration and runtime paths
 
-`config.example.toml` contains a selection of supported providers. ZenRows, Decodo, ScrapingDog, and ScrapeGraphAI remain supported but are omitted from this template. Its request timeout is 180.0 seconds; the runtime fallback when that setting is omitted remains 30.0 seconds. Changes to the template do not rewrite an existing user configuration.
+`config.example.toml` contains a selection of supported providers. ZenRows, Decodo, ScrapingDog, and ScrapeGraphAI remain supported but are omitted from this template. Its request timeout is 180.0 seconds; the runtime fallback when that setting is omitted remains 30.0 seconds. Changes to the template do not rewrite an existing user configuration. The daemon loads configuration at startup; edit your existing file and restart it normally for changes to take effect.
 
 The daemon reads:
 
@@ -55,6 +55,12 @@ Runtime files are stored under:
 ```
 
 The results directory is created by the daemon as needed. The debug log is created only by `agent-search-gateway start --debug`; ordinary `start` does not create or append it.
+
+### HTTP provider proxies and TLS
+
+Every Web, academic, OA resolver and LLM provider table accepts a strict boolean `use_proxy`, defaulting to `true`. With `true`, HTTPX uses the daemon's environment proxy settings (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`) and honors `NO_PROXY`. With `false`, that provider connects directly, while TLS certificate and hostname verification remain enabled. Both modes preserve the CA source: `SSL_CERT_FILE` takes precedence over `SSL_CERT_DIR`; without either, HTTPX uses its normal default CA bundle. See the [HTTPX environment](https://www.python-httpx.org/environment_variables/) and [TLS documentation](https://www.python-httpx.org/advanced/ssl/).
+
+For example, the template sets `[web_providers.zhihu] use_proxy = false` and leaves Firecrawl, arXiv, the LLM provider and the OA resolver at `true`. Other HTTP providers accept the same field. This setting does not change external Agent subprocess networking; use the Agent's documented `pass_env` configuration for its environment.
 
 ### Provider rate limits and input sizes
 
@@ -100,6 +106,21 @@ Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, p
 Jina Reader is a credential-free, fetch-only provider, so its configuration must omit `api_key_env`. Each actual Jina Reader request sends `X-No-Cache: true` to refresh Reader-side content. This does not bypass content already prepared by the gateway: an admitted URL whose body is already prepared still short-circuits before provider dispatch, and the gateway exposes no force-refresh option. Configuration order remains fetch-provider priority, so place Jina earlier when free-first behavior is desired.
 
 Web search and fetch stages for the same provider share one concurrency quota. LLM provider transports have their own independent quotas.
+
+#### Firecrawl search and explicit fetch
+
+Firecrawl keyword search requests Web metadata (URLs, titles and descriptions/highlights), without `scrapeOptions`. Search does not fetch or cache page bodies, including unexpected bodies returned upstream. Fetching an admitted URL requires an explicit `url-fetch`; only that step calls Scrape with the configured formats and parsers. Search and Fetch remain separately billable upstream operations.
+
+Configure these options in the existing `[web_providers.firecrawl]` table:
+
+| Option | Default | Accepted values |
+|---|---|---|
+| `search_limit` | `10` | Integer from 1 through 100; booleans are rejected |
+| `search_highlights` | `true` | Boolean |
+| `scrape_formats` | `["markdown"]` | Nonempty list of unique `"markdown"` and/or `"rawHtml"` strings |
+| `scrape_parsers` | `[]` | List of unique `"pdf"` and/or `"image"` strings; may be empty |
+
+The gateway explicitly sends `parsers = []` by default instead of inheriting upstream parser defaults. Under Firecrawl's current rules, a PDF with no parsers can return base64 and costs **1 credit for the whole PDF**; enabling the `"pdf"` parser currently costs **1 credit per page**. Base64 alone is not usable text for the gateway and can trigger the existing fallback to another Fetch provider. Empty parsers do not make Fetch free, and these current supplier rules do not guarantee a final bill or spending cap. Check Firecrawl's current [Search](https://docs.firecrawl.dev/api-reference/endpoint/search) and [Scrape](https://docs.firecrawl.dev/api-reference/endpoint/scrape) documentation and your account before changing parsing options.
 
 #### Doubao, You.com, Keenable, and open-webSearch
 
@@ -165,6 +186,7 @@ api_url = "https://api.wsa.cloud.tencent.com"
 api_key_env = "YUANBAO_API_KEY"
 
 [web_providers.zhihu]
+use_proxy = false
 enable_search = true
 enable_fetch = false
 api_url = "https://developer.zhihu.com"
@@ -392,18 +414,20 @@ Only parsed and admitted landing URLs can be fetched; PDF metadata is not admitt
 | Python process deadline | Print timeout plus 5 seconds, starting after quota acquisition |
 | Process termination | SIGTERM to the process group, then SIGKILL after up to 2 seconds |
 | Whole Agent workflow | No fixed Gateway deadline; quota queues, separate scope calls, and paper OA enrichment add to total time |
-| Agent socket response wait | No fixed default deadline; cancellation or disconnection ends the wait |
-| Other socket response wait | 600 seconds |
+| Business CLI response wait | No fixed default deadline for keyword-search, paper-search, llm-search, agent-search or url-fetch; interruption or disconnection ends the client wait |
 | Captured output | stdout 4 MiB; stderr 256 KiB; overflow fails without accepting truncated output |
 
-The default single-process timeout remains 300 seconds. A configured deadline still
-ends an overlong call and triggers process cleanup; request cancellation and client
-disconnection also clean up active Agent work. Quota waiting happens before that
-process deadline begins. Two scope branches and any subsequent OA enrichment are
-separate work, so total workflow duration can exceed a single process budget.
-An unresponsive but connected daemon can leave the Agent client waiting until
-interrupted or disconnected. Explicit numeric socket timeouts supplied by internal
-callers remain honored.
+The default single-process timeout remains 300 seconds. A configured Agent deadline
+still ends an overlong call and triggers process cleanup. Quota waiting happens
+before that process deadline begins. Two scope branches and any subsequent OA
+enrichment are separate work, so total workflow duration can exceed a single
+process budget. Provider HTTP timeouts and retry policies also remain in effect.
+
+All business CLI commands wait for the daemon response without a default deadline.
+An unresponsive but connected daemon can leave a client waiting until interrupted
+or disconnected. Ctrl-C ends the CLI wait; it does not cancel work already running
+in the daemon, which may continue and write result files. Explicit numeric socket
+timeouts supplied by internal callers remain honored.
 
 The gateway accepts representable finite positive timeout values without a fixed
 maximum, but the external agy duration parser may reject extreme values; the gateway
@@ -457,6 +481,13 @@ Academic providers use a separate configuration namespace and concurrency budget
 default_max_concurrency = 3
 
 [academic_providers.arxiv]
+use_proxy = true
+query_fields = ["ti", "abs"]
+max_results = 10
+sort_by = "relevance"
+sort_order = "descending"
+max_concurrency = 1
+min_interval_seconds = 3
 enabled = true
 api_url = "https://export.arxiv.org/api/query"
 
@@ -486,6 +517,17 @@ api_key_env = "CORE_API_KEY"
 enabled = false
 api_url = "https://api.unpaywall.org/v2"
 ```
+
+arXiv compiles ordinary words as AND-connected terms, with OR across the selected fields for each term. For example, `graph transformers` becomes `(ti:graph OR abs:graph) AND (ti:transformers OR abs:transformers)`. A quoted phrase such as `"graph neural networks"` stays one phrase in each selected field. These follow the [official arXiv query syntax](https://info.arxiv.org/help/api/user-manual.html).
+
+| arXiv option | Default | Accepted values |
+|---|---|---|
+| `query_fields` | `["ti", "abs"]` | Nonempty, ordered list of unique `"ti"` and/or `"abs"` strings |
+| `max_results` | `10` | Integer from 1 through 100; booleans are rejected |
+| `sort_by` | `"relevance"` | `"relevance"`, `"submittedDate"` or `"lastUpdatedDate"` |
+| `sort_order` | `"descending"` | `"ascending"` or `"descending"` |
+
+A long natural-language query can lose recall because every term must match. Use a shorter query or an intentional quoted phrase as appropriate. The gateway performs one logical query, with existing HTTP retries; it adds no LLM rewriting or second retrieval pass and does not guarantee improved relevance. Literal input that the upstream grammar cannot represent without changing its meaning (for example, a double quote inside a word) fails only the arXiv provider with `PROTOCOL_ERROR` before sending; other selected providers can still return results.
 
 arXiv and dblp require no credentials. Semantic Scholar may set `api_key_env`; omitting it selects unauthenticated mode and there is no authentication fallback after a configured credential is rejected. CORE requires `api_key_env`, and the named environment variable must exist. OpenAlex and Crossref may set `contact_email_env`. Unpaywall is disabled by default; enabling it requires `contact_email_env`, and the named environment variable must exist. Configuration values reference environment-variable names rather than embedding API keys or contact values in TOML.
 

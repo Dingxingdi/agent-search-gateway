@@ -37,7 +37,10 @@ def test_default_academic_registry_has_exact_order_factories_and_requirements() 
         ("none", "optional"),
         ("required", "none"),
     ]
-    assert all(item.allowed_config_keys == frozenset({"api_url"}) for item in registrations)
+    assert registrations[0].allowed_config_keys == frozenset(
+        {"api_url", "query_fields", "max_results", "sort_by", "sort_order"}
+    )
+    assert all(item.allowed_config_keys == frozenset({"api_url"}) for item in registrations[1:])
 
 
 def test_default_oa_registry_registers_unpaywall_with_required_contact() -> None:

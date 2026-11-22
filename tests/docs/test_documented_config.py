@@ -2,6 +2,7 @@ import argparse
 import json
 import re
 import shlex
+import ssl
 from pathlib import Path
 
 import httpx
@@ -15,6 +16,7 @@ from agent_search_gateway.config import (
     resolve_config,
     resolve_retry_policy,
 )
+from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.academic.defaults import (
     build_default_academic_registry,
@@ -164,9 +166,7 @@ def test_agent_example_config_matches_documented_command() -> None:
             assert token in text
 
 
-def test_documented_agent_timeout_policy_matches_runtime() -> None:
-    from agent_search_gateway import protocol
-
+def test_documented_agent_timeout_policy_matches_config() -> None:
     raw = load_toml(_ROOT / "config.example.toml")
     resolved = resolve_config(raw, build_default_registry(), _stub_environment(raw))
     [default_provider] = resolved.agent.providers
@@ -196,10 +196,6 @@ def test_documented_agent_timeout_policy_matches_runtime() -> None:
     assert not re.search(r"\b(?:540|1140|1200)\b", section), (
         "Current Agent documentation must not retain the old fixed budgets"
     )
-    other_socket_row = " ".join(rows["Other socket response wait"])
-    assert re.findall(r"\b\d+\b", other_socket_row) == [
-        str(int(protocol._RESPONSE_TIMEOUT_SECONDS))
-    ]
 
 
 def test_readme_documents_request_scoped_provider_and_model_filters() -> None:
@@ -270,6 +266,166 @@ def _stub_environment(data: dict[str, object]) -> dict[str, str]:
                 if isinstance(name, str):
                     names.add(name)
     return {name: "x" for name in names}
+
+
+@pytest.mark.parametrize("custom", [False, True], ids=["example", "custom-direct"])
+async def test_example_http_options_reach_runtime_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, custom: bool
+) -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web, academic, oa, llm = (
+        data["web_providers"],
+        data["academic_providers"],
+        data["oa_resolvers"],
+        data["llm_providers"],
+    )
+    assert all(isinstance(table, dict) for table in (web, academic, oa, llm))
+    assert isinstance(web, dict) and isinstance(academic, dict)
+    assert isinstance(oa, dict) and isinstance(llm, dict)
+    firecrawl, zhihu, arxiv, unpaywall, chat = (
+        web["firecrawl"],
+        web["zhihu"],
+        academic["arxiv"],
+        oa["unpaywall"],
+        llm["openai_main"],
+    )
+    assert firecrawl["use_proxy"] is True
+    assert zhihu["use_proxy"] is False
+    assert arxiv["use_proxy"] is unpaywall["use_proxy"] is chat["use_proxy"] is True
+    assert {
+        key: firecrawl[key]
+        for key in ("search_limit", "search_highlights", "scrape_formats", "scrape_parsers")
+    } == {
+        "search_limit": 10,
+        "search_highlights": True,
+        "scrape_formats": ["markdown"],
+        "scrape_parsers": [],
+    }
+    assert {
+        key: arxiv[key] for key in ("query_fields", "max_results", "sort_by", "sort_order")
+    } == {
+        "query_fields": ["ti", "abs"],
+        "max_results": 10,
+        "sort_by": "relevance",
+        "sort_order": "descending",
+    }
+    # Retain the example's policies; only one arXiv request is made per case.
+    data["web_providers"] = {"firecrawl": firecrawl, "zhihu": zhihu}
+    data["academic_providers"] = {"arxiv": arxiv}
+    unpaywall.update(enabled=True, contact_email_env="TEST_CONTACT")
+    if custom:
+        for table in (firecrawl, arxiv, unpaywall, chat):
+            table["use_proxy"] = False
+        zhihu["use_proxy"] = True
+        firecrawl.update(
+            search_limit=7,
+            search_highlights=False,
+            scrape_formats=["rawHtml", "markdown"],
+            scrape_parsers=["pdf", "image"],
+        )
+        arxiv.update(
+            query_fields=["abs"],
+            max_results=8,
+            sort_by="lastUpdatedDate",
+            sort_order="ascending",
+        )
+    config = resolve_config(
+        data,
+        build_default_registry(),
+        _stub_environment(data),
+        academic_registry=build_default_academic_registry(),
+        oa_resolver_registry=build_default_oa_resolver_registry(),
+    )
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.delenv("SSL_CERT_DIR", raising=False)
+    requests: list[tuple[httpx.Request, bool]] = []
+    clients: list[httpx.AsyncClient] = []
+    atom = (_ROOT / "tests/fixtures/providers/academic/arxiv/search.xml").read_text()
+    target = normalize_url("https://example.test/article")
+
+    def client_factory(
+        *, trust_env: bool = True, verify: ssl.SSLContext | bool = True
+    ) -> httpx.AsyncClient:
+        if not trust_env:
+            assert isinstance(verify, ssl.SSLContext)
+            assert verify.verify_mode == ssl.CERT_REQUIRED and verify.check_hostname
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append((request, trust_env))
+            if request.url.host == "api.firecrawl.dev":
+                payload = (
+                    {"web": [{"url": str(target), "description": "Abstract"}]}
+                    if request.url.path == "/v2/search"
+                    else {"markdown": "Article"}
+                )
+                return httpx.Response(200, json={"success": True, "data": payload})
+            if request.url.host == "developer.zhihu.com":
+                return httpx.Response(200, json={"Code": 0, "Data": {"Items": []}})
+            if request.url.host == "export.arxiv.org":
+                return httpx.Response(200, text=atom)
+            if request.url.host == "api.unpaywall.org":
+                return httpx.Response(404)
+            assert request.url.host == "api.openai.com"
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Reply"}}]})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), trust_env=trust_env, verify=verify
+        )
+        clients.append(client)
+        return client
+
+    runtime = Runtime.build(
+        config, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
+    )
+    try:
+        providers = {provider.name: provider for provider in runtime.web_search_providers}
+        hits = await providers["firecrawl"].search("graph transformers")
+        assert [hit.url for hit in hits] == [str(target)]
+        assert await providers["zhihu"].search("graph transformers") == []
+        [fetch] = runtime.web_fetch_providers
+        assert (await fetch.fetch(target)).content == "Article"
+        [paper] = runtime.academic_search_providers
+        assert len(await paper.search("graph transformers")) == 1
+        assert runtime.oa_resolver is not None
+        assert await runtime.oa_resolver.resolve("10.1000/example") is None
+        assert (
+            await runtime.llm_clients["openai_main"].complete_text(
+                LLMInvocation("openai_main", "example-model"),
+                [{"role": "user", "content": "Hello"}],
+            )
+            == "Reply"
+        )
+    finally:
+        await runtime.aclose()
+    assert len(clients) == 5 and all(client.is_closed for client in clients)
+    assert len(requests) == 7
+    assert all(
+        mode is (custom if request.url.host == "developer.zhihu.com" else not custom)
+        for request, mode in requests
+    )
+    by_path = {request.url.path: request for request, _ in requests}
+    assert json.loads(by_path["/v2/search"].content) == {
+        "query": "graph transformers",
+        "sources": ["web"],
+        "limit": 7 if custom else 10,
+        "highlights": not custom,
+    }
+    assert json.loads(by_path["/v2/scrape"].content) == {
+        "url": str(target),
+        "formats": ["rawHtml", "markdown"] if custom else ["markdown"],
+        "parsers": ["pdf", "image"] if custom else [],
+    }
+    assert dict(by_path["/api/query"].url.params) == {
+        "search_query": "(abs:graph) AND (abs:transformers)"
+        if custom
+        else "(ti:graph OR abs:graph) AND (ti:transformers OR abs:transformers)",
+        "max_results": "8" if custom else "10",
+        "sortBy": "lastUpdatedDate" if custom else "relevance",
+        "sortOrder": "ascending" if custom else "descending",
+    }
+    assert {"/api/v1/content/zhihu_search", "/api/v1/content/global_search"} <= by_path.keys()
+    assert by_path["/v2/10.1000/example"].url.params["email"] == "x"
+    assert json.loads(by_path["/v1/chat/completions"].content)["model"] == "example-model"
 
 
 def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_help() -> None:

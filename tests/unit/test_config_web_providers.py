@@ -923,6 +923,20 @@ def test_web_old_constructor_defaults_to_empty_rate_policy() -> None:
     provider = ResolvedWebProviderConfig("dual", True, True, 3, None, None, {})
     assert provider.rate_policy.windows == ()
     assert provider.rate_policy.min_interval_seconds is None
+    assert provider.use_proxy is True
+
+
+def test_web_provider_use_proxy_preserves_positional_rate_policy_and_frozen_config() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from agent_search_gateway.config import ResolvedRatePolicy, ResolvedWebProviderConfig
+
+    policy = ResolvedRatePolicy(min_interval_seconds=0.5)
+    provider = ResolvedWebProviderConfig("dual", True, True, 3, None, None, {}, policy)
+    assert provider.rate_policy is policy
+    assert provider.use_proxy is True
+    with pytest.raises(FrozenInstanceError):
+        provider.use_proxy = False  # type: ignore[misc]
 
 
 def test_no_auth_web_provider_resolves_rate_policy() -> None:
@@ -941,3 +955,178 @@ def test_no_auth_web_provider_resolves_rate_policy() -> None:
     assert provider.secret is None
     assert [(w.requests, w.period_seconds) for w in provider.rate_policy.windows] == [(2, 1.0)]
     assert dict(provider.options) == {}
+
+
+@pytest.mark.parametrize("branch", ["disabled", "no_key", "with_key"])
+@pytest.mark.parametrize(
+    ("proxy_fields", "expected"),
+    [({}, True), ({"use_proxy": True}, True), ({"use_proxy": False}, False)],
+)
+def test_web_provider_use_proxy_defaults_and_boolean_values(
+    branch: str, proxy_fields: dict[str, object], expected: bool
+) -> None:
+    name = "jina" if branch == "no_key" else "firecrawl"
+    table: dict[str, object] = {"api_url": "https://provider.example.test", **proxy_fields}
+    environment = {}
+    if branch == "no_key":
+        table["enable_fetch"] = True
+    elif branch == "with_key":
+        table.update(enable_search=True, api_key_env="TEST_KEY")
+        environment["TEST_KEY"] = "fixture-value"
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {name: table}}, build_default_registry(), environment
+    ).providers
+    assert provider.use_proxy is expected
+    assert dict(provider.options) == {"api_url": "https://provider.example.test"}
+    assert provider.enable_search is (branch == "with_key")
+    assert provider.enable_fetch is (branch == "no_key")
+    if branch == "disabled":
+        assert provider.secret is None
+        assert provider.api_key_env is None
+
+
+@pytest.mark.parametrize("name", ["firecrawl", "jina", "unknown_disabled"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("value", ["false", "do-not-echo-proxy", 0, 1, None, [], {}, ()])
+def test_web_provider_use_proxy_is_strict_boolean(name: str, enabled: bool, value: object) -> None:
+    table: dict[str, object] = {"use_proxy": value}
+    if name == "jina":
+        table["enable_fetch"] = enabled
+    elif name != "unknown_disabled":
+        table.update(enable_search=enabled, api_key_env="TEST_KEY")
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {"web_providers": {name: table}},
+            build_default_registry(),
+            {"TEST_KEY": "fixture-value"} if enabled else {},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"web_providers.{name}.use_proxy" in str(caught.value)
+    assert "do-not-echo-proxy" not in str(caught.value)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"search_limit": 1},
+        {"search_limit": 10},
+        {"search_limit": 100},
+        {"search_highlights": True},
+        {"search_highlights": False},
+        {"scrape_formats": ["markdown"]},
+        {"scrape_formats": ["rawHtml"]},
+        {"scrape_formats": ["rawHtml", "markdown"]},
+        {"scrape_parsers": []},
+        {"scrape_parsers": ["pdf"]},
+        {"scrape_parsers": ["image"]},
+        {"scrape_parsers": ["image", "pdf"]},
+        {
+            "search_limit": 12,
+            "search_highlights": False,
+            "scrape_formats": ["markdown", "rawHtml"],
+            "scrape_parsers": ["pdf", "image"],
+        },
+    ],
+)
+def test_firecrawl_options_are_validated_before_runtime(
+    options: dict[str, object], enabled: bool
+) -> None:
+    [provider] = resolve_web_provider_config(
+        {
+            "web_providers": {
+                "firecrawl": {
+                    "enable_search": enabled,
+                    "enable_fetch": enabled,
+                    "api_key_env": "TEST_KEY",
+                    "use_proxy": False,
+                    **options,
+                }
+            }
+        },
+        build_default_registry(),
+        {"TEST_KEY": "x"} if enabled else {},
+    ).providers
+    assert dict(provider.options) == {
+        key: tuple(value) if isinstance(value, list) else value for key, value in options.items()
+    }
+    assert provider.use_proxy is False
+    assert provider.enable_search is enabled
+    assert provider.enable_fetch is enabled
+    assert (provider.secret is not None) is enabled
+
+
+_INVALID_FIRECRAWL_LIMITS: list[object] = [0, -1, 101, True, False, 1.0, "10", None, [], {}]
+_INVALID_FIRECRAWL_HIGHLIGHTS: list[object] = [0, 1, "false", None, [], {}, ()]
+_INVALID_FIRECRAWL_CHOICES: list[object] = [
+    "do-not-echo",
+    None,
+    1,
+    True,
+    {},
+    (),
+    ["do-not-echo"],
+    [1],
+    [None],
+    [["do-not-echo"]],
+    [{"do-not-echo": "value"}],
+]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        *[("search_limit", value) for value in _INVALID_FIRECRAWL_LIMITS],
+        *[("search_highlights", value) for value in _INVALID_FIRECRAWL_HIGHLIGHTS],
+        *[
+            (field, value)
+            for field in ("scrape_formats", "scrape_parsers")
+            for value in _INVALID_FIRECRAWL_CHOICES
+        ],
+        ("scrape_formats", []),
+        ("scrape_formats", ["markdown", "markdown"]),
+        ("scrape_formats", ["markdown", {"do-not-echo": "value"}]),
+        ("scrape_parsers", ["pdf", "pdf"]),
+        ("scrape_parsers", ["pdf", ["do-not-echo"]]),
+    ],
+)
+def test_firecrawl_explicit_options_reject_invalid_values(
+    field: str, value: object, enabled: bool
+) -> None:
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_web_provider_config(
+            {"web_providers": {"firecrawl": {"enable_search": enabled, field: value}}},
+            build_default_registry(),
+            {},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"web_providers.firecrawl.{field}" in str(caught.value)
+    assert "do-not-echo" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        registration.name
+        for registration in build_default_registry().list_in_registration_order()
+        if registration.name != "firecrawl"
+    ],
+)
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("search_limit", 10),
+        ("search_highlights", True),
+        ("scrape_formats", ["markdown"]),
+        ("scrape_parsers", []),
+    ],
+)
+def test_firecrawl_options_are_rejected_by_other_web_providers(
+    name: str, field: str, value: object
+) -> None:
+    with pytest.raises(ConfigFailure, match=f"unknown config key.*{name}.*{field}"):
+        resolve_web_provider_config(
+            {"web_providers": {name: {field: value}}}, build_default_registry(), {}
+        )

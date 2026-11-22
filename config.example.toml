@@ -1,5 +1,8 @@
 # Match the example policy to your account. See docs/provider-rate-limits.md for sources.
 # rate_limits counts attempts across Search, Fetch and retries for the same provider.
+# All HTTP Web, academic, OA and LLM provider tables accept use_proxy (boolean, default true).
+# true honors HTTPX environment proxies/NO_PROXY; false connects directly with TLS verification.
+# Both modes keep SSL_CERT_FILE (preferred) / SSL_CERT_DIR CA settings. Restart after edits.
 [web_providers]
 default_max_concurrency = 3
 
@@ -12,6 +15,12 @@ api_url = "https://api.tavily.com"
 api_key_env = "TAVILY_API_KEY"
 
 [web_providers.firecrawl]
+use_proxy = true
+# Search returns metadata; only explicit Fetch requests page content.
+search_limit = 10
+search_highlights = true
+scrape_formats = ["markdown"]
+scrape_parsers = []
 # Authenticated Free Search and Scrape, each 10/min. Browser workers use a separate queue.
 rate_limits = [{ requests = 10, period_seconds = 60 }]
 enable_search = true
@@ -182,6 +191,7 @@ api_url = "https://api.wsa.cloud.tencent.com"
 api_key_env = "YUANBAO_API_KEY"
 
 [web_providers.zhihu]
+use_proxy = false
 enable_search = true
 enable_fetch = false
 api_url = "https://developer.zhihu.com"
@@ -191,6 +201,11 @@ api_key_env = "ZHIHU_ACCESS_SECRET"
 default_max_concurrency = 3
 
 [academic_providers.arxiv]
+use_proxy = true
+query_fields = ["ti", "abs"]
+max_results = 10
+sort_by = "relevance"
+sort_order = "descending"
 # Legacy API courtesy rules: one connection and three seconds between requests.
 max_concurrency = 1
 min_interval_seconds = 3
@@ -238,6 +253,7 @@ api_url = "https://api.core.ac.uk/v3"
 api_key_env = "CORE_API_KEY"
 
 [oa_resolvers.unpaywall]
+use_proxy = true
 # Technical daily request limit, applied only when enabled.
 rate_limits = [{ requests = 100000, period_seconds = 86400 }]
 enabled = false
@@ -254,6 +270,7 @@ agent_prompt_bytes = 98304
 default_max_concurrency = 2
 
 [llm_providers.openai_main]
+use_proxy = true
 protocol = "openai"
 api_endpoint = "chat_completions"
 api_url = "https://api.openai.com"
@@ -296,8 +313,9 @@ max_concurrency = 1       # Positive integer, shared by this alias's invocations
 # Representable finite positive seconds; default 300, no Gateway-imposed maximum.
 # Each agy call keeps its configured timeout and Python +5-second protection after quota.
 # Quota waits, both scopes, and OA enrichment can add to total workflow duration.
-# Agent socket wait has no fixed default deadline; cancellation/disconnect still ends it.
-# Other socket waits remain 600 seconds. External agy may reject extreme durations.
+# All business CLI commands wait for a response without a default deadline.
+# Ctrl-C ends the client wait but does not cancel background work.
+# External agy may reject extreme durations.
 timeout_seconds = 300
 pass_env = []             # Additional environment-variable names only.
 

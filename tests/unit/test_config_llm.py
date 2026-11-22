@@ -224,3 +224,78 @@ def test_input_limits_customize_llm_budget_without_changing_agent_default() -> N
     assert resolved.llm.search_invocations[0].extra_body == {"entry": {"id": 1}}
     assert resolved.llm.judge.extra_body == {"scope": {"name": "judge"}}
     assert data == original
+
+
+@pytest.mark.parametrize(
+    ("proxy_fields", "expected"),
+    [({}, True), ({"use_proxy": True}, True), ({"use_proxy": False}, False)],
+)
+def test_llm_provider_use_proxy_defaults_and_boolean_values(
+    proxy_fields: dict[str, object], expected: bool
+) -> None:
+    data = _config()
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    for name in ("primary", "secondary"):
+        table = tables[name]
+        assert isinstance(table, dict)
+        table.update(proxy_fields)
+    resolved = resolve_llm_config(data, _environment())
+    assert [provider.use_proxy for provider in resolved.providers] == [expected, expected]
+    invocations = (
+        *resolved.search_invocations,
+        resolved.judge,
+        resolved.safety,
+        resolved.content_clean,
+        resolved.focus_summary,
+    )
+    assert all("use_proxy" not in invocation.extra_body for invocation in invocations)
+    assert resolved.search_invocations[0].extra_body == {"entry": {"id": 1}}
+    assert resolved.judge.extra_body == {"scope": {"name": "judge"}}
+
+
+@pytest.mark.parametrize("name", ["primary", "secondary"])
+@pytest.mark.parametrize("value", ["false", "do-not-echo-proxy", 0, 1, None, [], {}, ()])
+def test_llm_provider_use_proxy_is_strict_boolean(name: str, value: object) -> None:
+    data = _config()
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    table = tables[name]
+    assert isinstance(table, dict)
+    table["use_proxy"] = value
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_llm_config(data, _environment())
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"llm_providers.{name}.use_proxy" in str(caught.value)
+    assert "do-not-echo-proxy" not in str(caught.value)
+
+
+@pytest.mark.parametrize("value", ["false", 0, 1, None, [], {}])
+def test_unreferenced_llm_provider_use_proxy_remains_ignored(value: object) -> None:
+    data = _config()
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    tables["unused"] = {"use_proxy": value}
+    resolved = resolve_llm_config(data, _environment())
+    assert [provider.name for provider in resolved.providers] == ["primary", "secondary"]
+
+
+def test_llm_provider_use_proxy_preserves_old_constructor_and_frozen_config() -> None:
+    from agent_search_gateway.config import LLMProviderConfig
+    from agent_search_gateway.observability import SecretValue
+
+    secret = SecretValue("fixture-value")
+    provider = LLMProviderConfig(
+        "primary",
+        "openai",
+        "chat_completions",
+        "https://provider.example.test",
+        "TEST_KEY",
+        secret,
+        7,
+    )
+    assert provider.max_concurrency == 7
+    assert provider.secret is secret
+    assert provider.use_proxy is True
+    with pytest.raises(FrozenInstanceError):
+        provider.use_proxy = False  # type: ignore[misc]

@@ -100,8 +100,8 @@
 
 补充检验：
 
-- 含额外空格、Unicode、连字符、引用的原始 Boolean 词、引号不匹配、冒号、括号、百分号的输入必须按字面处理，不得被当作 API 布尔操作符注入。
-- 明确引号短语保持原样，不意外去除其内部空格/转义。
+- 对已验证可安全、无损表示的额外空格、Unicode、连字符、原始 Boolean 词、冒号、括号、百分号和反斜线，验证每个词项/字段的实际解析叶节点；用户输入不得增加字段或布尔结构。
+- 可表示的完整引号短语保持原样，包括内部连续空格。对官方解析链无法安全、无损表示的嵌入/未闭合引号、边缘空白或 CR/LF 短语、日期别名/范围等反例，断言现有 `ProtocolFailure(PROTOCOL_ERROR)` 且 HTTP 调用为零；不能删除字符、做有损归一或把特殊用例静默跳过。该受控失败边界经 2026-11-22 用户确认。
 - query_fields 自定义顺序保持、输出 deterministic；HTTPX params 自动 URL 编码，避免手工重复 percent encoding。
 - 默认 max_results=10、sortBy=relevance、sortOrder=descending；合法配置值能映射到 arXiv 参数，非法值在创建 Provider 前拒绝。
 - 所有用例只产生 1 个受控模拟 GET 请求；原有 Atom XML、URL/DOI、作者、主题、日期及候选数测试全部保留。

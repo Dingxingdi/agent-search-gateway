@@ -7,10 +7,27 @@ from agent_search_gateway.errors import DaemonUnavailable, ErrorCode, ProtocolFa
 from agent_search_gateway.models import (
     AgentSearchRequest,
     KeywordSearchRequest,
+    LLMSearchRequest,
+    PaperSearchRequest,
     Request,
+    ShutdownRequest,
     SuccessResponse,
+    URLFetchRequest,
 )
-from agent_search_gateway.protocol import _MAX_RESPONSE_FRAME_BYTES, encode_response, send_request
+from agent_search_gateway.protocol import (
+    _MAX_RESPONSE_FRAME_BYTES,
+    encode_request,
+    encode_response,
+    send_request,
+)
+
+_BUSINESS_REQUESTS: tuple[Request, ...] = (
+    KeywordSearchRequest("q"),
+    PaperSearchRequest("q"),
+    URLFetchRequest("https://example.test"),
+    LLMSearchRequest("q"),
+    AgentSearchRequest("q"),
+)
 
 
 async def _run_server(path: Path, response: bytes, received: list[bytes]) -> asyncio.AbstractServer:
@@ -63,7 +80,7 @@ async def test_socket_client_accepts_response_larger_than_default_asyncio_limit(
 @pytest.mark.parametrize(
     "search_request", [KeywordSearchRequest("hello"), AgentSearchRequest("hello")]
 )
-async def test_socket_client_rejects_oversized_and_stalled_responses(
+async def test_socket_client_rejects_oversized_responses(
     tmp_path: Path, search_request: Request
 ) -> None:
     oversized_path = tmp_path / "oversized.sock"
@@ -77,32 +94,42 @@ async def test_socket_client_rejects_oversized_and_stalled_responses(
         server.close()
         await server.wait_closed()
 
-    stalled_path = tmp_path / "stalled.sock"
-    release = asyncio.Event()
-    done = asyncio.Event()
 
-    async def stalled_handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+@pytest.mark.parametrize("search_request", _BUSINESS_REQUESTS)
+async def test_socket_client_explicit_timeout_closes_writer(
+    tmp_path: Path, search_request: Request
+) -> None:
+    path = tmp_path / "timeout.sock"
+    disconnected = asyncio.Event()
+    received: list[bytes] = []
+    handlers: list[asyncio.Task[None]] = []
+
+    async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        handlers.append(task)
         try:
-            await reader.readline()
-            await release.wait()
+            received.append(await reader.readline())
+            received.append(await reader.read())
         finally:
             writer.close()
             await writer.wait_closed()
-            done.set()
+            disconnected.set()
 
-    stalled_server = await asyncio.start_unix_server(stalled_handler, path=stalled_path)
+    server = await asyncio.start_unix_server(handler, path=path)
     try:
-        with pytest.raises(ProtocolFailure, match="Timed out"):
-            await send_request(
-                stalled_path,
-                search_request,
-                response_timeout_seconds=0.01,
-            )
+        with pytest.raises(ProtocolFailure, match="Timed out") as caught:
+            await send_request(path, search_request, response_timeout_seconds=0.01)
+        await asyncio.wait_for(disconnected.wait(), timeout=1.0)
     finally:
-        release.set()
-        await asyncio.wait_for(done.wait(), timeout=1.0)
-        stalled_server.close()
-        await stalled_server.wait_closed()
+        server.close()
+        await server.wait_closed()
+        for task in handlers:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+
+    assert caught.value.code is ErrorCode.PROTOCOL_ERROR
+    assert received == [encode_request(search_request), b""]
 
 
 @pytest.mark.parametrize(
@@ -135,21 +162,17 @@ async def test_socket_client_distinguishes_missing_daemon(tmp_path: Path) -> Non
 
 
 @pytest.mark.parametrize("kind", ["agent", "llm", "keyword", "paper", "fetch", "shutdown"])
-@pytest.mark.parametrize("override", [None, 0.01, 42.0])
-async def test_socket_timeout_depends_on_request_type_and_honors_override(
+@pytest.mark.parametrize(
+    ("pass_override", "override"), [(False, None), (True, None), (True, 0.01), (True, 42.0)]
+)
+async def test_socket_client_defaults_to_unbounded_wait_and_honors_override(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     kind: str,
+    pass_override: bool,
     override: float | None,
 ) -> None:
     from collections.abc import Awaitable
-
-    from agent_search_gateway.models import (
-        LLMSearchRequest,
-        PaperSearchRequest,
-        ShutdownRequest,
-        URLFetchRequest,
-    )
 
     requests: dict[str, Request] = {
         "agent": AgentSearchRequest("q"),
@@ -172,39 +195,49 @@ async def test_socket_timeout_depends_on_request_type_and_honors_override(
     path = tmp_path / "timeout.sock"
     server = await _run_server(path, encode_response(SuccessResponse("ok")), [])
     try:
-        assert await send_request(
-            path, requests[kind], response_timeout_seconds=override
-        ) == SuccessResponse("ok")
+        if pass_override:
+            response = await send_request(path, requests[kind], response_timeout_seconds=override)
+        else:
+            response = await send_request(path, requests[kind])
+        assert response == SuccessResponse("ok")
     finally:
         server.close()
         await server.wait_closed()
-    assert seen == [override if override is not None else (None if kind == "agent" else 600.0)]
+    assert seen == [override]
 
 
+@pytest.mark.parametrize("search_request", _BUSINESS_REQUESTS)
 @pytest.mark.parametrize("response", [b"", b'{"ok":true,"text":"unfinished"}'])
-async def test_agent_socket_client_reports_eof_without_waiting_for_a_deadline(
-    tmp_path: Path, response: bytes
+async def test_socket_client_reports_eof_without_waiting_for_a_deadline(
+    tmp_path: Path, search_request: Request, response: bytes
 ) -> None:
     path = tmp_path / "eof.sock"
     received: list[bytes] = []
     server = await _run_server(path, response, received)
     try:
         with pytest.raises(ProtocolFailure, match="Daemon response ended before newline") as caught:
-            await asyncio.wait_for(send_request(path, AgentSearchRequest("q")), timeout=1.0)
+            await asyncio.wait_for(send_request(path, search_request), timeout=1.0)
     finally:
         server.close()
         await server.wait_closed()
 
     assert caught.value.code is ErrorCode.PROTOCOL_ERROR
-    assert received == [b'{"type":"agent_search","prompt":"q"}\n']
+    assert received == [encode_request(search_request)]
 
 
-async def test_agent_socket_client_cancellation_closes_writer(tmp_path: Path) -> None:
+@pytest.mark.parametrize("search_request", _BUSINESS_REQUESTS)
+async def test_socket_client_cancellation_closes_writer(
+    tmp_path: Path, search_request: Request
+) -> None:
     path = tmp_path / "cancel.sock"
     entered, disconnected = asyncio.Event(), asyncio.Event()
     received: list[bytes] = []
+    handlers: list[asyncio.Task[None]] = []
 
     async def handler(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        handler_task = asyncio.current_task()
+        assert handler_task is not None
+        handlers.append(handler_task)
         try:
             received.append(await reader.readline())
             entered.set()
@@ -215,7 +248,7 @@ async def test_agent_socket_client_cancellation_closes_writer(tmp_path: Path) ->
             disconnected.set()
 
     server = await asyncio.start_unix_server(handler, path=path)
-    task = asyncio.create_task(send_request(path, AgentSearchRequest("q")))
+    task = asyncio.create_task(send_request(path, search_request))
     try:
         await asyncio.wait_for(entered.wait(), timeout=1.0)
         # A response-less connection stays pending while the loop remains responsive.
@@ -230,5 +263,8 @@ async def test_agent_socket_client_cancellation_closes_writer(tmp_path: Path) ->
         await asyncio.gather(task, return_exceptions=True)
         server.close()
         await server.wait_closed()
+        for handler_task in handlers:
+            handler_task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
 
-    assert received == [b'{"type":"agent_search","prompt":"q"}\n', b""]
+    assert received == [encode_request(search_request), b""]

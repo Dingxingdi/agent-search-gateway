@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import httpx
 
@@ -18,6 +19,48 @@ from .common import AcademicHttpExecutor, parse_iso_date, protocol_failure, reje
 _ATOM = "http://www.w3.org/2005/Atom"
 _ARXIV = "http://arxiv.org/schemas/atom"
 _DEFAULT_API_URL = "https://export.arxiv.org/api/query"
+
+
+_QUERY_TERM = re.compile(r'\s*("[^"]*"|[^\s"]+)(?=\s|$)')
+# Classic API adapt_query rewrites dates and line breaks even inside quotes.
+# Surrogates have no UTF-8 representation in an HTTP query parameter.
+_UNREPRESENTABLE = re.compile(
+    r"lastUpdatedDate:|submittedDate:\[[\d-]{4,14} TO [\d-]{4,14}\]|[\r\n\ud800-\udfff]"
+)
+
+
+def _query_literal(token: str) -> str:
+    phrase = token.startswith('"')
+    value = token[1:-1] if phrase else token
+    if value != value.strip() or _UNREPRESENTABLE.search(value):
+        raise protocol_failure("arxiv", "query contains an unrepresentable literal")
+    if phrase or value in {"AND", "OR", "ANDNOT", "NOT"} or any(c in value for c in ":()%"):
+        # A space protects the closing quote from a trailing backslash. The
+        # upstream transformer strips the space and preserves every backslash.
+        padding = " " if value.endswith("\\") else ""
+        return f'"{value}{padding}"'
+    return value
+
+
+def _compile_query(query: str, fields: tuple[str, ...]) -> str:
+    query = query.strip()
+    groups: list[str] = []
+    position = 0
+    while position < len(query):
+        match = _QUERY_TERM.match(query, position)
+        if match is None:
+            raise protocol_failure("arxiv", "query contains an unrepresentable literal")
+        position = match.end()
+        token = match.group(1)
+        if token == '""':
+            continue
+        literal = _query_literal(token)
+        alternatives = " OR ".join(f"{field}:{literal}" for field in fields)
+        groups.append(f"({alternatives})")
+
+    if not groups:
+        raise protocol_failure("arxiv", "query contains no searchable terms")
+    return " AND ".join(groups)
 
 
 def _parse_response(body: str) -> ET.Element:
@@ -62,23 +105,34 @@ class ArxivProvider:
         executor: AcademicHttpExecutor,
         *,
         api_url: str = _DEFAULT_API_URL,
+        query_fields: Sequence[str] = ("ti", "abs"),
+        max_results: int = 10,
+        sort_by: str = "relevance",
+        sort_order: str = "descending",
     ) -> None:
         self._executor = executor
         self._api_url = api_url
+        self._query_fields = tuple(query_fields)
+        self._max_results = max_results
+        self._sort_by = sort_by
+        self._sort_order = sort_order
 
     async def search(self, query: str) -> list[PaperSearchHit]:
-        body = await self._executor.request_text(
-            "GET",
-            self._api_url,
-            stage="paper_search",
-            params={
-                "search_query": f"all:{query}",
-                "max_results": 10,
-                "sortBy": "relevance",
-                "sortOrder": "descending",
-            },
-            response_diagnostics=_response_diagnostics,
-        )
+        try:
+            body = await self._executor.request_text(
+                "GET",
+                self._api_url,
+                stage="paper_search",
+                params={
+                    "search_query": _compile_query(query, self._query_fields),
+                    "max_results": self._max_results,
+                    "sortBy": self._sort_by,
+                    "sortOrder": self._sort_order,
+                },
+                response_diagnostics=_response_diagnostics,
+            )
+        except httpx.InvalidURL:
+            raise protocol_failure("arxiv", "request URL could not be constructed") from None
         root = _parse_response(body)
         entries = root.findall(f"{{{_ATOM}}}entry")
         counts = CandidateCounts(len(entries))
