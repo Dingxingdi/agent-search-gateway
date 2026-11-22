@@ -384,7 +384,18 @@ class YouComAdapter:
                 "matching markdown is empty",
                 diagnostics={"response_kind": "object", "semantic_result": "empty"},
             )
-        return URLFetchCandidate(raw_content=markdown, content=markdown)
+        try:
+            markdown.encode("utf-8")
+        except UnicodeEncodeError:
+            pass
+        else:
+            return URLFetchCandidate(raw_content=markdown, content=markdown)
+        raise failure(
+            self.name,
+            "fetch",
+            "matching markdown contains invalid Unicode",
+            diagnostics={"response_kind": "object"},
+        )
 
     def _parse_fetch(self, payload: object, target: NormalizedURL) -> URLFetchCandidate:
         code = _error_code(payload)

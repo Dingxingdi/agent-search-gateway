@@ -1722,15 +1722,23 @@ class _YouComMCPWorkflowHTTP(_NewWebHTTP):
             if self.fetch_outcome == "tool_error":
                 result = {"isError": True, "content": [{"type": "text", "text": "unavailable"}]}
             else:
+                markdown = "Original MCP page."
+                if self.fetch_outcome == "invalid_unicode":
+                    markdown += "\ud800"
                 result = {
                     "structuredContent": {
-                        "output": {"contents": {"full_page": {"markdown": "Original MCP page."}}}
+                        "output": {"contents": {"full_page": {"markdown": markdown}}}
                     }
                 }
-        return httpx.Response(200, json={"jsonrpc": "2.0", "id": call["id"], "result": result})
+        envelope = {"jsonrpc": "2.0", "id": call["id"], "result": result}
+        return httpx.Response(
+            200,
+            content=json.dumps(envelope, ensure_ascii=True),
+            headers={"content-type": "application/json"},
+        )
 
 
-@pytest.mark.parametrize("fetch_outcome", ["success", "quota", "tool_error"])
+@pytest.mark.parametrize("fetch_outcome", ["success", "quota", "tool_error", "invalid_unicode"])
 async def test_youcom_mcp_search_admission_and_fetch_priority(
     tmp_path: Path, fetch_outcome: str
 ) -> None:
@@ -1757,6 +1765,7 @@ async def test_youcom_mcp_search_admission_and_fetch_priority(
     assert after is not None and after.available
     assert (after.abstract, after.raw_content, after.content) == ("New abstract", raw, expected)
     assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
+    assert raw in workflow.llm.json_calls[0][1][-1]["content"]
     if fallback:
         assert [call[0].model for call in workflow.llm.text_calls] == ["clean"]
         assert raw in workflow.llm.text_calls[0][1][-1]["content"]

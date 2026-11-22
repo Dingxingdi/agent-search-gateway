@@ -1514,6 +1514,8 @@ async def test_mcp_fetch_returns_verified_nonempty_body(
 async def test_mcp_fetch_checks_returned_url_when_present(
     url_fields: dict[str, object],
 ) -> None:
+    body = "  # Page 🌍\n"
+
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -1524,7 +1526,7 @@ async def test_mcp_fetch_checks_returned_url_when_present(
                     "structuredContent": {
                         "output": {
                             **url_fields,
-                            "contents": {"full_page": {"markdown": "body"}},
+                            "contents": {"full_page": {"markdown": body}},
                         }
                     }
                 },
@@ -1534,7 +1536,7 @@ async def test_mcp_fetch_checks_returned_url_when_present(
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await _mcp_adapter(client).fetch(
             normalize_url("https://example.test/page")
-        ) == URLFetchCandidate("body", "body")
+        ) == URLFetchCandidate(body, body)
 
 
 @pytest.mark.parametrize(
@@ -1555,6 +1557,10 @@ async def test_mcp_fetch_checks_returned_url_when_present(
             ({"contents": {"full_page": {"markdown": body}}}, "empty")
             for body in [None, "", " \n\t ", 7, dict[str, object](), list[object]()]
         ],
+        *[
+            ({"contents": {"full_page": {"markdown": "PRIVATE_BODY" + surrogate}}}, "error")
+            for surrogate in ["\ud800", "\udfff"]
+        ],
         ({}, "error"),
         ({"contents": None}, "error"),
         ({"contents": {"full_page": None}}, "error"),
@@ -1574,13 +1580,15 @@ async def test_mcp_fetch_rejects_empty_or_nonbody_output(
         assert json.loads(request.content)["params"]["arguments"] == {
             "url": "https://example.test/page"
         }
+        envelope = {
+            "jsonrpc": "2.0",
+            "id": json.loads(request.content)["id"],
+            "result": {"structuredContent": {"output": output}},
+        }
         return httpx.Response(
             200,
-            json={
-                "jsonrpc": "2.0",
-                "id": json.loads(request.content)["id"],
-                "result": {"structuredContent": {"output": output}},
-            },
+            content=json.dumps(envelope, ensure_ascii=True),
+            headers={"content-type": "application/json"},
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:

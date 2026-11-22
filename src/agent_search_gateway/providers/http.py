@@ -181,6 +181,19 @@ class HttpJsonExecutor:
         preview_bodies: bool = True,
         inherit_client_defaults: bool = True,
     ) -> object:
+        """Request JSON, optionally limiting successful response bytes before decoding.
+
+        With ``max_response_bytes``, callers must keep the injected client's response
+        hooks empty from each attempt's preflight through completion, including in
+        request hooks and concurrent users of the client. The preflight rejects
+        response hooks present at the start; it cannot prevent later mutation.
+        Stable request-only hooks are supported.
+
+        Incremental enforcement requires a streaming transport. Already-buffered
+        successful bodies are size-checked before decoding, but allocations made by
+        a supplied transport or hook before the executor receives the response cannot
+        be undone. This is not an unconditional memory bound on injected client code.
+        """
         response, attempt, attempt_started, diagnostics = await self._request_response(
             method,
             url,

@@ -830,7 +830,7 @@ Task 1–9 的实施与验收步骤均已完成并勾选；Task 8 的唯一一�
 
 - `docs/youcom-free-mcp.md`：免费 MCP 使用说明。
 - `config.youcom-free.fragment.toml`：同一个 `youcom` 配置表的无凭据替换片段。
-- `docs/designs/plans/20261121-youcom-free-mcp-pending-docs.patch`：原文档及相应测试的补丁，已在本次授权收尾中应用；保留原文件名作为实施过程记录。应用前通过 `git apply --check`。
+- 原 README/config.example 及相应测试：补丁已应用并纳入公开的 [PR 实现提交 `60b2580`](https://github.com/Dingxingdi/agent-search-gateway/commit/60b2580b3590735f57688b979d20fadab8e87b22)。应用前通过 `git apply --check`；实施记录由提交历史保留，已应用的补丁文件不再随文档分发。
 
 ### 实施提交
 

@@ -68,6 +68,23 @@ instead of the redirect's HTTP status. The
 [review discussion](https://github.com/Dingxingdi/agent-search-gateway/pull/106#discussion_r4657471106)
 records the upstream interface limitation and its deferral.
 
+## Injected HTTP clients
+
+Free MCP enables the HTTP executor's `max_response_bytes` limit. When embedding the
+runtime with a custom `http_client_factory`, keep each supplied client's response
+hooks empty from the preflight check through completion of every bounded attempt.
+This also applies to request hooks and other tasks sharing that client: they must
+not install response hooks during the attempt. The preflight rejects response
+hooks already configured at the start but cannot prevent later mutation. Stable
+request-only hooks remain supported, including the guard used by the live check.
+
+Incremental enforcement requires a streaming transport. If a custom transport or
+hook has already buffered a successful response, the executor checks its size
+before decoding and rejects an oversized body, but cannot undo that allocation.
+The limit therefore does not provide an unconditional memory bound on code in an
+injected client. The default runtime uses ordinary HTTPX clients and does not
+reconfigure their hooks during requests.
+
 ## Opt-in keyless live check
 
 Default tests remain offline. To opt in to only the free MCP check:
