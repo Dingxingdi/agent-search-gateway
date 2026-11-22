@@ -479,14 +479,110 @@ async def test_private_body_preview_retains_input_truncation_metadata(bounded: b
     assert "request_input_truncated=true" in preview
 
 
+@pytest.mark.parametrize("status", [200, 403])
+async def test_bounded_request_rejects_response_hooks_before_dispatch(status: int) -> None:
+    stream = RecordingStream(b"1", b"2", b"3")
+    events: list[str] = []
+
+    async def on_request(request: httpx.Request) -> None:
+        events.append("request hook")
+
+    async def buffer_response(response: httpx.Response) -> None:
+        events.append("response hook")
+        await response.aread()
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        events.append("send")
+        return httpx.Response(status if request.method == "POST" else 200, stream=stream)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond),
+        event_hooks={"request": [on_request], "response": [buffer_response]},
+    ) as client:
+        executor = HttpJsonExecutor(client, RetryPolicy(2, 0, 0, 1), provider_name="test")
+        with pytest.raises(ValueError, match="response hooks"):
+            await executor.request_json(
+                "POST", "https://example.test", stage="search", max_response_bytes=2
+            )
+        assert events == [] and stream.reads == 0
+        assert await executor.request_json("GET", "https://example.test", stage="search") == 123
+    assert events == ["request hook", "send", "response hook"]
+
+
+@pytest.mark.parametrize(
+    "phase,status",
+    [
+        ("headers", 200),
+        ("buffered", 200),
+        ("body", 200),
+        ("close", 200),
+        ("close", 302),
+        ("close", 403),
+    ],
+)
+async def test_bounded_request_finishes_synchronously_after_deadline(
+    phase: str, status: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    offset = 0.0
+    monkeypatch.setattr(loop, "time", lambda: real_time() + offset)
+
+    class LateStream(RecordingStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal offset
+            if phase == "body":
+                offset += 2
+            yield b"123"
+
+        async def aclose(self) -> None:
+            nonlocal offset
+            await super().aclose()
+            if phase == "close":
+                offset += 2
+
+    stream = LateStream()
+    logger, log = structured_test_logger("tests.bounded.sync-deadline")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal offset
+        if phase in ("headers", "buffered"):
+            offset += 2
+        if phase == "buffered":
+            return httpx.Response(status, content=b"123")
+        return httpx.Response(status, stream=stream)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 1), provider_name="test", logger=logger
+        )
+        with pytest.raises(ExecutionFailure) as caught:
+            await executor.request_json(
+                "POST", "https://example.test", stage="search", max_response_bytes=3
+            )
+    assert stream.closed == (phase != "buffered")
+    (preview,) = [
+        line for line in log.getvalue().splitlines() if "event=upstream_body_preview " in line
+    ]
+    assert "response_body_preview=null" in preview
+    assert caught.value.diagnostics["http_status"] == status
+    if status == 200:
+        assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
+        assert caught.value.diagnostics["response_bytes"] == 3
+        assert "response_body_bytes=3" in preview
+    else:
+        assert isinstance(caught.value, HttpStatusFailure)
+        assert caught.value.status_code == status
+
+
 @pytest.mark.parametrize("phase", ["send", "stream"])
 async def test_bounded_response_deadline_covers_whole_attempt(phase: str) -> None:
     class HeartbeatStream(RecordingStream):
         async def __aiter__(self) -> AsyncIterator[bytes]:
             while True:
-                await asyncio.sleep(0.001)
                 self.reads += 1
                 yield b":"
+                await asyncio.sleep(0.001)
 
     streams: list[HeartbeatStream] = []
     sends = 0

@@ -414,6 +414,9 @@ class HttpJsonExecutor:
                 if callable(headers):
                     request.headers.update(headers())
                 if max_response_bytes is not None:
+                    # HTTPX runs response hooks before giving us the stream to bound.
+                    if self._client.event_hooks.get("response"):
+                        raise ValueError("Bounded requests do not support HTTPX response hooks")
                     request.headers["Accept-Encoding"] = "identity"
                 if prepared_body is not None:
                     request.headers["Content-Type"] = "application/json"
@@ -436,6 +439,7 @@ class HttpJsonExecutor:
                 await self._wait_for_rate(self._rate_gate, stage, attempt, start_attempt)
             response_fields = {}
             response = None
+            bounded_response: httpx.Response | None = None
             read_failure: ProtocolFailure | None = None
             received_bytes = 0
             body_complete = False
@@ -447,14 +451,19 @@ class HttpJsonExecutor:
                     body_complete = True
                 else:
                     try:
-                        deadline = asyncio.get_running_loop().time() + timeout
+                        loop = asyncio.get_running_loop()
+                        deadline = loop.time() + timeout
                         async with asyncio.timeout_at(deadline):
                             response = await self._client.send(
                                 request, auth=auth, follow_redirects=False, stream=True
                             )
-                        response = await self._read_bounded_response(
+                        bounded_response = await self._read_bounded_response(
                             response, max_response_bytes, stage, deadline
                         )
+                        # Synchronous reads and cleanup may never yield to the timeout callback.
+                        if bounded_response.is_success and loop.time() >= deadline:
+                            raise TimeoutError
+                        response = bounded_response
                         body_complete = response.is_success
                     except ProtocolFailure as exc:
                         if response is None:
@@ -473,8 +482,8 @@ class HttpJsonExecutor:
             finally:
                 transport_finished = self._monotonic()
                 if response is not None and response.is_success and max_response_bytes is not None:
-                    if body_complete:
-                        received_bytes = len(response.content)
+                    if bounded_response is not None:
+                        received_bytes = len(bounded_response.content)
                     elif read_failure is not None:
                         count = read_failure.diagnostics.get("response_bytes")
                         received_bytes = count if isinstance(count, int) else 0

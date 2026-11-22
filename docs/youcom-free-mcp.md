@@ -61,6 +61,13 @@ and local rate gate for the `youcom` provider. Failures follow the existing
 Search fan-out and Fetch fallback behavior through other configured providers.
 The gateway never automatically switches a free MCP failure to paid You.com REST.
 
+Redirects are never followed. With the locked HTTPX 0.28.1, an invalid `Location`
+can fail before the original redirect status is exposed. That case follows the
+configured transport-error retry policy and may be reported as a transport failure
+instead of the redirect's HTTP status. The
+[review discussion](https://github.com/Dingxingdi/agent-search-gateway/pull/106#discussion_r4657471106)
+records the upstream interface limitation and its deferral.
+
 ## Opt-in keyless live check
 
 Default tests remain offline. To opt in to only the free MCP check:

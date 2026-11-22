@@ -885,7 +885,11 @@ async def test_mcp_search_rejects_bad_candidates_without_losing_good_hits(
         {"url": "https://example.test/bad-contents", "contents": []},
         {"url": "https://example.test/bad-highlights", "contents": {"highlights": "bad"}},
         {"url": "https://example.test/bad-highlight", "contents": {"highlights": [7]}},
-        {"url": "https://EXAMPLE.test/good#part", "title": None, "snippets": ["kept"]},
+        {"url": "https://example.test/\ud800"},
+        {"url": "https://example.test/title", "title": "\udfff"},
+        {"url": "https://example.test/snippet", "snippets": ["\ud800"]},
+        {"url": "https://example.test/highlight", "contents": {"highlights": ["\udfff"]}},
+        {"url": "https://EXAMPLE.test/good#part", "title": None, "snippets": ["kept 🌍"]},
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -893,12 +897,18 @@ async def test_mcp_search_rejects_bad_candidates_without_losing_good_hits(
         result = envelope["result"]
         assert isinstance(result, dict)
         result["structuredContent"] = {"results": {"web": rows}}
-        return httpx.Response(200, json=envelope)
+        # The wire JSON is valid UTF-8 even when an escaped surrogate has no matching pair.
+        return httpx.Response(
+            200,
+            content=json.dumps(envelope, ensure_ascii=True),
+            headers={"content-type": "application/json"},
+        )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await _mcp_adapter(client).search("PRIVATE_QUERY") == [
-            KeywordSearchHit("https://EXAMPLE.test/good#part", "", "kept")
-        ]
+        hits = await _mcp_adapter(client).search("PRIVATE_QUERY")
+    for hit in hits:
+        json.dumps([hit.url, hit.title, hit.snippet], ensure_ascii=False).encode("utf-8")
+    assert hits == [KeywordSearchHit("https://EXAMPLE.test/good#part", "", "kept 🌍")]
     summaries = [
         vars(record)["gateway_fields"]
         for record in caplog.records
@@ -909,11 +919,11 @@ async def test_mcp_search_rejects_bad_candidates_without_losing_good_hits(
             "provider": "youcom",
             "stage": "search",
             "phase": "adapter",
-            "received": 12,
+            "received": 16,
             "accepted": 1,
-            "rejected": 11,
-            "rejection_counts": {"invalid_record": 9, "missing_url": 2},
-            "processed": 12,
+            "rejected": 15,
+            "rejection_counts": {"invalid_record": 13, "missing_url": 2},
+            "processed": 16,
             "unprocessed": 0,
             "rewritten": 0,
         }

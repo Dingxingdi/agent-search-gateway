@@ -289,21 +289,21 @@ class YouComAdapter:
                     "search",
                     "result.snippets",
                 )
-                hits.append(
-                    KeywordSearchHit(
-                        url=url,
-                        title=optional_string(
-                            record.get("title"), self.name, "search", "result.title"
-                        ),
-                        snippet="\n\n".join(
-                            require_string(value, self.name, "search", "result.snippets[]")
-                            for value in snippets
-                        ),
-                    )
+                hit = KeywordSearchHit(
+                    url=url,
+                    title=optional_string(record.get("title"), self.name, "search", "result.title"),
+                    snippet="\n\n".join(
+                        require_string(value, self.name, "search", "result.snippets[]")
+                        for value in snippets
+                    ),
                 )
-            except (ExecutionFailure, InputFailure):
+                # JSON escapes can decode to lone surrogates that cannot be stored as UTF-8.
+                for field in (hit.url, hit.title, hit.snippet):
+                    field.encode("utf-8")
+            except (ExecutionFailure, InputFailure, UnicodeEncodeError):
                 counts.reject(candidate_rejection_reason(item, "url"))
                 continue
+            hits.append(hit)
             counts.accept()
         log_event(
             logging.getLogger(__name__),
