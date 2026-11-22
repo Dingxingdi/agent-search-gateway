@@ -34,7 +34,13 @@ def _query_literal(token: str) -> str:
     value = token[1:-1] if phrase else token
     if value != value.strip() or _UNREPRESENTABLE.search(value):
         raise protocol_failure("arxiv", "query contains an unrepresentable literal")
-    if phrase or value in {"AND", "OR", "ANDNOT", "NOT"} or any(c in value for c in ":()%"):
+    if (
+        phrase
+        or value in {"AND", "OR", "ANDNOT", "NOT"}
+        or any(c in value for c in ":()%*?")
+        or "&&" in value
+        or "||" in value
+    ):
         # A space protects the closing quote from a trailing backslash. The
         # upstream transformer strips the space and preserves every backslash.
         padding = " " if value.endswith("\\") else ""
