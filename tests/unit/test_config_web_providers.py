@@ -680,15 +680,8 @@ def test_new_keyed_provider_resolves_only_explicit_secret(provider_name: str) ->
     assert "fixture-value" not in repr(provider)
 
 
-@pytest.mark.parametrize(
-    ("provider_name", "credential"),
-    [
-        (name, credential)
-        for name in _NEW_KEYED_PROVIDERS
-        for credential in (None, "", "MISSING")
-        if name != "youcom" or credential is not None
-    ],
-)
+@pytest.mark.parametrize("provider_name", _NEW_KEYED_PROVIDERS)
+@pytest.mark.parametrize("credential", [None, "", "MISSING"])
 def test_new_keyed_provider_requires_named_environment_value(
     provider_name: str,
     credential: str | None,

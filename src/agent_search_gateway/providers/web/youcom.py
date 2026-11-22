@@ -31,6 +31,7 @@ from .common import (
     require_string,
 )
 
+_DEFAULT_API_URL = "https://ydc-index.io"
 _MCP_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 
 _KNOWN_ERROR_CODES = frozenset(
@@ -44,7 +45,7 @@ _KNOWN_ERROR_CODES = frozenset(
 )
 
 
-def _is_free_mcp_endpoint(api_url: str) -> bool:
+def _is_free_mcp_endpoint(api_url: object) -> bool:
     if not isinstance(api_url, str):
         raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Invalid You.com API URL")
     try:
@@ -69,6 +70,15 @@ def _is_free_mcp_endpoint(api_url: str) -> bool:
     ):
         return True
     raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Unsupported You.com MCP endpoint")
+
+
+def _use_free_mcp(api_url: object, has_api_key: bool) -> bool:
+    use_mcp = _is_free_mcp_endpoint(api_url)
+    if use_mcp and has_api_key:
+        raise ConfigFailure(ErrorCode.CONFIG_ERROR, "You.com free MCP does not accept an API key")
+    if not use_mcp and not has_api_key:
+        raise ConfigFailure(ErrorCode.CONFIG_ERROR, "You.com REST requires an API key")
+    return use_mcp
 
 
 def _error_code(payload: object) -> str | None:
@@ -118,22 +128,19 @@ def _search_response_diagnostics(response: httpx.Response) -> Mapping[str, objec
 
 
 class YouComAdapter:
+    @staticmethod
+    def validate_config(options: Mapping[str, object], has_api_key: bool) -> None:
+        _use_free_mcp(options.get("api_url", _DEFAULT_API_URL), has_api_key)
+
     def __init__(
         self,
         *,
         name: str,
-        api_url: str = "https://ydc-index.io",
+        api_url: str = _DEFAULT_API_URL,
         secret: SecretValue | None = None,
         http_executor: JsonRequester,
     ) -> None:
-        self._use_mcp = _is_free_mcp_endpoint(api_url)
-        if self._use_mcp:
-            if secret is not None:
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR, "You.com free MCP does not accept an API key"
-                )
-        elif secret is None:
-            raise ConfigFailure(ErrorCode.CONFIG_ERROR, "You.com REST requires an API key")
+        self._use_mcp = _use_free_mcp(api_url, secret is not None)
         self.name = name
         self._api_url = _FREE_ENDPOINT if self._use_mcp else api_url
         self._secret = secret

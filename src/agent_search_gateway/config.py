@@ -197,6 +197,9 @@ def _resolve_one_web_provider(
         api_key_env = env_name
         secret = SecretValue(secret_text)
 
+    if registration.validate_config is not None:
+        registration.validate_config(options, secret is not None)
+
     return ResolvedWebProviderConfig(
         name=name,
         enable_search=enable_search,

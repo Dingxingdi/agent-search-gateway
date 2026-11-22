@@ -494,6 +494,14 @@ class HttpJsonExecutor:
                             request_body=(lambda: request.content) if preview_bodies else None,
                             prepared_body=prepared_body if preview_bodies else None,
                             request_body_sent_bytes=len(request.content),
+                            request_body_original_bytes=(
+                                prepared_body.original_bytes if prepared_body is not None else None
+                            ),
+                            request_input_truncated=(
+                                prepared_body.input_truncated
+                                if prepared_body is not None
+                                else False
+                            ),
                             response_body=(lambda: response.content)
                             if preview_bodies and body_complete and response is not None
                             else None,

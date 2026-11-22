@@ -444,6 +444,41 @@ async def test_private_body_preview_omits_nested_payloads(body: bytes, prepared:
     assert f"response_body_bytes={len(body)}" in preview
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+async def test_private_body_preview_retains_input_truncation_metadata(bounded: bool) -> None:
+    logger, log = structured_test_logger("tests.bounded.private.metadata")
+    raw = b'{"text":"PRIVATE_PREPARED"}'
+    original_bytes = len(raw) + 100
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        assert request.content == raw
+        return httpx.Response(200, content=b"{}")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 1), provider_name="test", logger=logger
+        )
+        assert (
+            await executor.request_json(
+                "POST",
+                "https://example.test",
+                stage="search",
+                prepared_body=PreparedInput(raw, original_bytes, True),
+                max_response_bytes=128 if bounded else None,
+                preview_bodies=False,
+            )
+            == {}
+        )
+
+    rendered = log.getvalue()
+    assert "PRIVATE_" not in rendered
+    (preview,) = [line for line in rendered.splitlines() if "event=upstream_body_preview" in line]
+    assert "request_body_preview=null" in preview and "response_body_preview=null" in preview
+    assert f"request_body_original_bytes={original_bytes}" in preview
+    assert f"request_body_sent_bytes={len(raw)}" in preview
+    assert "request_input_truncated=true" in preview
+
+
 @pytest.mark.parametrize("phase", ["send", "stream"])
 async def test_bounded_response_deadline_covers_whole_attempt(phase: str) -> None:
     class HeartbeatStream(RecordingStream):

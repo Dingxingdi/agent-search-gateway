@@ -165,6 +165,7 @@ def build_default_registry() -> ProviderRegistry:
             frozenset({"api_url"}),
             requires_api_key=False,
             supports_optional_api_key=True,
+            validate_config=YouComAdapter.validate_config,
         ),
         WebProviderRegistration(
             "keenable",

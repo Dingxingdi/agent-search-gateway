@@ -516,43 +516,37 @@ async def test_youcom_mcp_runtime_shares_adapter_executor_and_rate_gate(
 
 
 @pytest.mark.parametrize(
-    ("options", "environment", "created_clients", "message"),
+    ("options", "environment", "message"),
     [
-        ({}, {}, 1, "REST requires an API key"),
+        ({}, {}, "REST requires an API key"),
         (
             {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
             {"TEST_WEB": "x"},
-            1,
             "free MCP does not accept an API key",
         ),
         (
             {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
             {},
-            0,
             "environment variable TEST_WEB is required",
         ),
         (
             {"api_url": "https://api.you.com/mcp/free", "api_key_env": "TEST_WEB"},
             {"TEST_WEB": ""},
-            0,
             "environment variable TEST_WEB is required",
         ),
         (
             {"api_url": "https://api.you.com/mcp/free", "api_key_env": ""},
             {},
-            0,
             "requires api_key_env",
         ),
         (
             {"api_url": "https://api.you.com/mcp"},
             {},
-            1,
             "Unsupported You.com MCP endpoint",
         ),
         (
             {"api_url": "https://api.you.com/mcp/free?unsupported=true"},
             {},
-            1,
             "Unsupported You.com MCP endpoint",
         ),
     ],
@@ -571,7 +565,6 @@ async def test_youcom_runtime_rejects_invalid_protocol_credentials_before_http(
     client_factory: _ClientFactory,
     options: dict[str, object],
     environment: dict[str, str],
-    created_clients: int,
     message: str,
 ) -> None:
     requests: list[httpx.Request] = []
@@ -594,7 +587,7 @@ async def test_youcom_runtime_rejects_invalid_protocol_credentials_before_http(
                 http_client_factory=client_factory,
             )
         assert caught.value.code is ErrorCode.CONFIG_ERROR
-        assert len(client_factory.clients) == created_clients
+        assert client_factory.clients == []
         assert requests == []
     finally:
         for client in client_factory.clients:
