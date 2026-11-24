@@ -4,7 +4,7 @@
 
 ## Supported user-facing interfaces
 
-The `1.x` compatibility policy covers these public interfaces.
+The `2.x` compatibility policy covers these public interfaces.
 
 - the `agent-search-gateway` executable and the commands documented in the README and `--help` output;
 - the configuration path and documented TOML fields, including supported provider settings omitted from the selected examples in `config.example.toml`;
@@ -79,9 +79,10 @@ Agent workflow.
 
 All business CLI commands (`keyword-search`, `paper-search`, `llm-search`,
 `agent-search` and `url-fetch`) wait for the daemon response without a default
-deadline. Interruption or disconnection ends the client wait; Ctrl-C does not cancel
-work already running in the daemon, which may continue and write results. An
-unresponsive but connected daemon can leave the client waiting until interrupted.
+deadline. Version 2.0 removed the 600-second default for non-Agent CLI requests.
+Automation that relied on that limit must set a deadline in its caller or job runner.
+Interrupting or disconnecting the CLI ends the client wait. The daemon can continue
+the request and write results.
 `stop` also waits without a default response deadline: if the daemon accepts the
 connection but does not acknowledge shutdown, it waits until the connection closes
 or the operator interrupts it.
@@ -115,7 +116,7 @@ adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 `doctor` makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A healthy response confirms daemon liveness only. A failed probe produces a `[fail]` check and exit code 1. A missing gateway Unix socket is independently reported as `[info] daemon not running`. A report containing only `[ok]` and `[info]` checks exits with code 0.
 
-`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `1.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
+`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `2.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
 DEBUG diagnostics cover Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations.
 HTTP attempts, received responses, scheduled retries, and terminal HTTP failures are
