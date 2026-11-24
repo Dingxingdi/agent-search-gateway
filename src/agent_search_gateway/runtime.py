@@ -242,13 +242,15 @@ class Runtime:
                     f"Invalid enabled web provider: {provider_config.name}",
                 )
             credential_kwargs: dict[str, object] = {}
-            if registration.requires_api_key:
-                private_value = provider_config.secret
-                if private_value is None:
-                    raise ConfigFailure(
-                        ErrorCode.CONFIG_ERROR,
-                        f"Invalid enabled web provider: {provider_config.name}",
-                    )
+            private_value = provider_config.secret
+            if registration.requires_api_key and private_value is None:
+                raise ConfigFailure(
+                    ErrorCode.CONFIG_ERROR,
+                    f"Invalid enabled web provider: {provider_config.name}",
+                )
+            if private_value is not None and (
+                registration.requires_api_key or registration.supports_optional_api_key
+            ):
                 credential_kwargs["secret"] = private_value
             reserved = set(provider_config.options) & _RESERVED_WEB_ADAPTER_KWARGS
             if reserved:

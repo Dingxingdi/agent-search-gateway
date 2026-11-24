@@ -1,0 +1,9 @@
+: heartbeat
+
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"sample","progress":1}}
+
+event: message
+data: {"jsonrpc":"2.0","id":"REQUEST_ID",
+data: "result":{"resultType":"complete","structuredContent":{"results":{"web":[{"url":"https://example.test/1","title":"Example page 1","contents":{"highlights":["Synthetic excerpt 1."]}}]}}}}
+
+: end
