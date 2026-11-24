@@ -17,6 +17,12 @@ The first public release is `v0.1.0`.
 
 - Clarify Zhihu rate limits. Zhihu has no published uniform fixed QPS, so the gateway leaves the request window and minimum interval unset by default.
 
+## [1.1.0] - 2026-11-24
+
+### Added
+
+- Use [You.com's keyless free MCP Search and Extract endpoint](docs/youcom-free-mcp.md) through the existing `youcom` provider by replacing its configuration table and omitting `api_key_env`. The default keyed REST configuration remains available; free MCP failures follow existing provider fallback behavior without switching to paid You.com REST.
+
 ## [1.0.0] - 2026-11-20
 
 ### Added

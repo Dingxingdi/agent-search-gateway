@@ -127,6 +127,35 @@ async def test_doctor_skips_health_for_missing_disabled_or_invalid_config(
     assert report.checks[-1] == DoctorCheck(DoctorStatus.INFO, "daemon not running")
 
 
+@pytest.mark.parametrize(
+    ("api_url", "with_key", "status", "message"),
+    [
+        (None, False, DoctorStatus.FAIL, "You.com REST requires an API key"),
+        (None, True, DoctorStatus.OK, "configuration valid"),
+        ("https://api.you.com/mcp/free", False, DoctorStatus.OK, "configuration valid"),
+        ("https://api.you.com/mcp/free", True, DoctorStatus.FAIL, "free MCP does not accept"),
+    ],
+)
+async def test_doctor_checks_youcom_protocol_credentials(
+    tmp_path: Path, api_url: str | None, with_key: bool, status: DoctorStatus, message: str
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    with paths.config_file.open("a") as target:
+        target.write("[web_providers.youcom]\nenable_search = true\n")
+        if api_url is not None:
+            target.write(f'api_url = "{api_url}"\n')
+        if with_key:
+            target.write('api_key_env = "TEST_WEB"\n')
+
+    report = await run_doctor(
+        paths, environ={environment_name(): "x", "TEST_WEB": "x"}, socket_probe=_missing_socket
+    )
+
+    assert report.checks[0].status is status
+    assert message in report.checks[0].message
+
+
 async def test_doctor_surfaces_real_config_resolution_failure_safely(tmp_path: Path) -> None:
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)

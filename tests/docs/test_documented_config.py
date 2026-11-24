@@ -2,6 +2,7 @@ import argparse
 import json
 import re
 import shlex
+import tomllib
 from pathlib import Path
 
 import httpx
@@ -425,6 +426,87 @@ def test_baiduqianfan_example_can_enable_search_with_its_configured_key() -> Non
     assert enabled.enable_search and not enabled.enable_fetch
     assert enabled.api_key_env == key_env
     assert enabled.secret is not None and enabled.secret.reveal() == environment[key_env]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "README.md",
+        "config.example.toml",
+        "docs/youcom-free-mcp.md",
+        "config.youcom-free.fragment.toml",
+    ],
+)
+@pytest.mark.parametrize("existing_key", [False, True], ids=["no-key", "unused-environment-key"])
+async def test_documented_youcom_mcp_example_builds_without_credentials(
+    tmp_path: Path, source: str, existing_key: bool
+) -> None:
+    source_path = _ROOT / source
+    assert source_path.is_file(), f"Missing free MCP configuration example: {source}"
+    text = source_path.read_text(encoding="utf-8")
+    if source_path.suffix == ".md":
+        blocks = [
+            block
+            for block in re.findall(r"^```toml\n(.*?)^```", text, flags=re.MULTILINE | re.DOTALL)
+            if "[web_providers.youcom]" in block and "https://api.you.com/mcp/free" in block
+        ]
+    elif source_path.name == "config.example.toml":
+        match = re.search(
+            r"^# BEGIN You.com free MCP replacement\n(.*?)^# END You.com free MCP replacement$",
+            text,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        blocks = (
+            ["\n".join(line.removeprefix("# ") for line in match[1].splitlines())]
+            if match is not None
+            else []
+        )
+    else:
+        blocks = [text]
+    assert len(blocks) == 1, f"{source} must contain one free MCP replacement example"
+    replacement = tomllib.loads(blocks[0])
+    assert set(replacement) == {"web_providers"}
+    assert set(replacement["web_providers"]) == {"youcom"}
+    table = replacement["web_providers"]["youcom"]
+    assert table["api_url"] == "https://api.you.com/mcp/free"
+    assert "api_key_env" not in table
+    assert table["enable_search"] is True
+    assert table["enable_fetch"] is True
+
+    data = load_toml(_ROOT / "config.example.toml")
+    data["web_providers"] = replacement["web_providers"]
+    environment = _stub_environment(data)
+    if existing_key:
+        environment["YDC_API_KEY"] = "unused-environment-key"
+    else:
+        environment.pop("YDC_API_KEY", None)
+    resolved = resolve_config(data, build_default_registry(), environment)
+    [configured] = resolved.web.providers
+    assert configured.name == "youcom"
+    assert configured.api_key_env is None
+    assert configured.secret is None
+    assert dict(configured.options) == {"api_url": "https://api.you.com/mcp/free"}
+    assert configured.enable_search and configured.enable_fetch
+    requests: list[httpx.Request] = []
+
+    def deny_http(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        raise AssertionError("Documented configuration assembly must not send HTTP")
+
+    def client_factory() -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(deny_http))
+
+    runtime = Runtime.build(
+        resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
+    )
+    try:
+        [search_provider] = runtime.web_search_providers
+        [fetch_provider] = runtime.web_fetch_providers
+        assert search_provider.name == fetch_provider.name == "youcom"
+        assert id(search_provider) == id(fetch_provider)
+    finally:
+        await runtime.aclose()
+    assert requests == []
 
 
 def test_readme_documents_new_web_provider_configuration_contracts() -> None:

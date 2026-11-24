@@ -470,6 +470,8 @@ def log_upstream_body_preview(
     prepared_body: PreparedInput | None = None,
     response_body: _BodySource = None,
     request_body_sent_bytes: int | None = None,
+    request_body_original_bytes: int | None = None,
+    request_input_truncated: bool = False,
     response_body_bytes: int | None = None,
     response_incomplete: bool = False,
     protocol_attempt: int | None = None,
@@ -480,6 +482,8 @@ def log_upstream_body_preview(
         scrubber = _active_scrubber(logger)
         request_scan_exceeded = False
         if prepared_body is not None:
+            request_body_original_bytes = prepared_body.original_bytes
+            request_input_truncated = prepared_body.input_truncated
             if request_body_sent_bytes is None:
                 request_body_sent_bytes = len(prepared_body.content)
             request_body = prepared_body.content if not prepared_body.input_truncated else None
@@ -514,8 +518,10 @@ def log_upstream_body_preview(
             transport=transport,
             request_body_preview=request,
             request_body_sent_bytes=sent,
-            request_body_original_bytes=prepared_body.original_bytes if prepared_body else sent,
-            request_input_truncated=prepared_body.input_truncated if prepared_body else False,
+            request_body_original_bytes=(
+                request_body_original_bytes if request_body_original_bytes is not None else sent
+            ),
+            request_input_truncated=request_input_truncated,
             request_preview_truncated=request_clipped or request_scan_exceeded,
             response_body_preview=response,
             response_body_bytes=count,
