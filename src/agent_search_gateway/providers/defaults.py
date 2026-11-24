@@ -42,7 +42,9 @@ def build_default_registry() -> ProviderRegistry:
             "firecrawl",
             ProviderCapabilities(search=True, fetch=True),
             FirecrawlAdapter,
-            frozenset({"api_url"}),
+            frozenset(
+                {"api_url", "search_limit", "search_highlights", "scrape_formats", "scrape_parsers"}
+            ),
         ),
         WebProviderRegistration(
             "exa",

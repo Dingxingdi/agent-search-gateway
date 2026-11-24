@@ -8,6 +8,13 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- Firecrawl Search now requests metadata only; explicit Fetch sends configurable formats and parsers, defaulting to Markdown with no parsers. PDF parsing choices can affect supplier charges.
+- arXiv queries combine title/abstract fields with OR and terms with AND, preserve quoted phrases, and support bounded result and sorting options. Unrepresentable literal queries fail only that provider without rewriting the user's meaning.
+- HTTP Web, academic, OA and LLM providers support per-provider `use_proxy`, defaulting to environment proxies; direct mode retains TLS verification and configured CA sources. The Zhihu example uses direct mode.
+- Business CLI commands wait for responses without a default deadline. Explicit internal numeric timeouts, Agent process deadlines and Provider HTTP timeouts remain effective; interrupting the CLI does not cancel background work.
+
 ## [1.2.0] - 2026-11-24
 
 ### Added

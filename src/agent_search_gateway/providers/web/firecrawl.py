@@ -1,7 +1,7 @@
 """Firecrawl v2 search and scrape adapter."""
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 import httpx
 
@@ -34,11 +34,21 @@ def _page_body(
     result: dict[str, object],
     provider: str,
     stage: str,
+    *,
+    pdf_parser_enabled: bool,
 ) -> URLFetchCandidate:
     markdown = optional_string(result.get("markdown"), provider, stage, "markdown")
     raw_html = optional_string(result.get("rawHtml"), provider, stage, "rawHtml")
     raw = raw_html or markdown
-    if not raw.strip():
+    metadata = result.get("metadata")
+    content_type = metadata.get("contentType") if isinstance(metadata, dict) else None
+    # Firecrawl puts the original PDF bytes in markdown and rawHtml as Base64 without its parser.
+    unparsed_pdf = (
+        not pdf_parser_enabled
+        and isinstance(content_type, str)
+        and content_type.partition(";")[0].strip().lower() == "application/pdf"
+    )
+    if unparsed_pdf or not raw.strip():
         raise failure(
             provider,
             stage,
@@ -76,11 +86,19 @@ class FirecrawlAdapter:
         api_url: str,
         secret: SecretValue,
         http_executor: JsonRequester,
+        search_limit: int = 10,
+        search_highlights: bool = True,
+        scrape_formats: Sequence[str] = ("markdown",),
+        scrape_parsers: Sequence[str] = (),
     ) -> None:
         self.name = name
         self._api_url = api_url
         self._secret = secret
         self._http = http_executor
+        self._search_limit = search_limit
+        self._search_highlights = search_highlights
+        self._scrape_formats = tuple(scrape_formats)
+        self._scrape_parsers = tuple(scrape_parsers)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -96,7 +114,8 @@ class FirecrawlAdapter:
             json_body={
                 "query": query,
                 "sources": ["web"],
-                "scrapeOptions": {"formats": ["markdown", "rawHtml"]},
+                "limit": self._search_limit,
+                "highlights": self._search_highlights,
             },
         )
         root = self._successful_root(payload, "search")
@@ -108,12 +127,6 @@ class FirecrawlAdapter:
             try:
                 result = require_object(item, self.name, "search", "result")
                 url = non_empty_string(result.get("url"), self.name, "search", "result.url")
-                markdown = optional_string(
-                    result.get("markdown"), self.name, "search", "result.markdown"
-                )
-                raw_html = optional_string(
-                    result.get("rawHtml"), self.name, "search", "result.rawHtml"
-                )
                 hits.append(
                     KeywordSearchHit(
                         url=url,
@@ -126,8 +139,8 @@ class FirecrawlAdapter:
                             "search",
                             "result.description",
                         ),
-                        raw_content=raw_html or markdown,
-                        content=markdown,
+                        raw_content="",
+                        content="",
                     )
                 )
             except ExecutionFailure:
@@ -153,7 +166,11 @@ class FirecrawlAdapter:
             stage="fetch",
             response_diagnostics=self._fetch_response_diagnostics,
             headers=self._headers,
-            json_body={"url": str(url), "formats": ["markdown", "rawHtml"]},
+            json_body={
+                "url": str(url),
+                "formats": list(self._scrape_formats),
+                "parsers": list(self._scrape_parsers),
+            },
         )
         return self._parse_fetch(payload)
 
@@ -171,7 +188,9 @@ class FirecrawlAdapter:
     def _parse_fetch(self, payload: object) -> URLFetchCandidate:
         root = self._successful_root(payload, "fetch")
         data = require_object(root.get("data"), self.name, "fetch", "data")
-        return _page_body(data, self.name, "fetch")
+        return _page_body(
+            data, self.name, "fetch", pdf_parser_enabled="pdf" in self._scrape_parsers
+        )
 
     def _successful_root(self, payload: object, stage: str) -> dict[str, object]:
         root = require_object(payload, self.name, stage, "response")

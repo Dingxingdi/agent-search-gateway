@@ -24,6 +24,7 @@ from .providers.registry import ProviderRegistry, WebProviderRegistration
 
 _WEB_SHARED_KEYS = frozenset(
     {
+        "use_proxy",
         "enable_search",
         "enable_fetch",
         "api_key_env",
@@ -34,6 +35,7 @@ _WEB_SHARED_KEYS = frozenset(
 )
 _ACADEMIC_SHARED_KEYS = frozenset(
     {
+        "use_proxy",
         "enabled",
         "max_concurrency",
         "api_key_env",
@@ -101,6 +103,7 @@ class ResolvedWebProviderConfig:
     secret: SecretValue | None
     options: Mapping[str, object]
     rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,14 +135,66 @@ def _optional_bool(table: Mapping[str, object], key: str) -> bool:
     return value
 
 
+def _resolve_use_proxy(table: Mapping[str, object], label: str) -> bool:
+    value = table.get("use_proxy", True)
+    if type(value) is not bool:
+        raise _config_error(f"{label}.use_proxy must be a boolean")
+    return value
+
+
+def _validate_choice_list(
+    value: object,
+    label: str,
+    choices: frozenset[str],
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        raise _config_error(f"{label} must be an array of strings")
+    if not value and not allow_empty:
+        raise _config_error(f"{label} must be a non-empty array")
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, str) or item not in choices:
+            allowed = ", ".join(sorted(choices))
+            raise _config_error(f"{label}[{index}] must be one of: {allowed}")
+        if item in seen:
+            raise _config_error(f"{label} must not contain duplicate values")
+        seen.add(item)
+    return tuple(value)
+
+
+def _validate_firecrawl_options(options: dict[str, object]) -> None:
+    label = "web_providers.firecrawl"
+    if "search_limit" in options:
+        limit = _positive_int(options["search_limit"], f"{label}.search_limit")
+        if limit > 100:
+            raise _config_error(f"{label}.search_limit must be at most 100")
+    if "search_highlights" in options and not isinstance(options["search_highlights"], bool):
+        raise _config_error(f"{label}.search_highlights must be a boolean")
+    if "scrape_formats" in options:
+        options["scrape_formats"] = _validate_choice_list(
+            options["scrape_formats"], f"{label}.scrape_formats", frozenset({"markdown", "rawHtml"})
+        )
+    if "scrape_parsers" in options:
+        options["scrape_parsers"] = _validate_choice_list(
+            options["scrape_parsers"],
+            f"{label}.scrape_parsers",
+            frozenset({"pdf", "image"}),
+            allow_empty=True,
+        )
+
+
 def _validate_options(
     registration: WebProviderRegistration,
-    options: Mapping[str, object],
+    options: dict[str, object],
 ) -> None:
     unknown = set(options) - registration.allowed_config_keys
     if unknown:
         names = ", ".join(sorted(unknown))
         raise _config_error(f"unknown config key(s) for {registration.name}: {names}")
+    if registration.name == "firecrawl":
+        _validate_firecrawl_options(options)
 
 
 def _resolve_one_web_provider(
@@ -149,6 +204,7 @@ def _resolve_one_web_provider(
     registry: ProviderRegistry,
     environ: Mapping[str, str],
 ) -> ResolvedWebProviderConfig:
+    use_proxy = _resolve_use_proxy(table, f"web_providers.{name}")
     enable_search = _optional_bool(table, "enable_search")
     enable_fetch = _optional_bool(table, "enable_fetch")
     options = {key: value for key, value in table.items() if key not in _WEB_SHARED_KEYS}
@@ -174,6 +230,7 @@ def _resolve_one_web_provider(
             secret=None,
             options=MappingProxyType(dict(options)),
             rate_policy=rate_policy,
+            use_proxy=use_proxy,
         )
 
     if registration is None:
@@ -209,6 +266,7 @@ def _resolve_one_web_provider(
         secret=secret,
         options=MappingProxyType(dict(options)),
         rate_policy=rate_policy,
+        use_proxy=use_proxy,
     )
 
 
@@ -251,6 +309,7 @@ class ResolvedAcademicProviderConfig:
     contact_email: SecretValue | None
     options: Mapping[str, object]
     rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +327,7 @@ class ResolvedOAResolverConfig:
     contact_email: SecretValue | None
     options: Mapping[str, object]
     rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    use_proxy: bool = True
 
 
 def _enabled(table: Mapping[str, object], label: str) -> bool:
@@ -291,7 +351,7 @@ def _validate_http_url(value: object, label: str) -> None:
 def _validate_academic_options(
     name: str,
     registration: AcademicProviderRegistration | OAResolverRegistration,
-    options: Mapping[str, object],
+    options: dict[str, object],
 ) -> None:
     reserved = set(options) & _ACADEMIC_RESERVED_OPTIONS
     if reserved:
@@ -303,6 +363,25 @@ def _validate_academic_options(
         raise _config_error(f"unknown config key(s) for {name}: {names}")
     if "api_url" in options:
         _validate_http_url(options["api_url"], f"{name}.api_url")
+    if isinstance(registration, AcademicProviderRegistration) and name == "arxiv":
+        label = "academic_providers.arxiv"
+        if "query_fields" in options:
+            options["query_fields"] = _validate_choice_list(
+                options["query_fields"], f"{label}.query_fields", frozenset({"ti", "abs"})
+            )
+        if "max_results" in options:
+            limit = _positive_int(options["max_results"], f"{label}.max_results")
+            if limit > 100:
+                raise _config_error(f"{label}.max_results must be at most 100")
+        for key, choices in (
+            ("sort_by", ("relevance", "submittedDate", "lastUpdatedDate")),
+            ("sort_order", ("ascending", "descending")),
+        ):
+            if key in options:
+                value = options[key]
+                if not isinstance(value, str) or value not in choices:
+                    allowed = ", ".join(choices)
+                    raise _config_error(f"{label}.{key} must be one of: {allowed}")
 
 
 def _resolve_environment_value(
@@ -349,6 +428,7 @@ def resolve_academic_provider_config(
         if registration is None:
             raise _config_error(f"unknown academic provider: {name}")
         enabled = _enabled(table, f"academic_providers.{name}")
+        use_proxy = _resolve_use_proxy(table, f"academic_providers.{name}")
         options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
         _validate_academic_options(name, registration, options)
         limit = _positive_int(
@@ -380,6 +460,7 @@ def resolve_academic_provider_config(
                     None,
                     MappingProxyType(dict(options)),
                     rate_policy,
+                    use_proxy=use_proxy,
                 )
             )
             continue
@@ -408,6 +489,7 @@ def resolve_academic_provider_config(
                 contact_value,
                 MappingProxyType(dict(options)),
                 rate_policy,
+                use_proxy=use_proxy,
             )
         )
     return ResolvedAcademicProviderGroup(default_limit, tuple(providers))
@@ -426,6 +508,7 @@ def resolve_oa_resolver_config(
         if registration is None:
             raise _config_error(f"unknown OA resolver: {name}")
         enabled = _enabled(table, f"oa_resolvers.{name}")
+        use_proxy = _resolve_use_proxy(table, f"oa_resolvers.{name}")
         options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
         _validate_academic_options(name, registration, options)
         rate_policy = _resolve_rate_policy(table, f"oa_resolvers.{name}")
@@ -455,6 +538,7 @@ def resolve_oa_resolver_config(
             contact_value,
             MappingProxyType(dict(options)),
             rate_policy,
+            use_proxy=use_proxy,
         )
     return resolved
 
@@ -468,6 +552,7 @@ class LLMProviderConfig:
     api_key_env: str
     secret: SecretValue
     max_concurrency: int
+    use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -611,6 +696,7 @@ def _resolve_referenced_llm_providers(
         if name == "default_max_concurrency" or name not in referenced:
             continue
         table = _require_mapping(raw_value, f"llm_providers.{name}")
+        use_proxy = _resolve_use_proxy(table, f"llm_providers.{name}")
         protocol = _required_string(table, "protocol", f"llm_providers.{name}")
         endpoint = _required_string(table, "api_endpoint", f"llm_providers.{name}")
         if protocol != "openai" or endpoint != "chat_completions":
@@ -633,6 +719,7 @@ def _resolve_referenced_llm_providers(
                 api_key_env=api_key_env,
                 secret=SecretValue(secret_text),
                 max_concurrency=max_concurrency,
+                use_proxy=use_proxy,
             )
         )
 

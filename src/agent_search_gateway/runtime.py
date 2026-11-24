@@ -2,6 +2,7 @@
 
 import logging
 import os
+import ssl
 from collections.abc import Callable, Mapping
 from functools import partial
 from typing import cast
@@ -48,10 +49,60 @@ from .result_writer import ResultWriter
 from .scheduler.fetch import FetchScheduler
 from .url_store import URLStore
 
-HttpClientFactory = Callable[[], httpx.AsyncClient]
+HttpClientFactory = Callable[..., httpx.AsyncClient]
 _DEFAULT_INPUT_LIMITS = ResolvedInputLimits()
 _RESERVED_WEB_ADAPTER_KWARGS = frozenset({"name", "http_executor", "secret"})
 _RESERVED_ACADEMIC_ADAPTER_KWARGS = frozenset({"name", "executor", "api_key", "contact_email"})
+
+
+def _prepare_direct_ssl_context() -> ssl.SSLContext:
+    ca_file = os.environ.get("SSL_CERT_FILE")
+    ca_dir = os.environ.get("SSL_CERT_DIR")
+    httpx_027 = httpx.__version__.startswith("0.27.")
+    try:
+        # HTTPX 0.27 silently skips nonregular CA files. Newer versions let
+        # OpenSSL read the source, including a bundle supplied through a pipe.
+        if ca_file and httpx_027 and not os.path.isfile(ca_file):
+            raise ValueError
+        if not ca_file and ca_dir:
+            # OpenSSL resolves capath entries lazily.
+            directories = [path for path in ca_dir.split(os.pathsep) if path]
+            if not all(os.path.isdir(path) for path in directories):
+                raise ValueError
+            if os.pathsep in ca_dir and httpx_027:
+                # HTTPX 0.27 falls back to certifi for a list. Seed its normal
+                # TLS policy with one requested directory, then add the others.
+                if not directories:
+                    # An all-empty list has no trusted roots.
+                    return ssl.create_default_context(capath=ca_dir)
+                context = httpx.create_ssl_context(verify=directories[0], trust_env=True)
+                for directory in directories[1:]:
+                    context.load_verify_locations(capath=directory)
+                return context
+        return httpx.create_ssl_context(verify=True, trust_env=True)
+    except (OSError, ValueError):
+        raise ConfigFailure(
+            ErrorCode.CONFIG_ERROR, "Invalid TLS CA configuration for direct HTTP providers"
+        ) from None
+
+
+def _create_http_client(
+    factory: HttpClientFactory,
+    *,
+    use_proxy: bool,
+    direct_ssl_context: ssl.SSLContext | None,
+    label: str,
+) -> httpx.AsyncClient:
+    if use_proxy:
+        return factory()
+    if direct_ssl_context is None:
+        raise ConfigFailure(ErrorCode.CONFIG_ERROR, f"Missing direct TLS context for {label}")
+    try:
+        return factory(trust_env=False, verify=direct_ssl_context)
+    except TypeError:
+        raise ConfigFailure(
+            ErrorCode.CONFIG_ERROR, f"HTTP client factory failed for direct connection to {label}"
+        ) from None
 
 
 class Runtime:
@@ -105,6 +156,13 @@ class Runtime:
             item for item in config.web.providers if item.enable_search or item.enable_fetch
         )
         enabled_academic = tuple(item for item in config.academic.providers if item.enabled)
+        needs_direct = (
+            any(not item.use_proxy for item in enabled_web)
+            or any(not item.use_proxy for item in enabled_academic)
+            or (config.oa_resolver is not None and not config.oa_resolver.use_proxy)
+            or any(not item.use_proxy for item in config.llm.providers)
+        )
+        direct_ssl_context = _prepare_direct_ssl_context() if needs_direct else None
         quotas = ProviderQuotaManager(
             web_limits={item.name: item.max_concurrency for item in enabled_web},
             llm_limits={item.name: item.max_concurrency for item in config.llm.providers},
@@ -118,6 +176,7 @@ class Runtime:
             config,
             quotas,
             http_client_factory,
+            direct_ssl_context,
         )
         academic_search, academic_executors = cls._build_academic_providers(
             enabled_academic,
@@ -125,6 +184,7 @@ class Runtime:
             config,
             quotas,
             http_client_factory,
+            direct_ssl_context,
         )
         oa_resolver, resolver_executors = cls._build_oa_resolver(
             config.oa_resolver,
@@ -132,8 +192,11 @@ class Runtime:
             config,
             quotas,
             http_client_factory,
+            direct_ssl_context,
         )
-        llm_clients = cls._build_llm_clients(config, quotas, http_client_factory)
+        llm_clients = cls._build_llm_clients(
+            config, quotas, http_client_factory, direct_ssl_context
+        )
         stages = LLMStages(
             llm_clients,
             judge=config.llm.judge,
@@ -198,6 +261,23 @@ class Runtime:
             logging.getLogger(__name__),
             logging.DEBUG,
             "runtime_built",
+            web_use_proxy=",".join(
+                f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_web
+            )
+            or "-",
+            academic_use_proxy=",".join(
+                f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_academic
+            )
+            or "-",
+            oa_use_proxy=(
+                f"{config.oa_resolver.name}:{str(config.oa_resolver.use_proxy).lower()}"
+                if config.oa_resolver is not None
+                else "-"
+            ),
+            llm_use_proxy=",".join(
+                f"{item.name}:{str(item.use_proxy).lower()}" for item in config.llm.providers
+            )
+            or "-",
             web_providers=",".join(item.name for item in enabled_web) or "-",
             web_provider_count=len(enabled_web),
             llm_providers=",".join(item.name for item in config.llm.providers) or "-",
@@ -226,6 +306,7 @@ class Runtime:
         config: ResolvedConfig,
         quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
+        direct_ssl_context: ssl.SSLContext | None,
     ) -> tuple[
         tuple[KeywordSearchProvider, ...],
         tuple[URLFetchProvider, ...],
@@ -262,7 +343,12 @@ class Runtime:
             gate = RateGate(provider_config.rate_policy)
             quotas.register_rate("web", provider_config.name, gate)
             executor = HttpJsonExecutor(
-                http_client_factory(),
+                _create_http_client(
+                    http_client_factory,
+                    use_proxy=provider_config.use_proxy,
+                    direct_ssl_context=direct_ssl_context,
+                    label=f"web provider {provider_config.name}",
+                ),
                 config.retry,
                 provider_name=provider_config.name,
                 rate_gate=gate,
@@ -295,6 +381,7 @@ class Runtime:
         config: ResolvedConfig,
         quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
+        direct_ssl_context: ssl.SSLContext | None,
     ) -> tuple[tuple[AcademicSearchProvider, ...], tuple[HttpJsonExecutor, ...]]:
         search: list[AcademicSearchProvider] = []
         executors: list[HttpJsonExecutor] = []
@@ -315,7 +402,12 @@ class Runtime:
             gate = RateGate(provider_config.rate_policy)
             quotas.register_rate("academic", provider_config.name, gate)
             executor = HttpJsonExecutor(
-                http_client_factory(),
+                _create_http_client(
+                    http_client_factory,
+                    use_proxy=provider_config.use_proxy,
+                    direct_ssl_context=direct_ssl_context,
+                    label=f"academic provider {provider_config.name}",
+                ),
                 config.retry,
                 provider_name=provider_config.name,
                 rate_gate=gate,
@@ -345,6 +437,7 @@ class Runtime:
         config: ResolvedConfig,
         quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
+        direct_ssl_context: ssl.SSLContext | None,
     ) -> tuple[OAResolver | None, tuple[HttpJsonExecutor, ...]]:
         if resolver_config is None:
             return None, ()
@@ -364,7 +457,12 @@ class Runtime:
         gate = RateGate(resolver_config.rate_policy)
         quotas.register_rate("oa", resolver_config.name, gate)
         executor = HttpJsonExecutor(
-            http_client_factory(),
+            _create_http_client(
+                http_client_factory,
+                use_proxy=resolver_config.use_proxy,
+                direct_ssl_context=direct_ssl_context,
+                label=f"OA resolver {resolver_config.name}",
+            ),
             config.retry,
             provider_name=resolver_config.name,
             rate_gate=gate,
@@ -413,12 +511,18 @@ class Runtime:
         config: ResolvedConfig,
         quotas: ProviderQuotaManager,
         http_client_factory: HttpClientFactory,
+        direct_ssl_context: ssl.SSLContext | None,
     ) -> dict[str, LLMClient]:
         clients: dict[str, LLMClient] = {}
         for provider_config in config.llm.providers:
             private_value = provider_config.secret
             executor = HttpJsonExecutor(
-                http_client_factory(),
+                _create_http_client(
+                    http_client_factory,
+                    use_proxy=provider_config.use_proxy,
+                    direct_ssl_context=direct_ssl_context,
+                    label=f"LLM provider {provider_config.name}",
+                ),
                 config.retry,
                 provider_name=provider_config.name,
             )

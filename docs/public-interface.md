@@ -19,6 +19,14 @@ Changes to those interfaces require tests, documentation, and a changelog entry.
 
 The request-scoped `--provider` flag on `keyword-search`, `paper-search`, and `llm-search`, and the independent `--model` flag on `llm-search`, are supported CLI interfaces. Selection is exact and case-sensitive within the enabled search-provider or configured search-invocation namespace; LLM providers are configuration aliases, not protocol names. Both LLM filters select their intersection. Omitted filters preserve default behavior, and invalid selections fail without falling back to unselected backends. Filters do not apply to `url-fetch` or change normal post-search processing.
 
+### HTTP provider configuration
+
+Web, academic, OA resolver and LLM provider tables accept `use_proxy` as a strict boolean, defaulting to `true`. The default preserves HTTPX environment proxies and `NO_PROXY`. Setting it to `false` connects that provider directly while preserving TLS certificate and hostname verification and CA environment settings: `SSL_CERT_FILE` takes precedence over `SSL_CERT_DIR`. This field applies only to HTTP providers and does not affect external Agent subprocess networking or its `pass_env` rules. Edit the existing configuration and restart the daemon normally to apply changes; upgrades do not rewrite user configuration.
+
+Firecrawl Search returns metadata without requesting page scraping; page bodies require explicit Fetch. Its documented options are `search_limit` (integer 1–100, default 10), `search_highlights` (boolean, default true), `scrape_formats` (nonempty unique list of `markdown`/`rawHtml`, default `["markdown"]`) and `scrape_parsers` (unique list of `pdf`/`image`, default `[]`). Parser choices affect supplier costs; base64-only PDF responses are not usable text and can use existing Fetch fallback. See the [README](../README.md#firecrawl-search-and-explicit-fetch) for current supplier rules and billing caveats.
+
+arXiv supports `query_fields` (nonempty ordered unique list of `ti`/`abs`, default `["ti", "abs"]`), `max_results` (integer 1–100, default 10), `sort_by` (`relevance`/`submittedDate`/`lastUpdatedDate`, default `relevance`) and `sort_order` (`ascending`/`descending`, default `descending`). Ordinary terms are AND-connected, fields within each term are OR-connected, and quoted phrases stay grouped. There is one logical query with existing retries, without LLM rewriting or a second retrieval pass. Literal inputs that cannot preserve their meaning in upstream syntax fail the arXiv provider with `PROTOCOL_ERROR` before HTTP; successful sibling providers remain usable. Long natural-language AND queries may reduce recall.
+
 ### Provider rate policies, credentials and input limits
 
 Web, academic and OA provider tables accept `rate_limits`, an array of windows with a positive integer `requests` count and a positive `period_seconds` duration. `min_interval_seconds` independently sets minimum spacing between starts. Each physical request, including retries, counts against all windows for its provider in that daemon. Web Search and Fetch share them. `max_concurrency` governs in-flight work separately. Omission leaves the local rate policy empty. Existing configurations are not automatically rewritten. See the [provider rate reference](provider-rate-limits.md) for all 31 services, including unpublished or account-dependent values. Source coverage does not imply live verification.
@@ -69,14 +77,19 @@ waiting, separate scope calls, and paper OA enrichment can make total workflow t
 longer than one process budget; there is no fixed Gateway deadline for the whole
 Agent workflow.
 
-The Agent socket response wait has no fixed default deadline. Cancellation and
-disconnection still end the wait and trigger active process cleanup as applicable;
-an unresponsive but connected daemon can leave the client waiting until interrupted.
-Internal callers' explicit numeric socket timeouts remain honored. Non-Agent socket
-response waits retain their 600-second default. External agy duration parsing may
-reject extreme values; accepting a configuration does not guarantee that agy supports
-every representable duration. Process-group cleanup retains its OS-blocked-spawn and
-escaped-descendant limitations.
+All business CLI commands (`keyword-search`, `paper-search`, `llm-search`,
+`agent-search` and `url-fetch`) wait for the daemon response without a default
+deadline. Interruption or disconnection ends the client wait; Ctrl-C does not cancel
+work already running in the daemon, which may continue and write results. An
+unresponsive but connected daemon can leave the client waiting until interrupted.
+`stop` also waits without a default response deadline: if the daemon accepts the
+connection but does not acknowledge shutdown, it waits until the connection closes
+or the operator interrupts it.
+Internal callers' explicit numeric socket timeouts remain honored. Agent process
+deadlines and Provider HTTP timeouts remain in effect. External agy duration parsing
+may reject extreme values; accepting a configuration does not guarantee that agy
+supports every representable duration. Process-group cleanup retains its
+OS-blocked-spawn and escaped-descendant limitations.
 
 The gateway does not promise tool execution or source access based solely on terminal
 success. These additions do not turn Python imports or the socket protocol into a

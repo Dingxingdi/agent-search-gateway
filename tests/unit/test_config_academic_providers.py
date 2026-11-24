@@ -54,6 +54,18 @@ def _resolver_registry() -> OAResolverRegistry:
     return registry
 
 
+def test_arxiv_oa_resolver_uses_its_own_registered_options() -> None:
+    registry = OAResolverRegistry()
+    registry.register(OAResolverRegistration("arxiv", _factory, frozenset({"max_results"})))
+    resolver = resolve_oa_resolver_config(
+        {"oa_resolvers": {"arxiv": {"enabled": True, "max_results": 200}}},
+        registry,
+        {},
+    )
+    assert resolver is not None
+    assert resolver.options == {"max_results": 200}
+
+
 def test_enabled_openalex_requires_api_key_environment_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -452,3 +464,229 @@ def test_academic_and_oa_old_constructors_default_to_empty_rate_policy() -> None
     for provider in (academic, resolver):
         assert provider.rate_policy.windows == ()
         assert provider.rate_policy.min_interval_seconds is None
+        assert provider.use_proxy is True
+
+
+def test_academic_and_oa_use_proxy_preserves_positional_rate_policy_and_frozen_config() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from agent_search_gateway.config import ResolvedRatePolicy
+
+    policy = ResolvedRatePolicy(min_interval_seconds=0.5)
+    academic = ResolvedAcademicProviderConfig("name", True, 3, None, None, None, None, {}, policy)
+    resolver = ResolvedOAResolverConfig("name", None, None, None, None, {}, policy)
+    for provider in (academic, resolver):
+        assert provider.rate_policy is policy
+        assert provider.use_proxy is True
+        with pytest.raises(FrozenInstanceError):
+            provider.use_proxy = False  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("kind", ["academic", "oa"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("proxy_fields", "expected"),
+    [({}, True), ({"use_proxy": True}, True), ({"use_proxy": False}, False)],
+)
+def test_academic_and_oa_provider_use_proxy_defaults_and_boolean_values(
+    kind: str, enabled: bool, proxy_fields: dict[str, object], expected: bool
+) -> None:
+    table: dict[str, object] = {
+        "enabled": enabled,
+        "api_url": "https://provider.example.test",
+        **proxy_fields,
+    }
+    environment = {}
+    if enabled:
+        table["contact_email_env"] = "TEST_CONTACT"
+        environment["TEST_CONTACT"] = "test@example.test"
+        if kind == "academic":
+            table["api_key_env"] = "TEST_KEY"
+            environment["TEST_KEY"] = "fixture-value"
+    if kind == "academic":
+        [provider] = resolve_academic_provider_config(
+            {"academic_providers": {"required": table}}, _academic_registry(), environment
+        ).providers
+        assert provider.use_proxy is expected
+        assert dict(provider.options) == {"api_url": "https://provider.example.test"}
+        if not enabled:
+            assert provider.api_key is None
+            assert provider.contact_email is None
+    else:
+        resolver = resolve_oa_resolver_config(
+            {"oa_resolvers": {"unpaywall": table}}, _resolver_registry(), environment
+        )
+        if enabled:
+            assert resolver is not None
+            assert resolver.use_proxy is expected
+            assert dict(resolver.options) == {"api_url": "https://provider.example.test"}
+        else:
+            assert resolver is None
+
+
+@pytest.mark.parametrize("kind", ["academic", "oa"])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("value", ["false", "do-not-echo-proxy", 0, 1, None, [], {}, ()])
+def test_academic_and_oa_provider_use_proxy_is_strict_boolean(
+    kind: str, enabled: bool, value: object
+) -> None:
+    table = {"enabled": enabled, "use_proxy": value}
+    with pytest.raises(ConfigFailure) as caught:
+        if kind == "academic":
+            resolve_academic_provider_config(
+                {"academic_providers": {"required": table}}, _academic_registry(), {}
+            )
+        else:
+            resolve_oa_resolver_config(
+                {"oa_resolvers": {"unpaywall": table}}, _resolver_registry(), {}
+            )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    prefix = "academic_providers.required" if kind == "academic" else "oa_resolvers.unpaywall"
+    assert f"{prefix}.use_proxy" in str(caught.value)
+    assert "do-not-echo-proxy" not in str(caught.value)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("query_fields", ["ti"]),
+        ("query_fields", ["abs"]),
+        ("query_fields", ["abs", "ti"]),
+        ("max_results", 1),
+        ("max_results", 10),
+        ("max_results", 100),
+        ("sort_by", "relevance"),
+        ("sort_by", "submittedDate"),
+        ("sort_by", "lastUpdatedDate"),
+        ("sort_order", "ascending"),
+        ("sort_order", "descending"),
+    ],
+)
+def test_config_accepts_arxiv_search_options(enabled: bool, option: str, value: object) -> None:
+    from agent_search_gateway.providers.academic.defaults import build_default_academic_registry
+
+    [provider] = resolve_academic_provider_config(
+        {"academic_providers": {"arxiv": {"enabled": enabled, option: value}}},
+        build_default_academic_registry(),
+        {},
+    ).providers
+    assert provider.enabled is enabled
+    expected = tuple(value) if isinstance(value, list) else value
+    assert dict(provider.options) == {option: expected}
+
+
+def test_config_omitted_arxiv_search_options_remain_empty() -> None:
+    from agent_search_gateway.providers.academic.defaults import build_default_academic_registry
+
+    [provider] = resolve_academic_provider_config(
+        {"academic_providers": {"arxiv": {"enabled": True}}},
+        build_default_academic_registry(),
+        {},
+    ).providers
+    assert dict(provider.options) == {}
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("query_fields", []),
+        ("query_fields", ["ti", "ti"]),
+        ("query_fields", ["abs", "ti", "abs"]),
+        ("query_fields", ["au"]),
+        ("query_fields", ["cat"]),
+        ("query_fields", "ti"),
+        ("query_fields", ["PRIVATE_INVALID_OPTION"]),
+        ("query_fields", [1]),
+        ("query_fields", [True]),
+        ("query_fields", [None]),
+        ("query_fields", [["ti"]]),
+        ("query_fields", [{}]),
+        ("query_fields", None),
+        ("query_fields", ("ti",)),
+        ("max_results", 0),
+        ("max_results", -1),
+        ("max_results", 101),
+        ("max_results", True),
+        ("max_results", False),
+        ("max_results", 1.0),
+        ("max_results", "10"),
+        ("max_results", None),
+        ("max_results", []),
+        ("max_results", {}),
+        ("sort_by", "PRIVATE_INVALID_OPTION"),
+        ("sort_by", ""),
+        ("sort_by", True),
+        ("sort_by", 1),
+        ("sort_by", 1.0),
+        ("sort_by", None),
+        ("sort_by", []),
+        ("sort_by", {}),
+        ("sort_order", "PRIVATE_INVALID_OPTION"),
+        ("sort_order", ""),
+        ("sort_order", True),
+        ("sort_order", 1),
+        ("sort_order", 1.0),
+        ("sort_order", None),
+        ("sort_order", []),
+        ("sort_order", {}),
+        ("sort_by", "Relevance"),
+        ("sort_by", "submitteddate"),
+        ("sort_by", "lastupdateddate"),
+        ("sort_order", "Ascending"),
+        ("sort_order", "Descending"),
+    ],
+)
+def test_config_rejects_invalid_arxiv_search_options(
+    enabled: bool, option: str, value: object
+) -> None:
+    from agent_search_gateway.providers.academic.defaults import build_default_academic_registry
+
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_academic_provider_config(
+            {"academic_providers": {"arxiv": {"enabled": enabled, option: value}}},
+            build_default_academic_registry(),
+            {},
+        )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"academic_providers.arxiv.{option}" in str(caught.value)
+    assert "PRIVATE_INVALID_OPTION" not in str(caught.value)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "name", ["semantic_scholar", "openalex", "dblp", "crossref", "core", "unpaywall"]
+)
+@pytest.mark.parametrize(
+    ("option", "value"),
+    [
+        ("query_fields", ["ti"]),
+        ("max_results", 10),
+        ("sort_by", "relevance"),
+        ("sort_order", "descending"),
+    ],
+)
+def test_arxiv_options_are_not_shared_with_other_providers(
+    enabled: bool, name: str, option: str, value: object
+) -> None:
+    from agent_search_gateway.providers.academic.defaults import (
+        build_default_academic_registry,
+        build_default_oa_resolver_registry,
+    )
+
+    with pytest.raises(ConfigFailure, match="unknown config key") as caught:
+        if name == "unpaywall":
+            resolve_oa_resolver_config(
+                {"oa_resolvers": {name: {"enabled": enabled, option: value}}},
+                build_default_oa_resolver_registry(),
+                {},
+            )
+        else:
+            resolve_academic_provider_config(
+                {"academic_providers": {name: {"enabled": enabled, option: value}}},
+                build_default_academic_registry(),
+                {},
+            )
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert option in str(caught.value)
