@@ -79,7 +79,8 @@ class _Evidence(logging.Handler):
             if type(received) is int and type(accepted) is int and 0 <= accepted <= received:
                 branch = self.branches[fields["stage"]]
                 branch.received, branch.hits = received, accepted
-                branch.category = "verified"
+                if received == 0 or accepted > 0:
+                    branch.category = "verified"
 
 
 @contextmanager

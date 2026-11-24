@@ -80,6 +80,31 @@ async def test_baidu_smoke_accepts_verified_empty_results(
     ]
 
 
+@pytest.mark.parametrize("stage", ["web_search", "agentic_search"])
+@pytest.mark.parametrize("include_valid", [False, True], ids=["all-rejected", "mixed"])
+async def test_baidu_smoke_checks_nonempty_branch_candidates(
+    stage: str, include_valid: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    items = [{"renamed_url": "https://example.test/malformed"}]
+    if include_valid:
+        items.append({"url": "https://example.test/valid"})
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requested = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, json=_valid(requested, items if requested == stage else []))
+
+    if include_valid:
+        await _run(_ENV, _client(respond))
+    else:
+        with pytest.raises(pytest.fail.Exception, match="both Baidu search branches"):
+            await _run(_ENV, _client(respond))
+
+    reports = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    report = next(row for row in reports if row["stage"] == stage)
+    assert report["category"] == ("verified" if include_valid else "provider_or_schema")
+    assert (report["received"], report["hits"]) == (len(items), int(include_valid))
+
+
 @pytest.mark.parametrize("both_fail", [False, True])
 async def test_baidu_smoke_reports_only_safe_metrics(
     both_fail: bool, capsys: pytest.CaptureFixture[str]
