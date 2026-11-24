@@ -8,6 +8,8 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-24
+
 ### Added
 
 - Add the opt-in `baiduqianfan` keyword search provider. It queries Baidu Qianfan Web Search and Agentic Search concurrently and returns results from a successful branch when the other fails.
