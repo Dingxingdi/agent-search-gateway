@@ -156,7 +156,20 @@ api_url = "https://open.feedcoopapi.com/search_api"
 api_key_env = "DOUBAO_API_KEY"
 
 [web_providers.youcom]
-# Self-serve Search and Contents.
+# Self-serve REST Search and Contents; this 10 QPS example applies to REST.
+# To use free MCP instead, REPLACE this entire table with the commented block below.
+# Delete api_key_env when switching; an existing YDC_API_KEY environment value is ignored.
+# Do not append a second [web_providers.youcom] table.
+# BEGIN You.com free MCP replacement
+# [web_providers.youcom]
+# enable_search = true
+# enable_fetch = true
+# api_url = "https://api.you.com/mcp/free"
+# END You.com free MCP replacement
+# Public free quota as of 2026-11-21: 100 queries/day; the provider may change it.
+# Source: https://you.com/docs/agents/mcp-server
+# Local rate_limits do not track the upstream balance or a daily quota across processes.
+# Choose any local MCP rate policy for your needs; the REST example below is not its limit.
 rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = false
 enable_fetch = false
@@ -182,6 +195,15 @@ engines = [
   "exa", "keenable", "csdn", "juejin", "hackernews",
 ]
 
+[web_providers.baiduqianfan]
+# Every logical search calls both Web Search and Agentic Search. Retries add physical attempts.
+# This conservative shared window does not enforce free billing quotas.
+rate_limits = [{ requests = 3, period_seconds = 1 }]
+enable_search = false
+enable_fetch = false
+api_url = "https://qianfan.baidubce.com"
+api_key_env = "BAIDUQIANFAN_API_KEY"
+
 [web_providers.yuanbao]
 # Unknown provisioned edition: Flagship allows 5 QPS, Fast and Standard allow 20.
 rate_limits = [{ requests = 5, period_seconds = 1 }]
@@ -192,6 +214,8 @@ api_key_env = "YUANBAO_API_KEY"
 
 [web_providers.zhihu]
 use_proxy = false
+# Zhihu publishes no common fixed QPS. Its account quotas do not establish a request rate.
+# This provider inherits default_max_concurrency and the existing HTTP 429 retry policy.
 enable_search = true
 enable_fetch = false
 api_url = "https://developer.zhihu.com"

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from agent_search_gateway.providers.http import (
     RequestHeaders,
+    ResponseDecoder,
     ResponseDiagnosticExtractor,
     ResponseInspector,
 )
@@ -37,6 +38,10 @@ class RecordingJsonExecutor:
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
+        response_decoder: ResponseDecoder | None = None,
+        max_response_bytes: int | None = None,
+        preview_bodies: bool = True,
+        inherit_client_defaults: bool = True,
     ) -> object:
         request_headers = headers() if callable(headers) else headers
         self.requests.append(
@@ -121,6 +126,10 @@ class RecordingHttpExecutor:
         json_body: object | None = None,
         response_inspector: ResponseInspector | None = None,
         response_diagnostics: ResponseDiagnosticExtractor | None = None,
+        response_decoder: ResponseDecoder | None = None,
+        max_response_bytes: int | None = None,
+        preview_bodies: bool = True,
+        inherit_client_defaults: bool = True,
     ) -> object:
         request_headers = headers() if callable(headers) else headers
         self.requests.append(

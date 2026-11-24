@@ -5,7 +5,7 @@
 
 `agent-search-gateway` is a local foreground daemon plus a thin CLI for aggregated keyword search, LLM and Agent search, academic discovery, and fetching URLs admitted by search.
 
-The gateway keeps URL admission and body state in daemon memory. Restarting the daemon clears that state. The daemon communicates over a local Unix-domain socket, so this version targets Unix-like environments. It does not provide persistent URL state, remote daemon access, automatic repairs, or live provider checks in `doctor`.
+The gateway keeps URL admission and body state in daemon memory. Restarting the daemon clears that state. The daemon communicates over a local Unix-domain socket, so this version targets Unix-like environments. Persistent URL state, remote daemon access, and automatic repairs are unsupported. `doctor` checks the local installation and, when enabled, the configured open-webSearch daemon.
 
 ## Installation
 
@@ -34,7 +34,9 @@ For detailed daemon tracing, start it in DEBUG mode instead:
 agent-search-gateway start --debug
 ```
 
-`doctor` is local and makes no network requests. It validates configuration/environment resolution, local filesystem usability, and daemon socket state. A missing socket is reported as `[info] daemon not running`; that state is informational and does not make an otherwise healthy doctor run fail. `doctor` does not repair files or sockets and does not contact configured providers.
+`doctor` validates the configuration and required environment variables, checks directory writability, and inspects the gateway Unix socket. It makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A failed probe gives exit code 1. A missing gateway socket is informational (`[info] daemon not running`). A report with only `[ok]` and `[info]` checks gives exit code 0.
+
+A healthy response confirms daemon liveness only. Search engine and browser readiness, cloud API key validity, permissions, quotas and service availability, and Agent executable availability and login remain unverified. Some Web provider option values, including their types, are validated when the runtime is built.
 
 ## Configuration and runtime paths
 
@@ -68,7 +70,7 @@ For each Web provider, academic provider or OA resolver, set `rate_limits` to an
 
 Local rate waiting is bounded by `[retry].request_timeout_seconds` per attempt. Fetch can use another provider with both rate and concurrency available. If a candidate exhausts its rate-wait budget, Fetch can fall back to the remaining candidates. Waiting solely for concurrency, running another candidate, and server-directed `Retry-After` sleeps are outside that local budget.
 
-The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 31 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
+The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 32 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
 
 Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the complete serialized LLM JSON body, and `agent_prompt_bytes` defaults to **98304** for the single serialized Agent prompt argument. Both measure UTF-8 bytes. Token counts depend on the model. For oversized input the gateway keeps approximately 80% of the retained variable text from its head and 20% from its tail, with an omission marker. It preserves the system instructions, template and protected user focus. If the protected content and required framing cannot fit, preparation fails with `input_budget_unfit` before any send or spawn.
 
@@ -100,6 +102,7 @@ Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the 
 | open-webSearch | yes | yes |
 | Yuanbao | yes | no |
 | Zhihu | yes | no |
+| Baidu Qianfan | yes | no |
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
@@ -126,9 +129,11 @@ The gateway explicitly sends `parsers = []` by default instead of inheriting ups
 
 These four examples are disabled by default. Set `enable_search = true` and/or
 `enable_fetch = true` in the corresponding `[web_providers.NAME]` table to enable
-each capability independently. Set `api_url` to the API root below; the adapter
-adds the Search or Fetch path. Existing timeout and retry settings in `[retry]`
-and provider `max_concurrency` continue to apply.
+each capability independently. The REST configurations below use an API root;
+their adapters add the Search or Fetch path. You.com's free MCP alternative
+uses the complete endpoint shown below, without appending a REST path. Existing
+timeout and retry settings in `[retry]` and provider `max_concurrency` continue
+to apply.
 
 | Provider name | API root | Credential or service prerequisite |
 |---|---|---|
@@ -136,6 +141,34 @@ and provider `max_concurrency` continue to apply.
 | `youcom` | `https://ydc-index.io` | `api_key_env = "YDC_API_KEY"`; the official Contents endpoint is a separate API call with separate billing and the appropriate Contents scope. |
 | `keenable` | `https://api.keenable.ai` | `api_key_env = "KEENABLE_API_KEY"`; only the keyed API is used. Omitting `live` does not guarantee the upstream avoids real-time charges. |
 | `open_websearch` | `http://127.0.0.1:3210` | Omit `api_key_env`; run your own open-webSearch HTTP daemon before enabling it. |
+
+For You.com, choose either the existing keyed REST configuration or free MCP.
+Replace the entire existing `[web_providers.youcom]` table with this free
+alternative; do not append a duplicate table:
+
+```toml
+[web_providers.youcom]
+enable_search = true
+enable_fetch = true
+api_url = "https://api.you.com/mcp/free"
+```
+
+Delete its `api_key_env` line. An existing `YDC_API_KEY` environment variable may
+remain; it is not automatically used without `api_key_env`. Explicit credentials
+on the free endpoint are rejected before HTTP. REST still uses its configured root
+and key; Fetch calls the separate `/v1/contents` API with its existing billing and
+permission requirements. The free endpoint uses the same `youcom` provider and
+independent capability switches.
+
+As of 2026-11-21, [You.com's MCP documentation](https://you.com/docs/agents/mcp-server)
+publishes 100 free queries per day; this external quota may change. Local
+`rate_limits` are not a remaining-balance meter or a daily quota ledger shared
+across processes. The existing REST 10 QPS example is not an official MCP limit.
+Free MCP failures follow existing Search fan-out and Fetch fallback through other
+configured providers, without automatically switching to paid You.com REST.
+See the [free MCP guide](docs/youcom-free-mcp.md) and
+[replacement fragment](config.youcom-free.fragment.toml) for configuration and checks.
+No new provider name, mode, SDK, or MCP service deployment is required.
 
 Only `open_websearch` accepts the provider-specific `engines` option. The full
 user-editable list in `config.example.toml` is an example, not a production default
@@ -173,6 +206,30 @@ Use `keyword-search --provider NAME` to isolate an enabled Search provider.
 `url-fetch` has no `--provider` flag: isolate Fetch using a temporary configuration
 or the opt-in adapter checks below. Normal CLI Fetch still requires a URL admitted
 by search in the same gateway runtime.
+
+#### Baidu Qianfan
+
+The single `baiduqianfan` provider calls both Web Search and Agentic Search for
+every logical search. To enable Search, add this block to your configuration if
+it is absent, or edit its existing block:
+
+```toml
+[web_providers.baiduqianfan]
+enable_search = true
+enable_fetch = false
+api_url = "https://qianfan.baidubce.com"
+api_key_env = "BAIDUQIANFAN_API_KEY"
+rate_limits = [{ requests = 3, period_seconds = 1 }]
+```
+
+Export `BAIDUQIANFAN_API_KEY` in the daemon environment and restart the daemon.
+One logical search normally sends two physical HTTP requests, one per API.
+Retries add physical attempts, and both APIs share the configured 3/1s local
+window. Other clients can consume the same upstream allowance, so the local
+limit cannot guarantee free billing quotas or prevent charges.
+
+Web Search supplies summaries only. Agentic Search web-page `raw_content` passes through the existing `cheap_check` and `judge` checks during Search. Retained raw content later passes through `content_clean` and `safety` during Fetch. Media results retain an HTTP(S) link, title, and snippet; the gateway does not
+download or transcribe media.
 
 #### Enabling Zhihu and Yuanbao
 
@@ -641,15 +698,16 @@ PARALLEL_API_KEY=...
 
 `OPENAI_MODEL` may optionally select the chat-completions model used by the OpenAI-compatible connectivity check. Parallel Search and Extract use `PARALLEL_API_KEY` when their opt-in live checks are enabled. These integration checks validate connectivity and basic response shape only; normal CI does not enable them.
 
-The Doubao, You.com, and Keenable adapter checks use `DOUBAO_API_KEY`,
+The original REST adapter checks for Doubao, You.com, and Keenable use `DOUBAO_API_KEY`,
 `YDC_API_KEY`, and `KEENABLE_API_KEY`, respectively. The open-webSearch check
 requires an explicit `OPEN_WEBSEARCH_API_URL` pointing to your already-running HTTP
 daemon; this variable selects only the test endpoint and is not a production
 configuration option. Search uses only `["bing", "duckduckgo"]` with total
 `limit=50`, rather than the full example list. Ensure both engines are allowed.
 
-Run one provider at a time, replacing `doubao` with `youcom`, `keenable`, or
-`open_websearch` as appropriate:
+Run one original provider at a time, replacing `doubao` with `keenable` or
+`open_websearch` as appropriate. For only keyed You.com REST, use the selector
+`-k "youcom and not youcom_mcp"` instead:
 
 ```bash
 env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_new_web_providers.py -k doubao -v -rs -rP
@@ -660,7 +718,7 @@ Each provider has one Search and one Fetch case. Fetch reads the fixed public
 service is started. Requests share a bounded three-attempt retry policy with a
 30-second request timeout. Missing credentials or the explicit daemon address
 produce SKIP; configured connection, permission, quota, or schema failures produce
-FAIL. Ordinary CI leaves all eight cases skipped.
+FAIL. Ordinary CI leaves these eight original cases skipped.
 
 Captured output contains safe JSON metrics for provider/stage, actual HTTP
 attempts, last observed HTTP status, fixed failure category/known code, hit count
@@ -672,6 +730,33 @@ filtered/defaulted list fails multi-engine coverage. A matching list with no
 partial failures still does not prove both engines succeeded; engines without
 observed hits remain unverified. The tests do not print raw requests, responses,
 queries, URL parameters, page text, or credentials.
+
+Run the Baidu Qianfan check with `BAIDUQIANFAN_API_KEY` set:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_baiduqianfan.py -v -rs -rP
+```
+
+This command calls only Baidu Qianfan. One logical search normally sends two HTTP
+requests, one to Web Search and one to Agentic Search. Retries consume additional
+requests. The two APIs may share a free allowance, and calls may incur charges.
+Both branches must successfully parse their results. A verified empty result is
+valid for either branch.
+
+For the keyless You.com free MCP check, select its dedicated case:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run pytest tests/integration/test_live_new_web_providers.py -k youcom_mcp -v -rs -rP
+```
+
+This case does not require or use `YDC_API_KEY`. It sends at most one Search
+request and, after usable hits, one Extract request for the first hit, with a
+30-second timeout per request and no retries. A Search failure reports Extract
+as SKIP. Stage output reports safe PASS/FAIL/SKIP categories, request counts,
+elapsed time, and hit/content counts. Default offline runs skip this case unless
+`WEB_SEARCH_RUN_INTEGRATION=1` is set. Use `-k youcom_mcp`; `-k youcom` would
+also select the original keyed REST checks. See the
+[free MCP guide](docs/youcom-free-mcp.md) for details.
 
 ## Contributing and support
 

@@ -1,6 +1,6 @@
 """Registration-order-preserving web provider registry."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -17,6 +17,8 @@ class WebProviderRegistration:
     factory: WebProviderFactory
     allowed_config_keys: frozenset[str]
     requires_api_key: bool = True
+    supports_optional_api_key: bool = False
+    validate_config: Callable[[Mapping[str, object], bool], None] | None = None
 
 
 class ProviderRegistry:

@@ -11,7 +11,11 @@ import pytest
 from agent_search_gateway.errors import ExecutionFailure, ProtocolFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import DiagnosticText, SecretValue
-from agent_search_gateway.providers.http import HttpJsonExecutor, HttpStatusFailure
+from agent_search_gateway.providers.http import (
+    HttpJsonExecutor,
+    HttpStatusFailure,
+    ProviderResponseFailure,
+)
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.keenable import KeenableAdapter
 from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
@@ -241,3 +245,113 @@ async def test_live_search_returns_valid_urls(provider: str) -> None:
 @pytest.mark.parametrize("provider", _PROVIDERS, ids=_PROVIDERS)
 async def test_live_fetch_returns_nonempty_content(provider: str) -> None:
     await _run(provider, "fetch")
+
+
+_MCP_ENDPOINT = "https://api.you.com/mcp/free"
+_MCP_VERSION = "2026-07-28"
+
+
+class _McpRequestRejected(Exception):
+    """The outgoing request violated the live smoke contract."""
+
+
+def _mcp_failure_category(exc: Exception) -> str:
+    if isinstance(exc, _McpRequestRejected):
+        return "request_guard"
+    if isinstance(exc, HttpStatusFailure) and exc.status_code == 429:
+        return "rate_limited"
+    if isinstance(exc, ProviderResponseFailure):
+        code = exc.diagnostics.get("upstream_code")
+        if isinstance(code, DiagnosticText):
+            code = code.text
+        return "tool_error" if code == "tool_error" else "rpc_error"
+    if isinstance(exc, ExecutionFailure):
+        semantic = exc.diagnostics.get("semantic_result")
+        if isinstance(semantic, str) and semantic in {"empty", "no_match"}:
+            return semantic
+        category = exc.diagnostics.get("category")
+        if isinstance(category, str) and category in {"decode", "invalid_envelope", "protocol"}:
+            return category
+    return _failure_fields(exc)[0]
+
+
+async def _run_youcom_mcp(query: str, transport: httpx.AsyncBaseTransport | None = None) -> bool:
+    stage = "search"
+    count = 0
+    started = time.monotonic()
+
+    async def guard(request: httpx.Request) -> None:
+        nonlocal count
+        expected = {
+            "host": "api.you.com",
+            "content-type": "application/json",
+            "accept": "application/json, text/event-stream",
+            "mcp-protocol-version": _MCP_VERSION,
+            "mcp-method": "tools/call",
+            "mcp-name": f"you-{stage}",
+        }
+        # Allow only these additional transport headers. Credentials and sessions
+        # (including cookies received from Search) must never reach the endpoint.
+        transport_headers = {"accept-encoding", "connection", "user-agent", "content-length"}
+        if (
+            count != 0
+            or request.method != "POST"
+            or str(request.url) != _MCP_ENDPOINT
+            or set(request.headers).difference(expected, transport_headers)
+            or any(request.headers.get(key) != value for key, value in expected.items())
+        ):
+            raise _McpRequestRejected()
+        count += 1
+
+    def report(status: str, category: str, **sizes: int) -> None:
+        print(
+            json.dumps(
+                {
+                    "provider": "youcom",
+                    "protocol": "mcp",
+                    "protocol_version": _MCP_VERSION,
+                    "stage": stage,
+                    "status": status,
+                    "category": category,
+                    "request_count": count,
+                    "elapsed_ms": round((time.monotonic() - started) * 1000),
+                    **sizes,
+                },
+                sort_keys=True,
+            )
+        )
+
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, follow_redirects=False, event_hooks={"request": [guard]}
+        ) as client:
+            executor = HttpJsonExecutor(
+                client, RetryPolicy(1, 0.25, 2.0, 30.0), provider_name="youcom"
+            )
+            adapter = YouComAdapter(
+                name="youcom", api_url=_MCP_ENDPOINT, secret=None, http_executor=executor
+            )
+            hits = await adapter.search(query)
+            if hits:
+                target = normalize_url(hits[0].url)
+                report("PASS", "success", hits=len(hits))
+                stage, count, started = "extract", 0, time.monotonic()
+                candidate = await adapter.fetch(target)
+                size = len(candidate.raw_content)
+                if candidate.raw_content.strip() and candidate.raw_content == candidate.content:
+                    report("PASS", "success", content_length=size)
+                    return True
+                report("FAIL", "response_contract", content_length=size)
+            else:
+                report("FAIL", "empty", hits=0)
+    except Exception as exc:
+        report("FAIL", _mcp_failure_category(exc))
+    if stage == "search":
+        stage, count, started = "extract", 0, time.monotonic()
+        report("SKIP", "search_failed")
+    return False
+
+
+async def test_live_youcom_mcp_search_then_extract() -> None:
+    if not await _run_youcom_mcp("Python programming language official documentation"):
+        pytest.fail("youcom/mcp smoke failed", pytrace=False)

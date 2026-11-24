@@ -15,6 +15,23 @@ The first public release is `v0.1.0`.
 - HTTP Web, academic, OA and LLM providers support per-provider `use_proxy`, defaulting to environment proxies; direct mode retains TLS verification and configured CA sources. The Zhihu example uses direct mode.
 - Business CLI commands wait for responses without a default deadline. Explicit internal numeric timeouts, Agent process deadlines and Provider HTTP timeouts remain effective; interrupting the CLI does not cancel background work.
 
+## [1.2.0] - 2026-11-24
+
+### Added
+
+- Add the opt-in `baiduqianfan` keyword search provider. It queries Baidu Qianfan Web Search and Agentic Search concurrently and returns results from a successful branch when the other fails.
+- Check open-webSearch daemon liveness in `doctor` when Search or Fetch is enabled. One credential-free `GET /health` checks the service, and a failed probe gives exit code 1.
+
+### Changed
+
+- Clarify Zhihu rate limits. Zhihu has no published uniform fixed QPS, so the gateway leaves the request window and minimum interval unset by default.
+
+## [1.1.0] - 2026-11-24
+
+### Added
+
+- Use [You.com's keyless free MCP Search and Extract endpoint](docs/youcom-free-mcp.md) through the existing `youcom` provider by replacing its configuration table and omitting `api_key_env`. The default keyed REST configuration remains available; free MCP failures follow existing provider fallback behavior without switching to paid You.com REST.
+
 ## [1.0.0] - 2026-11-20
 
 ### Added

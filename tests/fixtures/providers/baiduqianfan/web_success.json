@@ -1,0 +1,11 @@
+{
+  "references": [
+    {
+      "type": "web",
+      "url": "https://example.test/web",
+      "title": "Web title",
+      "snippet": "Web snippet",
+      "content": "Web excerpt."
+    }
+  ]
+}
