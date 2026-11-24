@@ -127,6 +127,28 @@ async def test_ssl_cert_file_loads_only_selected_ca(
     assert context.get_ca_certs(binary_form=True) == [ca]
 
 
+async def test_ssl_cert_file_from_pipe_uses_selected_ca_or_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ca = httpx.create_ssl_context(trust_env=False).get_ca_certs(binary_form=True)[0]
+    pem = ssl.DER_cert_to_PEM_cert(ca).encode("ascii")
+    read_fd, write_fd = os.pipe()
+    with os.fdopen(read_fd, "rb") as reader:
+        with os.fdopen(write_fd, "wb", buffering=0) as writer:
+            os.set_blocking(writer.fileno(), False)
+            assert writer.write(pem) == len(pem)
+        ca_file = Path("/dev/fd") / str(reader.fileno())
+        if not ca_file.exists():
+            pytest.skip("Pipe file descriptors are unavailable through /dev/fd")
+        monkeypatch.setenv("SSL_CERT_FILE", str(ca_file))
+        if httpx.__version__.startswith("0.27."):
+            with pytest.raises(ConfigFailure, match="Invalid TLS CA configuration"):
+                await _direct_contexts(tmp_path, "brave")
+        else:
+            (context,) = await _direct_contexts(tmp_path, "brave")
+            assert context.get_ca_certs(binary_form=True) == [ca]
+
+
 @pytest.mark.parametrize("parts", [("ca",), ("ca", "more"), ("", "ca", "", "more", ""), ("", "")])
 async def test_ssl_cert_directory_passed_as_capath(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, parts: tuple[str, ...]
@@ -516,7 +538,13 @@ def _localhost_certificate(tmp_path: Path, *, with_ip_san: bool) -> tuple[Path, 
         check=True,
         capture_output=True,
     )
-    subprocess.run([openssl, "rehash", str(trusted)], check=True, capture_output=True)
+    subject_hash = subprocess.run(
+        [openssl, "x509", "-in", str(cert), "-subject_hash", "-noout"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (trusted / f"{subject_hash}.0").symlink_to(cert.name)
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.load_cert_chain(cert, key)
     return trusted, server_context

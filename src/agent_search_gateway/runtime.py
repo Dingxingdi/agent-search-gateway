@@ -58,16 +58,18 @@ _RESERVED_ACADEMIC_ADAPTER_KWARGS = frozenset({"name", "executor", "api_key", "c
 def _prepare_direct_ssl_context() -> ssl.SSLContext:
     ca_file = os.environ.get("SSL_CERT_FILE")
     ca_dir = os.environ.get("SSL_CERT_DIR")
+    httpx_027 = httpx.__version__.startswith("0.27.")
     try:
-        # Match HTTPX's FILE-before-DIR precedence, including on versions that
-        # silently skip missing paths. OpenSSL loads a capath lazily.
-        if ca_file and not os.path.isfile(ca_file):
+        # HTTPX 0.27 silently skips nonregular CA files. Newer versions let
+        # OpenSSL read the source, including a bundle supplied through a pipe.
+        if ca_file and httpx_027 and not os.path.isfile(ca_file):
             raise ValueError
         if not ca_file and ca_dir:
+            # OpenSSL resolves capath entries lazily.
             directories = [path for path in ca_dir.split(os.pathsep) if path]
             if not all(os.path.isdir(path) for path in directories):
                 raise ValueError
-            if os.pathsep in ca_dir and httpx.__version__.startswith("0.27."):
+            if os.pathsep in ca_dir and httpx_027:
                 # HTTPX 0.27 falls back to certifi for a list. Seed its normal
                 # TLS policy with one requested directory, then add the others.
                 if not directories:

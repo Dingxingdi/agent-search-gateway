@@ -82,6 +82,9 @@ All business CLI commands (`keyword-search`, `paper-search`, `llm-search`,
 deadline. Interruption or disconnection ends the client wait; Ctrl-C does not cancel
 work already running in the daemon, which may continue and write results. An
 unresponsive but connected daemon can leave the client waiting until interrupted.
+`stop` also waits without a default response deadline: if the daemon accepts the
+connection but does not acknowledge shutdown, it waits until the connection closes
+or the operator interrupts it.
 Internal callers' explicit numeric socket timeouts remain honored. Agent process
 deadlines and Provider HTTP timeouts remain in effect. External agy duration parsing
 may reject extreme values; accepting a configuration does not guarantee that agy
