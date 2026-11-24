@@ -50,6 +50,7 @@ async def _gateway(
     transport: httpx.MockTransport,
     *,
     web: tuple[str, ...] = (),
+    web_options: dict[str, dict[str, object]] | None = None,
     academic: dict[str, object] | None = None,
 ) -> AsyncIterator[Runtime]:
     raw = {
@@ -59,6 +60,7 @@ async def _gateway(
                 "enable_fetch": True,
                 "api_url": f"https://{name}.test",
                 "api_key_env": "TEST_KEY",
+                **(web_options or {}).get(name, {}),
             }
             for name in web
         },
@@ -207,20 +209,36 @@ async def test_firecrawl_metadata_search_then_explicit_fetch(
     ]
 
 
-async def test_firecrawl_base64_only_fetch_uses_existing_fallback(paths: RuntimePaths) -> None:
+@pytest.mark.parametrize(
+    ("body_field", "firecrawl_options"),
+    [
+        ("rawBase64", {}),
+        ("markdown", {}),
+        ("rawHtml", {"scrape_formats": ["rawHtml"], "scrape_parsers": ["image"]}),
+    ],
+    ids=["raw-base64-only", "default-markdown", "raw-html-with-image-parser"],
+)
+async def test_firecrawl_base64_only_fetch_uses_existing_fallback(
+    paths: RuntimePaths, body_field: str, firecrawl_options: dict[str, object]
+) -> None:
     calls: list[httpx.Request] = []
-    marker = "UERGQUNDRVBUQU5DRQ=="
+    marker = "JVBERi0xLjQKJSVFT0YK"
+    page: dict[str, object] = {body_field: marker}
+    if body_field != "rawBase64":
+        page["metadata"] = {"contentType": "Application/PDF; version=1.4"}
     upstream = _transport(
         calls,
         {
             _SEARCH: _metadata(),
-            _SCRAPE: httpx.Response(200, json={"success": True, "data": {"rawBase64": marker}}),
+            _SCRAPE: httpx.Response(200, json={"success": True, "data": page}),
             _EXTRACT: httpx.Response(
                 200, json={"results": [{"url": _TARGET, "raw_content": "Tavily body"}]}
             ),
         },
     )
-    async with _gateway(paths, upstream, web=("firecrawl", "tavily")) as runtime:
+    async with _gateway(
+        paths, upstream, web=("firecrawl", "tavily"), web_options={"firecrawl": firecrawl_options}
+    ) as runtime:
         await _keyword(paths, "firecrawl")
         _assert_no_cached_body(runtime)
         assert [str(r.url) for r in calls] == [_SEARCH]

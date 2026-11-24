@@ -34,11 +34,21 @@ def _page_body(
     result: dict[str, object],
     provider: str,
     stage: str,
+    *,
+    pdf_parser_enabled: bool,
 ) -> URLFetchCandidate:
     markdown = optional_string(result.get("markdown"), provider, stage, "markdown")
     raw_html = optional_string(result.get("rawHtml"), provider, stage, "rawHtml")
     raw = raw_html or markdown
-    if not raw.strip():
+    metadata = result.get("metadata")
+    content_type = metadata.get("contentType") if isinstance(metadata, dict) else None
+    # Firecrawl puts the original PDF bytes in markdown and rawHtml as Base64 without its parser.
+    unparsed_pdf = (
+        not pdf_parser_enabled
+        and isinstance(content_type, str)
+        and content_type.partition(";")[0].strip().lower() == "application/pdf"
+    )
+    if unparsed_pdf or not raw.strip():
         raise failure(
             provider,
             stage,
@@ -178,7 +188,9 @@ class FirecrawlAdapter:
     def _parse_fetch(self, payload: object) -> URLFetchCandidate:
         root = self._successful_root(payload, "fetch")
         data = require_object(root.get("data"), self.name, "fetch", "data")
-        return _page_body(data, self.name, "fetch")
+        return _page_body(
+            data, self.name, "fetch", pdf_parser_enabled="pdf" in self._scrape_parsers
+        )
 
     def _successful_root(self, payload: object, stage: str) -> dict[str, object]:
         root = require_object(payload, self.name, stage, "response")

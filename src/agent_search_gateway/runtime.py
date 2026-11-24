@@ -64,17 +64,20 @@ def _prepare_direct_ssl_context() -> ssl.SSLContext:
         if ca_file and not os.path.isfile(ca_file):
             raise ValueError
         if not ca_file and ca_dir:
-            for directory in ca_dir.split(os.pathsep):
-                if directory and not os.path.isdir(directory):
-                    raise ValueError
-        httpx_context = httpx.create_ssl_context(verify=True, trust_env=True)
-        if not ca_file and ca_dir and os.pathsep in ca_dir:
-            # HTTPX 0.27 falls back to certifi for directory lists. Load only the
-            # requested roots and preserve HTTPX's hostname verification policy.
-            context = ssl.create_default_context(capath=ca_dir)
-            context.hostname_checks_common_name = httpx_context.hostname_checks_common_name
-            return context
-        return httpx_context
+            directories = [path for path in ca_dir.split(os.pathsep) if path]
+            if not all(os.path.isdir(path) for path in directories):
+                raise ValueError
+            if os.pathsep in ca_dir and httpx.__version__.startswith("0.27."):
+                # HTTPX 0.27 falls back to certifi for a list. Seed its normal
+                # TLS policy with one requested directory, then add the others.
+                if not directories:
+                    # An all-empty list has no trusted roots.
+                    return ssl.create_default_context(capath=ca_dir)
+                context = httpx.create_ssl_context(verify=directories[0], trust_env=True)
+                for directory in directories[1:]:
+                    context.load_verify_locations(capath=directory)
+                return context
+        return httpx.create_ssl_context(verify=True, trust_env=True)
     except (OSError, ValueError):
         raise ConfigFailure(
             ErrorCode.CONFIG_ERROR, "Invalid TLS CA configuration for direct HTTP providers"

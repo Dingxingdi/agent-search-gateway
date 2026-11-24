@@ -352,6 +352,17 @@ async def test_firecrawl_search_failure_carries_selected_safe_diagnostics(
         ),
         ({"success": True, "data": {}}, "page body is empty", "empty"),
         (
+            {
+                "success": True,
+                "data": {
+                    "metadata": {"contentType": "application/pdf"},
+                    "markdown": "JVBERi0xLjQKJSVFT0YK",
+                },
+            },
+            "page body is empty",
+            "empty",
+        ),
+        (
             {"success": True, "data": {"rawBase64": "PRIVATE_BASE64"}},
             "page body is empty",
             "empty",
@@ -440,7 +451,10 @@ async def test_firecrawl_scrape_options_only_affect_fetch(
 @pytest.mark.parametrize(
     ("data", "expected"),
     [
-        ({"markdown": "markdown"}, URLFetchCandidate("markdown", "markdown")),
+        (
+            {"markdown": "markdown", "metadata": {"contentType": "text/html; charset=utf-8"}},
+            URLFetchCandidate("markdown", "markdown"),
+        ),
         ({"rawHtml": "<main>raw</main>"}, URLFetchCandidate("<main>raw</main>", "")),
         (
             {"markdown": "markdown", "rawHtml": "<main>raw</main>"},
@@ -461,6 +475,19 @@ async def test_firecrawl_fetch_preserves_body_mapping(
     )
     assert await adapter.fetch(normalize_url("https://example.com/fire")) == expected
     assert len(executor.requests) == 1
+
+
+async def test_firecrawl_fetch_accepts_parsed_pdf_markdown() -> None:
+    page = {"metadata": {"contentType": "application/pdf"}, "markdown": "# Extracted PDF"}
+    adapter = FirecrawlAdapter(
+        name="firecrawl",
+        api_url="https://fire.example.test",
+        secret=SecretValue("x"),
+        http_executor=RecordingJsonExecutor([{"success": True, "data": page}]),
+        scrape_parsers=["pdf"],
+    )
+    candidate = await adapter.fetch(normalize_url("https://example.com/document"))
+    assert candidate == URLFetchCandidate("# Extracted PDF", "# Extracted PDF")
 
 
 async def _invoke(adapter: FirecrawlAdapter, stage: str) -> object:

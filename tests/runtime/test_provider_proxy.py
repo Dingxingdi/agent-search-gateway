@@ -151,7 +151,10 @@ async def test_ssl_cert_directory_passed_as_capath(
     monkeypatch.setattr(ssl.SSLContext, "load_verify_locations", record_locations)
     (context,) = await _direct_contexts(tmp_path, "brave")
 
-    assert loaded_directories[context] == [directories]
+    loaded = os.pathsep.join(loaded_directories[context])
+    assert [path for path in loaded.split(os.pathsep) if path] == [
+        path for path in directories.split(os.pathsep) if path
+    ]
     assert context.get_ca_certs() == []
 
 
@@ -449,8 +452,8 @@ async def _routing_server(
                 )
                 await writer.drain()
         finally:
+            # Fixture teardown awaits each writer after handler cancellation.
             writer.close()
-            await asyncio.wait_for(writer.wait_closed(), timeout=3)
 
     def connected(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writers.add(writer)
@@ -533,6 +536,20 @@ async def test_ssl_cert_directory_trusts_certificate_from_second_directory(
     ):
         response = await client.get(url)
         assert response.text == "verified"
+
+
+async def test_ssl_cert_directory_list_preserves_httpx_tls_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path))
+    baseline = httpx.create_ssl_context(verify=True, trust_env=True)
+    monkeypatch.setenv("SSL_CERT_DIR", os.pathsep.join((str(tmp_path), str(tmp_path))))
+
+    (context,) = await _direct_contexts(tmp_path, "brave")
+
+    assert context.verify_flags == baseline.verify_flags
+    assert context.get_ciphers() == baseline.get_ciphers()
 
 
 async def test_ssl_cert_directory_list_preserves_httpx_common_name_policy(

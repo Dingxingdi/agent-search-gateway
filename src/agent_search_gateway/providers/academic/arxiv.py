@@ -23,9 +23,11 @@ _DEFAULT_API_URL = "https://export.arxiv.org/api/query"
 
 _QUERY_TERM = re.compile(r'\s*("[^"]*"|[^\s"]+)(?=\s|$)')
 # Classic API adapt_query rewrites dates and line breaks even inside quotes.
-# Surrogates have no UTF-8 representation in an HTTP query parameter.
+# arXiv echoes the query in the Atom feed title, so each retained literal must
+# also be valid XML 1.0 text. Whitespace between terms is consumed by the tokenizer.
 _UNREPRESENTABLE = re.compile(
-    r"lastUpdatedDate:|submittedDate:\[[\d-]{4,14} TO [\d-]{4,14}\]|[\r\n\ud800-\udfff]"
+    r"lastUpdatedDate:|submittedDate:\[[\d-]{4,14} TO [\d-]{4,14}\]"
+    r"|[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
 )
 
 
