@@ -1,0 +1,14 @@
+{
+  "card_result": {
+    "cards": [
+      {
+        "type": "example",
+        "data": {
+          "details": {
+            "url": "https://example.test/hidden-card-url"
+          }
+        }
+      }
+    ]
+  }
+}

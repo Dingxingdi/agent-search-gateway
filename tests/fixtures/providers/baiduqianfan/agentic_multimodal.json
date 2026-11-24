@@ -1,0 +1,40 @@
+{
+  "web_page_result": {
+    "web_pages": [
+      {
+        "url": "https://example.test/page#section",
+        "title": "Page",
+        "snippet": "Excerpt",
+        "content": "Original page text.\nSecond line."
+      }
+    ]
+  },
+  "image_result": {
+    "images": [
+      {
+        "url": "https://example.test/image.jpg",
+        "width": 640,
+        "height": 480
+      }
+    ]
+  },
+  "video_result": {
+    "videos": [
+      {
+        "url": "https://example.test/video.mp4"
+      }
+    ]
+  },
+  "card_result": {
+    "cards": [
+      {
+        "type": "example",
+        "data": {
+          "details": {
+            "url": "https://example.test/card-link"
+          }
+        }
+      }
+    ]
+  }
+}

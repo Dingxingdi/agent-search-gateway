@@ -5,6 +5,7 @@ import json
 import logging
 import tomllib
 from collections.abc import Iterator
+from functools import partial
 from pathlib import Path
 from typing import cast
 
@@ -19,8 +20,10 @@ from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.keenable import KeenableAdapter
 from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.youcom import YouComAdapter
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
+from tests.support.controlled import ManualClock
 
 _ADAPTERS: dict[str, type[object]] = {
     "doubao": DoubaoAdapter,
@@ -432,6 +435,95 @@ async def test_new_web_provider_builds_with_shared_rate_fields(
         gate = runtime.quotas.get_rate("web", name)
         assert gate is not None
         assert runtime._web_http_executors[0]._rate_gate is gate
+    finally:
+        await runtime.aclose()
+
+
+async def test_baiduqianfan_runtime_owns_one_executor_and_gate(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        payload: dict[str, object] = (
+            {"references": []}
+            if request.url.path.endswith("/web_search")
+            else {"web_page_result": {"web_pages": []}}
+        )
+        return httpx.Response(200, json=payload)
+
+    client_factory.transport = httpx.MockTransport(respond)
+    runtime = _build_runtime(
+        tmp_path,
+        {
+            "baiduqianfan": _provider_config(
+                "baiduqianfan",
+                enable_search=True,
+                enable_fetch=False,
+                rate_limits=[{"requests": 3, "period_seconds": 1}],
+            )
+        },
+        client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        assert search.name == "baiduqianfan"
+        assert runtime.web_fetch_providers == ()
+        [executor] = runtime._web_http_executors
+        gate = runtime.quotas.get_rate("web", "baiduqianfan")
+        assert gate is not None
+        assert executor._rate_gate is gate
+        assert len(client_factory.clients) == 3  # One Web client and two LLM clients.
+        assert executor._client is client_factory.clients[0]
+        assert await search.search("shared runtime executor") == []
+        assert {request.url.path for request in requests} == {
+            "/v2/ai_search/web_search",
+            "/v2/ai_search/agentic_search",
+        }
+        assert len(requests) == 2
+        assert all(request.method == "POST" for request in requests)
+    finally:
+        await runtime.aclose()
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+async def test_baiduqianfan_without_rate_limits_has_no_hidden_three_request_window(
+    tmp_path: Path, client_factory: _ClientFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    sends: list[float] = []
+    monkeypatch.setattr(
+        "agent_search_gateway.runtime.RateGate",
+        partial(RateGate, monotonic=clock.monotonic, sleep=clock.sleep),
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        payload: dict[str, object] = (
+            {"references": []}
+            if request.url.path.endswith("/web_search")
+            else {"web_page_result": {"web_pages": []}}
+        )
+        return httpx.Response(200, json=payload)
+
+    client_factory.transport = httpx.MockTransport(respond)
+    runtime = _build_runtime(
+        tmp_path,
+        {"baiduqianfan": _provider_config("baiduqianfan", enable_fetch=False)},
+        client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        async with asyncio.timeout(1), asyncio.TaskGroup() as tasks:
+            first = tasks.create_task(search.search("first unlimited query"))
+            second = tasks.create_task(search.search("second unlimited query"))
+            await clock.advance_to(0)
+            await clock.advance_to(0)
+            assert sends == [0, 0, 0, 0]
+            assert not clock.sleepers
+        assert first.result() == second.result() == []
     finally:
         await runtime.aclose()
 

@@ -44,11 +44,12 @@ def test_documented_rate_reference_covers_registered_non_llm_providers() -> None
     ]
     names = [cells[0].strip().strip("`") for cells in rows]
     assert set(names) == expected
-    assert len(rows) == len(expected) == 31
+    assert len(rows) == len(expected) == 32
     for name, product, mode, upstream, local, sources, checked in rows:
         assert all(cell.strip() for cell in (product, mode, upstream, local)), name
         assert re.search(r"\]\(https://[^)]+\)", sources), name
-        assert checked.strip() == "2026-11-19", name
+        expected_date = "2026-11-21" if name.strip() == "`baiduqianfan`" else "2026-11-19"
+        assert checked.strip() == expected_date, name
 
 
 def test_example_input_limits_and_provider_rate_policies() -> None:
@@ -67,6 +68,7 @@ def test_example_input_limits_and_provider_rate_policies() -> None:
     assert resolved.input_limits.agent_prompt_bytes == 98304
     expected_windows = {
         "anysearch": [(10, 1)],
+        "baiduqianfan": [(3, 1)],
         "brave": [(50, 1)],
         "brightdata": [(1000, 60)],
         "core": [(1, 10)],
@@ -347,6 +349,7 @@ def test_new_web_provider_examples_are_disabled_and_complete() -> None:
     web = data["web_providers"]
     assert isinstance(web, dict)
     expected = {
+        "baiduqianfan": ("https://qianfan.baidubce.com", "BAIDUQIANFAN_API_KEY"),
         "doubao": ("https://open.feedcoopapi.com/search_api", "DOUBAO_" + "API_KEY"),
         "youcom": ("https://ydc-index.io", "YDC_" + "API_KEY"),
         "keenable": ("https://api.keenable.ai", "KEENABLE_" + "API_KEY"),
@@ -391,6 +394,38 @@ def test_new_web_example_resolves_without_new_credentials_and_can_be_enabled(nam
     assert configured.enable_search and configured.enable_fetch
     assert (configured.secret is not None) is (name != "open_websearch")
     assert configured.api_key_env == key_env
+
+
+def test_zhihu_example_explains_account_quotas_and_inherited_limits() -> None:
+    example = (_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    section = example.split("[web_providers.zhihu]", 1)[1].split("\n[", 1)[0]
+    assert "QPS" in section and "account quotas" in section
+    assert "default_max_concurrency" in section and "429" in section
+    web = load_toml(_ROOT / "config.example.toml")["web_providers"]
+    assert isinstance(web, dict)
+    assert {"max_concurrency", "rate_limits", "min_interval_seconds"}.isdisjoint(web["zhihu"])
+
+
+def test_baiduqianfan_example_can_enable_search_with_its_configured_key() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    assert "baiduqianfan" in web
+    table = web["baiduqianfan"]
+    data["web_providers"] = {"baiduqianfan": table}
+    environment = _stub_environment(data)
+    key_env = "BAIDUQIANFAN_API_KEY"
+    environment.pop(key_env, None)
+    registry = build_default_registry()
+    [disabled] = resolve_config(data, registry, environment).web.providers
+    assert disabled.api_key_env is None and disabled.secret is None
+
+    table["enable_search"] = True
+    environment[key_env] = "example-service-key"
+    [enabled] = resolve_config(data, registry, environment).web.providers
+    assert enabled.enable_search and not enabled.enable_fetch
+    assert enabled.api_key_env == key_env
+    assert enabled.secret is not None and enabled.secret.reveal() == environment[key_env]
 
 
 @pytest.mark.parametrize(
@@ -596,6 +631,7 @@ def test_example_provider_selection_omits_only_requested_templates() -> None:
         "youcom",
         "keenable",
         "open_websearch",
+        "baiduqianfan",
         "yuanbao",
         "zhihu",
     }
@@ -709,6 +745,7 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "Jina Reader": ("no", "yes"),
         "Yuanbao": ("yes", "no"),
         "Zhihu": ("yes", "no"),
+        "Baidu Qianfan": ("yes", "no"),
     }
     for display_name, (search_label, fetch_label) in expected_rows.items():
         assert f"| {display_name} | {search_label} | {fetch_label} |" in readme

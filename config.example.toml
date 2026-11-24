@@ -186,6 +186,15 @@ engines = [
   "exa", "keenable", "csdn", "juejin", "hackernews",
 ]
 
+[web_providers.baiduqianfan]
+# Every logical search calls both Web Search and Agentic Search. Retries add physical attempts.
+# This conservative shared window does not enforce free billing quotas.
+rate_limits = [{ requests = 3, period_seconds = 1 }]
+enable_search = false
+enable_fetch = false
+api_url = "https://qianfan.baidubce.com"
+api_key_env = "BAIDUQIANFAN_API_KEY"
+
 [web_providers.yuanbao]
 # Unknown provisioned edition: Flagship allows 5 QPS, Fast and Standard allow 20.
 rate_limits = [{ requests = 5, period_seconds = 1 }]
@@ -195,6 +204,8 @@ api_url = "https://api.wsa.cloud.tencent.com"
 api_key_env = "YUANBAO_API_KEY"
 
 [web_providers.zhihu]
+# Zhihu publishes no common fixed QPS. Its account quotas do not establish a request rate.
+# This provider inherits default_max_concurrency and the existing HTTP 429 retry policy.
 enable_search = true
 enable_fetch = false
 api_url = "https://developer.zhihu.com"

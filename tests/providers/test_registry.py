@@ -7,6 +7,7 @@ from agent_search_gateway.providers.contracts import (
 )
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.registry import ProviderRegistry, WebProviderRegistration
+from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.decodo import DecodoAdapter
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
@@ -203,5 +204,15 @@ def test_default_registry_adds_four_dual_capability_providers() -> None:
         assert registration.capabilities == ProviderCapabilities(search=True, fetch=True)
         assert registration.allowed_config_keys == allowed_keys
         assert registration.requires_api_key is requires_key
-    assert [item.name for item in registrations[20:]] == [name for name, _, _, _ in expected]
+    assert [item.name for item in registrations[20:24]] == [name for name, _, _, _ in expected]
     assert {item.name for item in registrations if item.supports_optional_api_key} == {"youcom"}
+
+
+def test_default_registry_adds_one_baiduqianfan_search_only_provider() -> None:
+    registrations = build_default_registry().list_in_registration_order()
+    assert [item.name for item in registrations[24:]] == ["baiduqianfan"]
+    [registration] = [item for item in registrations if item.name == "baiduqianfan"]
+    assert registration.factory is BaiduQianfanAdapter
+    assert registration.capabilities == ProviderCapabilities(search=True, fetch=False)
+    assert registration.requires_api_key is True
+    assert registration.allowed_config_keys == frozenset({"api_url"})
