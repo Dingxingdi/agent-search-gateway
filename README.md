@@ -480,7 +480,9 @@ before that process deadline begins. Two scope branches and any subsequent OA
 enrichment are separate work, so total workflow duration can exceed a single
 process budget. Provider HTTP timeouts and retry policies also remain in effect.
 
-All business CLI commands wait for the daemon response without a default deadline.
+Version 2.0 removed the 600-second CLI response deadline for non-Agent requests.
+All business CLI commands now wait for the daemon without a default deadline.
+If your automation needs a time limit, set one in the caller or job runner.
 An unresponsive but connected daemon can leave a client waiting until interrupted
 or disconnected. Ctrl-C ends the CLI wait; it does not cancel work already running
 in the daemon, which may continue and write result files. Explicit numeric socket
@@ -664,7 +666,7 @@ Expected provider/retry/semantic failures are logged as concise events without t
 
 ## Public interface and compatibility
 
-The CLI commands, documented configuration, stdout contracts, result-file schemas, and runtime paths are the supported interfaces for the current `1.x` line. Python module imports and the local socket wire protocol remain internal implementation details. See [the public interface and compatibility policy](docs/public-interface.md) before building automation against the project.
+The CLI commands, documented configuration, stdout contracts, result-file schemas, and runtime paths are the supported interfaces for the current `2.x` line. Python module imports and the local socket wire protocol remain internal implementation details. See [the public interface and compatibility policy](docs/public-interface.md) before building automation against the project.
 
 A static documentation site and generated internal Python reference are built in CI and published from the default branch at the [project documentation address](https://dingxingdi.github.io/agent-search-gateway/).
 

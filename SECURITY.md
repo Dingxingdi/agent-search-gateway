@@ -2,11 +2,11 @@
 
 ## Supported versions
 
-`agent-search-gateway` is an alpha project. The current `main` branch and the latest `1.x` release receive security fixes on a best-effort basis.
+`agent-search-gateway` is an alpha project. The current `main` branch and the latest `2.x` release receive security fixes on a best-effort basis.
 
 | Version | Supported |
 | --- | --- |
-| `main` / latest `1.x` | Yes, best effort |
+| `main` / latest `2.x` | Yes, best effort |
 | Older commits or releases | No |
 
 ## Reporting a vulnerability
