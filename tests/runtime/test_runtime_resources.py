@@ -132,6 +132,7 @@ async def test_resource_owner_preserves_primary_error_if_logging_fails(
         "second-client",
         "llm-client",
         "close-failure",
+        "cancelled-close",
         "cancel-build",
         "bind-failure",
         "success",
@@ -141,14 +142,16 @@ async def test_partial_build_and_startup_error_resources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     registry = build_default_registry()
-    clients = []
+    clients: list[AsyncMock] = []
     primary = ValueError("synthetic constructor failure")
 
     def adapter(**kwargs: object) -> object:
-        if len(clients) == 2 and failure in {"second-adapter", "close-failure"}:
+        if len(clients) == 2 and failure in {"second-adapter", "close-failure", "cancelled-close"}:
             raise primary
         if len(clients) == 1 and failure == "cancel-build":
-            asyncio.current_task().cancel()
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
         return Mock(name="adapter")
 
     def make_client(**kwargs: object) -> httpx.AsyncClient:
@@ -157,6 +160,8 @@ async def test_partial_build_and_startup_error_resources(
         client = AsyncMock(spec=httpx.AsyncClient)
         if failure == "close-failure":
             client.aclose.side_effect = RuntimeError("synthetic close failure")
+        if len(clients) == 1 and failure == "cancelled-close":
+            client.aclose.side_effect = asyncio.CancelledError()
         clients.append(client)
         return client
 

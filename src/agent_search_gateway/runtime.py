@@ -139,7 +139,9 @@ class _RuntimeResources:
             _, client = self._clients.popitem()
             try:
                 await client.aclose()
-            except Exception:
+            except (asyncio.CancelledError, Exception):
+                # The caller waits through join_cleanup. A cancelled transport close
+                # must not interrupt cleanup of the remaining clients.
                 log_event(logging.getLogger(__name__), logging.ERROR, "runtime_client_close_failed")
 
 
