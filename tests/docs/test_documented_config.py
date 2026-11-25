@@ -30,6 +30,109 @@ from agent_search_gateway.url_normalization import normalize_url
 _ROOT = Path(__file__).parents[2]
 
 
+@pytest.mark.parametrize("enable_templates", [False, True])
+async def test_example_config_resolves_each_credential_with_stub_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enable_templates: bool
+) -> None:
+    from agent_search_gateway.doctor import run_doctor
+
+    raw = load_toml(_ROOT / "config.example.toml")
+    registry = build_default_registry()
+    # Validate the unchanged source before exercising opt-in template variants.
+    resolve_config(
+        raw,
+        registry,
+        _stub_environment(raw),
+        academic_registry=build_default_academic_registry(),
+        oa_resolver_registry=build_default_oa_resolver_registry(),
+    )
+    if enable_templates:
+        web = raw["web_providers"]
+        assert isinstance(web, dict)
+        for name, table in web.items():
+            if not isinstance(table, dict):
+                continue
+            registration = registry.require(name)
+            table["enable_search"] = registration.capabilities.search
+            table["enable_fetch"] = registration.capabilities.fetch
+        resolvers = raw["oa_resolvers"]
+        assert isinstance(resolvers, dict)
+        resolver = resolvers["unpaywall"]
+        resolver["enabled"] = True
+        resolver["credentials"][0]["contact_email_env"] = "DOCS_CONTACT_EMAIL"
+    config = resolve_config(
+        raw,
+        registry,
+        _stub_environment(raw),
+        academic_registry=build_default_academic_registry(),
+        oa_resolver_registry=build_default_oa_resolver_registry(),
+    )
+    enabled = [p for p in config.web.providers if p.enable_search or p.enable_fetch]
+    assert all(provider.credentials for provider in enabled)
+    assert all(provider.credentials for provider in config.academic.providers)
+    assert all(provider.credentials for provider in config.llm.providers)
+    if enable_templates:
+        assert config.oa_resolver is not None and config.oa_resolver.credentials
+
+    # Diagnose the actual on-disk example; all applicable network traffic is local mock.
+    paths = RuntimePaths.from_home(tmp_path)
+    paths.config_file.parent.mkdir(parents=True)
+    paths.config_file.write_text(
+        (_ROOT / "config.example.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    observed: list[httpx.Request] = []
+
+    def health(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        assert request.method == "GET" and request.url.path == "/health"
+        return httpx.Response(200, json={"status": "ok", "data": {"daemon": "running"}})
+
+    from functools import partial
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(health))
+    )
+    report = await run_doctor(paths, environ=_stub_environment(load_toml(paths.config_file)))
+    assert report.exit_code == 0
+    assert all(request.url.path == "/health" for request in observed)
+
+
+async def test_free_fragment_doctor_and_unlimited_second_member(tmp_path: Path) -> None:
+    from agent_search_gateway.doctor import run_doctor
+    from tests.doctor._support import environment_name, write_valid_config
+
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    fragment = (_ROOT / "config.youcom-free.fragment.toml").read_text(encoding="utf-8")
+    with paths.config_file.open("a", encoding="utf-8") as target:
+        target.write("\n" + fragment)
+        target.write(
+            "\nmax_concurrency = 2\nmin_interval_seconds = 0.5\n"
+            "rate_limits = [{ requests = 10, period_seconds = 1 }]\n"
+        )
+        target.write(
+            '\n[[web_providers.youcom.credentials]]\napi_url = "https://api.you.com/mcp/free"\n'
+        )
+    raw = load_toml(paths.config_file)
+    config = resolve_config(raw, build_default_registry(), {environment_name(): "present"})
+    [provider] = config.web.providers
+    assert len(provider.credentials) == 2
+    first, second = provider.credentials
+    assert first.api_key is second.api_key is None
+    assert first.max_concurrency == 2
+    assert first.rate_policy.min_interval_seconds == 0.5
+    assert [(w.requests, w.period_seconds) for w in first.rate_policy.windows] == [(10, 1)]
+    assert second.max_concurrency is None
+    assert second.rate_policy.windows == ()
+    assert second.rate_policy.min_interval_seconds is None
+    report = await run_doctor(paths, environ={environment_name(): "present"})
+    assert report.exit_code == 0
+    for index in range(2):
+        assert any(
+            f"web_providers.youcom.credentials[{index}]" in check.message for check in report.checks
+        )
+
+
 def test_documented_rate_reference_covers_registered_non_llm_providers() -> None:
     registries = (
         build_default_registry(),
@@ -97,30 +200,41 @@ def test_example_input_limits_and_provider_rate_policies() -> None:
         *resolved.academic.providers,
     ]
     for provider in providers:
-        policy = provider.rate_policy
+        if not provider.credentials:
+            continue
+        policy = provider.credentials[0].rate_policy
         assert [(w.requests, w.period_seconds) for w in policy.windows] == expected_windows.get(
             provider.name, []
         ), provider.name
         assert policy.min_interval_seconds == intervals.get(provider.name), provider.name
-        assert provider.max_concurrency == capacities.get(provider.name, 3), provider.name
+        source = (
+            raw["web_providers"]
+            if provider in resolved.web.providers
+            else raw["academic_providers"]
+        )
+        assert isinstance(source, dict)
+        member = source[provider.name]["credentials"][0]
+        expected_capacity = capacities.get(provider.name, member.get("max_concurrency"))
+        assert provider.credentials[0].max_concurrency == expected_capacity, provider.name
         assert {"rate_limits", "min_interval_seconds", "max_concurrency"}.isdisjoint(
             provider.options
         )
 
     openalex = next(p for p in resolved.academic.providers if p.name == "openalex")
-    assert openalex.api_key_env == "OPENALEX_API_KEY"
-    assert openalex.api_key is not None
+    assert openalex.credentials[0].api_key_env == "OPENALEX_API_KEY"
+    assert openalex.credentials[0].api_key is not None
     assert resolved.oa_resolver is None
     resolvers = raw["oa_resolvers"]
     assert isinstance(resolvers, dict)
     unpaywall = resolvers["unpaywall"]
     assert unpaywall["enabled"] is False
-    unpaywall.update(enabled=True, contact_email_env="UNPAYWALL_CONTACT_EMAIL")
+    unpaywall["enabled"] = True
+    unpaywall["credentials"][0]["contact_email_env"] = "UNPAYWALL_CONTACT_EMAIL"
     enabled = resolve_config(
         raw, web, _stub_environment(raw), academic_registry=academic, oa_resolver_registry=oa
     ).oa_resolver
     assert enabled is not None
-    assert [(w.requests, w.period_seconds) for w in enabled.rate_policy.windows] == [
+    assert [(w.requests, w.period_seconds) for w in enabled.credentials[0].rate_policy.windows] == [
         (100000, 86400)
     ]
     assert "rate_limits" not in enabled.options
@@ -236,39 +350,20 @@ def test_request_selectors_are_documented_in_public_policy_and_changelog() -> No
 
 def _stub_environment(data: dict[str, object]) -> dict[str, str]:
     names: set[str] = set()
-    web = data.get("web_providers")
-    if isinstance(web, dict):
-        for value in web.values():
-            if isinstance(value, dict):
-                name = value.get("api_key_env")
-                if isinstance(name, str):
-                    names.add(name)
-    llm = data.get("llm_providers")
-    if isinstance(llm, dict):
-        for value in llm.values():
-            if isinstance(value, dict):
-                name = value.get("api_key_env")
-                if isinstance(name, str):
-                    names.add(name)
-    academic = data.get("academic_providers")
-    if isinstance(academic, dict):
-        for value in academic.values():
-            if not isinstance(value, dict):
-                continue
-            for key in ("api_key_env", "contact_email_env"):
-                name = value.get(key)
-                if isinstance(name, str):
-                    names.add(name)
-    resolvers = data.get("oa_resolvers")
-    if isinstance(resolvers, dict):
-        for value in resolvers.values():
-            if not isinstance(value, dict):
-                continue
-            for key in ("api_key_env", "contact_email_env"):
-                name = value.get(key)
-                if isinstance(name, str):
-                    names.add(name)
-    return {name: "x" for name in names}
+
+    def collect(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.endswith("_env") and isinstance(child, str):
+                    names.add(child)
+                else:
+                    collect(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect(child)
+
+    collect(data)
+    return {name: "docs@example.test" if "EMAIL" in name else "x" for name in names}
 
 
 @pytest.mark.parametrize("custom", [False, True], ids=["example", "custom-direct"])
@@ -315,7 +410,8 @@ async def test_example_http_options_reach_runtime_requests(
     # Retain the example's policies; only one arXiv request is made per case.
     data["web_providers"] = {"firecrawl": firecrawl, "zhihu": zhihu}
     data["academic_providers"] = {"arxiv": arxiv}
-    unpaywall.update(enabled=True, contact_email_env="TEST_CONTACT")
+    unpaywall["enabled"] = True
+    unpaywall["credentials"][0]["contact_email_env"] = "TEST_CONTACT"
     if custom:
         for table in (firecrawl, arxiv, unpaywall, chat):
             table["use_proxy"] = False
@@ -459,7 +555,7 @@ def test_example_config_loads_with_stub_secrets_and_readme_commands_match_cli_he
     parallel = next(item for item in resolved.web.providers if item.name == "parallel")
     assert parallel.enable_search is True
     assert parallel.enable_fetch is True
-    assert dict(parallel.options) == {
+    assert dict(parallel.credentials[0].options) == {
         "api_url": "https://api.parallel.ai",
         "mode": "turbo",
         "search_fetch_policy": {
@@ -518,11 +614,11 @@ def test_new_web_provider_examples_are_disabled_and_complete() -> None:
         assert isinstance(table, dict)
         assert table["enable_search"] is False
         assert table["enable_fetch"] is False
-        assert table["api_url"] == root
+        assert table["credentials"][0]["api_url"] == root
         if key_env is None:
-            assert "api_key_env" not in table
+            assert "api_key_env" not in table["credentials"][0]
         else:
-            assert table["api_key_env"] == key_env
+            assert table["credentials"][0]["api_key_env"] == key_env
 
 
 @pytest.mark.parametrize("name", ["doubao", "youcom", "keenable", "open_websearch"])
@@ -536,31 +632,32 @@ def test_new_web_example_resolves_without_new_credentials_and_can_be_enabled(nam
         environment.pop(variable, None)
     resolved = resolve_config(data, build_default_registry(), environment)
     configured = next(item for item in resolved.web.providers if item.name == name)
-    assert configured.secret is None
-    assert configured.api_key_env is None
+    assert configured.credentials == ()
     table = web[name]
     assert isinstance(table, dict)
     table["enable_search"] = True
     table["enable_fetch"] = True
     data["web_providers"] = {name: table}
-    key_env = table.get("api_key_env")
+    key_env = table["credentials"][0].get("api_key_env")
     if isinstance(key_env, str):
         environment[key_env] = "x"
     enabled = resolve_config(data, build_default_registry(), environment)
     [configured] = enabled.web.providers
     assert configured.enable_search and configured.enable_fetch
-    assert (configured.secret is not None) is (name != "open_websearch")
-    assert configured.api_key_env == key_env
+    assert (configured.credentials[0].api_key is not None) is (name != "open_websearch")
+    assert configured.credentials[0].api_key_env == key_env
 
 
-def test_zhihu_example_explains_account_quotas_and_inherited_limits() -> None:
+def test_zhihu_example_explains_account_quotas_and_explicit_limits() -> None:
     example = (_ROOT / "config.example.toml").read_text(encoding="utf-8")
     section = example.split("[web_providers.zhihu]", 1)[1].split("\n[", 1)[0]
     assert "QPS" in section and "account quotas" in section
-    assert "default_max_concurrency" in section and "429" in section
+    assert "default_max_concurrency" not in section
     web = load_toml(_ROOT / "config.example.toml")["web_providers"]
     assert isinstance(web, dict)
     assert {"max_concurrency", "rate_limits", "min_interval_seconds"}.isdisjoint(web["zhihu"])
+    [member] = web["zhihu"]["credentials"]
+    assert "rate_limits" not in member and "min_interval_seconds" not in member
 
 
 def test_baiduqianfan_example_can_enable_search_with_its_configured_key() -> None:
@@ -575,14 +672,17 @@ def test_baiduqianfan_example_can_enable_search_with_its_configured_key() -> Non
     environment.pop(key_env, None)
     registry = build_default_registry()
     [disabled] = resolve_config(data, registry, environment).web.providers
-    assert disabled.api_key_env is None and disabled.secret is None
+    assert disabled.credentials == ()
 
     table["enable_search"] = True
     environment[key_env] = "example-service-key"
     [enabled] = resolve_config(data, registry, environment).web.providers
     assert enabled.enable_search and not enabled.enable_fetch
-    assert enabled.api_key_env == key_env
-    assert enabled.secret is not None and enabled.secret.reveal() == environment[key_env]
+    assert enabled.credentials[0].api_key_env == key_env
+    assert (
+        enabled.credentials[0].api_key is not None
+        and enabled.credentials[0].api_key.reveal() == environment[key_env]
+    )
 
 
 @pytest.mark.parametrize(
@@ -625,12 +725,17 @@ async def test_documented_youcom_mcp_example_builds_without_credentials(
     assert set(replacement) == {"web_providers"}
     assert set(replacement["web_providers"]) == {"youcom"}
     table = replacement["web_providers"]["youcom"]
-    assert table["api_url"] == "https://api.you.com/mcp/free"
-    assert "api_key_env" not in table
+    [member] = table["credentials"]
+    assert member["api_url"] == "https://api.you.com/mcp/free"
+    assert "api_key_env" not in member
     assert table["enable_search"] is True
     assert table["enable_fetch"] is True
 
-    data = load_toml(_ROOT / "config.example.toml")
+    from tests.doctor._support import write_valid_config
+
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    data = load_toml(paths.config_file)
     data["web_providers"] = replacement["web_providers"]
     environment = _stub_environment(data)
     if existing_key:
@@ -640,9 +745,10 @@ async def test_documented_youcom_mcp_example_builds_without_credentials(
     resolved = resolve_config(data, build_default_registry(), environment)
     [configured] = resolved.web.providers
     assert configured.name == "youcom"
-    assert configured.api_key_env is None
-    assert configured.secret is None
-    assert dict(configured.options) == {"api_url": "https://api.you.com/mcp/free"}
+    [credential] = configured.credentials
+    assert credential.api_key_env is None
+    assert credential.api_key is None
+    assert dict(credential.options) == {"api_url": "https://api.you.com/mcp/free"}
     assert configured.enable_search and configured.enable_fetch
     requests: list[httpx.Request] = []
 
@@ -824,19 +930,19 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
     assert "scrape" not in web
 
     by_name = {item.name: item for item in resolved.web.providers}
-    assert dict(by_name["brightdata"].options) == {
+    assert dict(by_name["brightdata"].credentials[0].options) == {
         "api_url": "https://api.brightdata.com",
         "search_zone": "example_serp_zone",
         "fetch_zone": "example_unlocker_zone",
     }
-    assert dict(by_name["scrape_do"].options) == {"api_url": "https://api.scrape.do"}
+    assert dict(by_name["scrape_do"].credentials[0].options) == {"api_url": "https://api.scrape.do"}
 
     for name, api_url, expected_env_name in (
         ("yuanbao", "https://api.wsa.cloud.tencent.com", "YUANBAO_API_KEY"),
         ("zhihu", "https://developer.zhihu.com", "ZHIHU_ACCESS_SECRET"),
     ):
-        assert dict(by_name[name].options) == {"api_url": api_url}
-        assert by_name[name].api_key_env == expected_env_name
+        assert dict(by_name[name].credentials[0].options) == {"api_url": api_url}
+        assert by_name[name].credentials[0].api_key_env == expected_env_name
 
     expected_capabilities = {
         "brightdata": (True, True),
@@ -869,24 +975,24 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
     for name in credentialed_names:
         raw = web[name]
         assert isinstance(raw, dict)
-        api_key_env = raw.get("api_key_env")
+        api_key_env = raw["credentials"][0].get("api_key_env")
         assert isinstance(api_key_env, str)
         assert api_key_env.strip()
         registration = registry.require(name)
         assert registration.requires_api_key is True
         configured = by_name[name]
-        assert configured.api_key_env == api_key_env
-        assert configured.secret is not None
+        assert configured.credentials[0].api_key_env == api_key_env
+        assert configured.credentials[0].api_key is not None
 
     jina_raw = web["jina"]
     assert isinstance(jina_raw, dict)
-    assert "api_key_env" not in jina_raw
+    assert "api_key_env" not in jina_raw["credentials"][0]
     jina_registration = registry.require("jina")
     assert jina_registration.requires_api_key is False
     jina = by_name["jina"]
-    assert jina.api_key_env is None
-    assert jina.secret is None
-    assert dict(jina.options) == {"api_url": "https://r.jina.ai"}
+    assert jina.credentials[0].api_key_env is None
+    assert jina.credentials[0].api_key is None
+    assert dict(jina.credentials[0].options) == {"api_url": "https://r.jina.ai"}
 
     readme = (_ROOT / "README.md").read_text(encoding="utf-8")
     expected_rows = {
@@ -918,7 +1024,7 @@ def test_example_tinyfish_uses_documented_public_endpoints() -> None:
     resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
     tinyfish = next(item for item in resolved.web.providers if item.name == "tinyfish")
 
-    assert dict(tinyfish.options) == {
+    assert dict(tinyfish.credentials[0].options) == {
         "search_api_url": "https://api.search.tinyfish.ai",
         "fetch_api_url": "https://api.fetch.tinyfish.ai",
     }
@@ -959,8 +1065,8 @@ async def test_tinyfish_example_and_custom_endpoints_reach_the_runtime_http_boun
     tinyfish = web["tinyfish"]
     assert isinstance(tinyfish, dict)
     if custom:
-        tinyfish["search_api_url"] = "https://tinyfish.example.test/proxy/search"
-        tinyfish["fetch_api_url"] = "https://tinyfish.example.test/proxy/fetch"
+        tinyfish["credentials"][0]["search_api_url"] = "https://tinyfish.example.test/proxy/search"
+        tinyfish["credentials"][0]["fetch_api_url"] = "https://tinyfish.example.test/proxy/fetch"
     data["web_providers"] = {"tinyfish": tinyfish}
     resolved = resolve_config(data, build_default_registry(), _stub_environment(data))
     requests: list[httpx.Request] = []

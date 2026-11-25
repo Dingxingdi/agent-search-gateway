@@ -8,6 +8,16 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking configuration change.** HTTP Web, academic, OA and LLM providers now require ordered `[[namespace.provider.credentials]]` arrays. Move existing endpoint, environment-variable authentication and limit fields into each member. Old provider-level fields and `default_max_concurrency` are rejected, including mixed configurations. User files are never converted automatically; write previous concurrency values explicitly to preserve them.
+- Limits are independently optional, with no global/provider default cap. Capacity counts logical operations including retries; rate policies count physical HTTP attempts. HTTPX has unlimited active connections. Agent limits remain optional CLI-invocation limits on each alias.
+- Credential pools select with `round_robin` (default) or `fill_first`. Existing retries finish on one credential before terminal execution failure tries another untried member, for one pass without failure memory or cooldown. Empty results and partial success do not switch credentials.
+- `web_providers.fetch_order` orders enabled Fetch providers, appending unlisted enabled providers in TOML order and preferring currently ready pools. Credential fallback precedes provider fallback.
+- Search retains naturally returned body candidates without running body validation stages or requesting full text. Fetch advances explicit URL states, rejects cached candidates without mixing body pairs, and reuses READY content and its Safety result. Focus summaries remain request-local; admission, unavailable responses and the absence of refresh/TTL remain unchanged.
+- Doctor validates and labels every configured HTTP credential separately and runs only existing applicable health checks, without paid Search/Fetch probes.
+
+
 ## [2.0.0] - 2026-11-24
 
 ### Changed

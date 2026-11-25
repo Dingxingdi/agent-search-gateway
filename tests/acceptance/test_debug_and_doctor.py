@@ -12,7 +12,7 @@ import pytest
 from agent_search_gateway.cli import build_parser, run_command
 from agent_search_gateway.daemon import ForegroundDaemon
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation, RetryPolicy
+from agent_search_gateway.models import LLMInvocation, RetryPolicy, URLStatus
 from agent_search_gateway.observability import (
     DebugLoggingSession,
     SecretValue,
@@ -213,10 +213,9 @@ async def test_debug_cli_workflow_preserves_public_contract_and_correlates_trace
     assert any(
         "event=provider_completed" in line and "provider=keyword" in line for line in request_lines
     )
-    assert any("event=body_accepted" in line for line in request_lines)
-    assert any(
-        "event=body_rejected" in line and "reason=judge_rejected" in line for line in request_lines
-    )
+    assert not any("event=body_accepted" in line for line in request_lines)
+    assert not any("event=body_rejected" in line for line in request_lines)
+    assert not any("event=llm_stage_started" in line for line in request_lines)
     assert any(
         "event=results_written" in line and str(result_path) in line for line in request_lines
     )
@@ -296,7 +295,10 @@ async def test_doctor_cli_enabled_open_websearch_reports_health_without_runtime(
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
-        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+        target.write(
+            "[web_providers.open_websearch]\nenable_search = true\n"
+            "[[web_providers.open_websearch.credentials]]\n"
+        )
 
     def forbidden(*args: object, **kwargs: object) -> None:
         pytest.fail("doctor unexpectedly built the runtime, ran a search, or spawned a process")
@@ -326,7 +328,11 @@ async def test_doctor_cli_enabled_open_websearch_reports_health_without_runtime(
     assert [(request.method, str(request.url)) for request in requests] == [
         ("GET", "http://127.0.0.1:3210/health")
     ]
-    assert stdout.getvalue().splitlines()[-2:] == [line, "[info] daemon not running"]
+    health, socket = stdout.getvalue().splitlines()[-2:]
+    assert "web_providers.open_websearch.credentials[0]" in health
+    assert health.startswith(line.split(" ", 1)[0])
+    assert health.endswith(line.split(" ", 1)[1])
+    assert socket == "[info] daemon not running"
     assert stderr.getvalue() == ""
     assert code == expected_code
 
@@ -704,16 +710,19 @@ async def test_keyword_redirect_body_rejection_logs_omit_signed_target_query(
 
     assert json.loads(path.read_text()) == {"url": target, "abstract": "Retained abstract"}
     snapshot = store.get(normalize_url(target))
-    assert snapshot is not None and snapshot.raw_content == snapshot.content == ""
+    assert snapshot is not None
+    assert snapshot.raw_content == "Rejected body" and snapshot.content == ""
+    assert snapshot.status is URLStatus.NEED_JUDGE
     assert store.get(normalize_url(wrapper)) is None
     logged = log_file.read_text()
     lines = logged.splitlines()
     for event, reason in [
         ("candidate_rejected", "empty_abstract"),
         ("candidate_rejected", "duplicate"),
-        ("body_rejected", "judge_rejected"),
     ]:
         assert any(f"event={event}" in line and f"reason={reason}" in line for line in lines)
+    assert not any("event=body_rejected" in line for line in lines)
+    assert not any("event=llm_stage_started" in line for line in lines)
     summary = [line for line in lines if "event=provider_candidates_summary" in line]
     assert len(summary) == 1
     assert "accepted=2" in summary[0] and "rejected=1" in summary[0] and "rewritten=1" in summary[0]

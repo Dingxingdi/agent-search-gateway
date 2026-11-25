@@ -10,7 +10,7 @@ from agent_search_gateway.providers.academic.defaults import (
 )
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
-from tests.runtime.conftest import only_member
+from tests.runtime.conftest import configured_capacity
 from tests.runtime.test_runtime_assembly import _config, _CountingAsyncClient
 
 
@@ -67,7 +67,7 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
         "openalex",
     ]
     assert runtime.oa_resolver is None
-    assert [only_member(p).capacity.limit for p in runtime.academic_search_providers] == [4, 2]
+    assert [configured_capacity(p).limit for p in runtime.academic_search_providers] == [4, 2]
     assert (
         runtime.search_orchestrator._paper_aggregator
         is runtime.paper_search_orchestrator.aggregator

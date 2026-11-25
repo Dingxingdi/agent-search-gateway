@@ -23,7 +23,7 @@ from agent_search_gateway.providers.web.youcom import YouComAdapter
 from agent_search_gateway.rate_limit import make_rate_gate
 from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
-from tests.runtime.conftest import only_member
+from tests.runtime.conftest import configured_capacity, only_member
 from tests.support.controlled import ManualClock
 
 _ADAPTERS: dict[str, type[object]] = {
@@ -123,6 +123,63 @@ async def _build_runtime(
     )
 
 
+async def test_gate_identity_is_known_before_selection_and_after_release(
+    tmp_path: Path, client_factory: _ClientFactory, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    name = "open_websearch"
+    config = _provider_config(name)
+    config["credentials"] = [{"max_concurrency": 1, "min_interval_seconds": 60}] * 2
+    runtime = await _build_runtime(tmp_path, {name: config}, client_factory)
+    try:
+        provider = runtime.web_fetch_providers[0]
+        first = await provider.try_reserve_fetch()
+        second = await provider.try_reserve_fetch()
+        assert first is not None and second is not None
+        assert await provider.try_reserve_fetch() is None
+        for reserved in (second, first):
+            rate = reserved.member.rate
+            assert rate is not None
+            await rate.permit(timeout_seconds=1)
+            assert rate.next_available_in_seconds() > 0
+            await reserved.release()
+        blocked = asyncio.create_task(runtime.web_search_providers[0].search("query"))
+        try:
+            async with asyncio.timeout(1):
+                while not any(
+                    getattr(record, "gateway_event", None) == "credential_waiting"
+                    for record in caplog.records
+                ):
+                    await asyncio.sleep(0)
+        finally:
+            blocked.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await blocked
+    finally:
+        await runtime.aclose()
+
+    def indices(event: str) -> list[int]:
+        fields = [
+            vars(record)["gateway_fields"]
+            for record in caplog.records
+            if getattr(record, "gateway_event", None) == event
+        ]
+        assert all(f["provider"] == name and f["namespace"] == "web" for f in fields)
+        return [f["credential_index"] for f in fields]
+
+    assert indices("quota_acquired") == [0, 1]
+    assert indices("quota_waiting") == [0, 1]
+    assert indices("quota_released") == [1, 0]
+    assert indices("rate_gate_acquired") == [1, 0]
+    assert set(indices("credential_waiting")) == {0, 1}
+    cancelled = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "credential_cancelled"
+    ]
+    assert cancelled == [{"namespace": "web", "provider": name}]
+
+
 def _response(name: str, *, search: bool) -> httpx.Response:
     if search:
         payloads: dict[str, object] = {
@@ -151,7 +208,7 @@ async def test_new_web_provider_shares_adapter_and_closes_client_once(
         [fetch] = runtime.web_fetch_providers
         assert search is cast(object, fetch)
         assert isinstance(only_member(search).adapter, _ADAPTERS[name])
-        assert only_member(runtime.web_search_providers[0]).capacity.limit == 7
+        assert configured_capacity(runtime.web_search_providers[0]).limit == 7
         assert len(client_factory.clients) == 3
         assert not any(client.close_calls for client in client_factory.clients)
     finally:
@@ -224,7 +281,7 @@ async def test_new_web_provider_obeys_capability_switches(
         )
         assert len(client_factory.clients) == 2 + int(search_enabled or fetch_enabled)
         for facade in (*runtime.web_search_providers, *runtime.web_fetch_providers):
-            assert only_member(facade).capacity.limit == 7
+            assert configured_capacity(facade).limit == 7
     finally:
         await runtime.aclose()
 
@@ -301,13 +358,13 @@ async def test_new_web_provider_search_and_fetch_contend_for_runtime_quota(
             )
             await scheduler_waiting.wait()
             assert not fetch_entered.is_set()
-            assert only_member(runtime.web_search_providers[0]).capacity.in_use == 1
+            assert configured_capacity(runtime.web_search_providers[0]).in_use == 1
             release_search.set()
             await fetch_entered.wait()
         assert Path(search.result()).is_file()
         assert fetch.result().kind == "accepted"
-        assert only_member(runtime.web_search_providers[0]).capacity.in_use == 0
-        assert only_member(runtime.web_search_providers[0]).capacity.max_observed_in_use == 1
+        assert configured_capacity(runtime.web_search_providers[0]).in_use == 0
+        assert configured_capacity(runtime.web_search_providers[0]).max_observed_in_use == 1
     finally:
         release_search.set()
         logger.removeHandler(waiting_handler)
@@ -349,7 +406,7 @@ engines = ["custom_z", "bing", "custom_z", " custom_a "]
             },
             {"url": str(_TARGET)},
         ]
-        assert only_member(runtime.web_search_providers[0]).capacity.limit == 7
+        assert configured_capacity(runtime.web_search_providers[0]).limit == 7
         assert len(client_factory.clients) == 3
     finally:
         await runtime.aclose()
@@ -435,7 +492,7 @@ async def test_new_web_provider_builds_with_shared_rate_fields(
         [fetch] = runtime.web_fetch_providers
         assert search is cast(object, fetch)
         assert isinstance(only_member(search).adapter, _ADAPTERS[name])
-        assert only_member(runtime.web_search_providers[0]).capacity.limit == 7
+        assert configured_capacity(runtime.web_search_providers[0]).limit == 7
         gate = only_member(search).rate
         assert gate is not None
         assert only_member(search).adapter._http._rate_gate is gate
@@ -534,7 +591,11 @@ def _youcom_mcp_config(**options: object) -> dict[str, object]:
     options.setdefault("api_url", "https://api.you.com/mcp/free")
     config = _provider_config("youcom", **options)
     if "api_key_env" not in options:
-        config["credentials"][0].pop("api_key_env")
+        members = config["credentials"]
+        assert isinstance(members, list)
+        (member,) = members
+        assert isinstance(member, dict)
+        member.pop("api_key_env")
     return config
 
 
@@ -599,7 +660,7 @@ async def test_youcom_mcp_runtime_shares_adapter_executor_and_rate_gate(
         executor = only_member(search).adapter._http
         assert only_member(search).adapter._http is executor
         assert len(client_factory.clients) == 3
-        assert only_member(runtime.web_search_providers[0]).capacity.limit == 7
+        assert configured_capacity(runtime.web_search_providers[0]).limit == 7
         gate = only_member(search).rate
         assert gate is not None
         assert executor._rate_gate is gate
@@ -800,13 +861,13 @@ async def test_youcom_mcp_search_and_fetch_share_concurrency(
             )
             await scheduler_waiting.wait()
             assert not fetch_entered.is_set()
-            assert only_member(runtime.web_search_providers[0]).capacity.in_use == 1
+            assert configured_capacity(runtime.web_search_providers[0]).in_use == 1
             release_search.set()
             await fetch_entered.wait()
         assert Path(search.result()).is_file()
         assert fetch.result().kind == "accepted"
-        assert only_member(runtime.web_search_providers[0]).capacity.in_use == 0
-        assert only_member(runtime.web_search_providers[0]).capacity.max_observed_in_use == 1
+        assert configured_capacity(runtime.web_search_providers[0]).in_use == 0
+        assert configured_capacity(runtime.web_search_providers[0]).max_observed_in_use == 1
     finally:
         release_search.set()
         logger.removeHandler(waiting_handler)
@@ -854,7 +915,9 @@ async def test_provider_credential_endpoints_and_options(tmp_path: Path, name: s
         else:
             member = {"api_url": "https://api.you.com/mcp/free"}
         members.append(member)
-    web = {name: {"enable_search": True, "enable_fetch": True, "credentials": members}}
+    web: dict[str, object] = {
+        name: {"enable_search": True, "enable_fetch": True, "credentials": members}
+    }
     registry = build_default_registry()
     env_values = {"FIRST": "one", "SECOND": "two", "TEST_LLM": "example"}
     config = resolve_config(_config(web), registry, env_values)

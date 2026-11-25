@@ -9,7 +9,7 @@ from agent_search_gateway.errors import ErrorCode, InputFailure
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
-from tests.runtime.conftest import only_member
+from tests.runtime.conftest import configured_capacity
 from tests.runtime.test_runtime_assembly import _config, _environment
 
 
@@ -80,8 +80,8 @@ async def test_llm_selectors_do_not_match_client_protocol_or_fetch_namespace(
             )
         assert error.value.code is ErrorCode.BAD_REQUEST
         assert calls == []
-        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
-        assert only_member(runtime.llm_clients["secondary"]).capacity.max_observed_in_use == 0
+        assert configured_capacity(runtime.llm_clients["primary"]).max_observed_in_use == 0
+        assert configured_capacity(runtime.llm_clients["secondary"]).max_observed_in_use == 0
     finally:
         await runtime.aclose()
 
@@ -137,8 +137,8 @@ async def test_selected_runtime_invocation_keeps_payload_quota_and_assembly(tmp_
         assert body["messages"][-1]["content"] == "prompt"
         assert "provider" not in body and "scope" not in body
         assert "secondary" not in str(body["messages"])
-        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
-        assert only_member(runtime.llm_clients["secondary"]).capacity.max_observed_in_use == 1
+        assert configured_capacity(runtime.llm_clients["primary"]).max_observed_in_use == 0
+        assert configured_capacity(runtime.llm_clients["secondary"]).max_observed_in_use == 1
         assert (
             runtime.web_search_providers is web_search and runtime.web_fetch_providers is web_fetch
         )

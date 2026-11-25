@@ -1,8 +1,10 @@
 import asyncio
 import io
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -19,17 +21,22 @@ from agent_search_gateway.models import (
     LLMInvocation,
     RetryPolicy,
     SuccessResponse,
+    URLStatus,
 )
-from agent_search_gateway.observability import SecretValue, configure_debug_logging
+from agent_search_gateway.observability import SecretValue, configure_debug_logging, log_event
+from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
 from agent_search_gateway.orchestrators.paper import PaperSearchOrchestrator
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.protocol import send_request
 from agent_search_gateway.providers.contracts import ChatMessage, KeywordSearchHit, PaperSearchHit
 from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.llm.openai_chat import OpenAIChatCompletionsClient
 from agent_search_gateway.providers.pooled import PooledAcademicProvider, PooledWebProvider
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 from agent_search_gateway.result_writer import ResultWriter
+from agent_search_gateway.scheduler.fetch import FetchScheduler
+from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.support.acceptance import AcceptanceRuntime
 from tests.support.agent_search import web_markdown
@@ -414,7 +421,7 @@ async def test_repeated_text_invocations_own_each_scope_terminal(
 
 @pytest.mark.parametrize(
     "phase",
-    ["keyword", "keyword_judge", "paper", "llm_web", "llm_paper", "agent_web", "agent_paper"],
+    ["keyword", "fetch_judge", "paper", "llm_web", "llm_paper", "agent_web", "agent_paper"],
 )
 async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, phase: str) -> None:
     entered = asyncio.Event()
@@ -458,6 +465,7 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         return ""
 
     invocation = LLMInvocation("owner", "model")
+    store = URLStore()
     web_gate, academic_gate = CapacityGate(1), CapacityGate(1)
     stages = LLMStages(
         {"owner": Client("owner")},
@@ -476,7 +484,7 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         llm_invocations=[invocation],
         agent_invocations=[AgentInvocation("owner", "model")],
         stages=stages,
-        store=URLStore(),
+        store=store,
         result_writer=ResultWriter(tmp_path),
     )
     paper = PaperSearchOrchestrator(
@@ -493,9 +501,21 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         result_writer=ResultWriter(tmp_path),
     )
     stderr = io.StringIO()
+    url = normalize_url("https://example.test")
+    if phase == "fetch_judge":
+        async with asyncio.timeout(1):
+            await search.keyword_search("prompt", request_id="12345678")
+        cached = store.get(url)
+        assert cached is not None and cached.status is URLStatus.NEED_JUDGE
+        assert not entered.is_set()
     session = configure_debug_logging(tmp_path / "cancel.log", stderr=stderr)
     try:
-        if phase.startswith("keyword"):
+        if phase == "fetch_judge":
+            fetch = FetchOrchestrator(
+                store=store, scheduler=FetchScheduler((), stages), stages=stages
+            )
+            operation = fetch.url_fetch(url)
+        elif phase == "keyword":
             operation = search.keyword_search("prompt", request_id="12345678")
         elif phase == "paper":
             operation = paper.paper_search("prompt", request_id="12345678")
@@ -521,10 +541,218 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         session.close()
     assert web_gate.in_use == academic_gate.in_use == 0
     for logged in (stderr.getvalue(), (tmp_path / "cancel.log").read_text()):
-        assert logged.count("event=provider_started") == 1
-        terminal = [line for line in logged.splitlines() if "event=provider_failed " in line]
-        assert len(terminal) == 1
-        assert "reason=cancelled" in terminal[0]
-        assert "event=provider_completed " not in logged
+        if phase == "fetch_judge":
+            assert store.get(url) is cached
+            assert logged.count("event=llm_stage_started ") == 1
+            terminal = [
+                line for line in logged.splitlines() if "event=llm_stage_cancelled " in line
+            ]
+            assert len(terminal) == 1
+            assert "provider=owner stage=judge " in terminal[0]
+            assert "model=model" in terminal[0]
+            assert "event=llm_stage_failed " not in logged
+            assert "event=llm_stage_completed " not in logged
+            assert "event=url_state_committed " not in logged
+        else:
+            assert logged.count("event=provider_started") == 1
+            terminal = [line for line in logged.splitlines() if "event=provider_failed " in line]
+            assert len(terminal) == 1
+            assert "reason=cancelled" in terminal[0]
+            assert "event=provider_completed " not in logged
         assert "traceback=" not in logged
         assert "results_written" not in logged
+
+
+def _event_fields(caplog: pytest.LogCaptureFixture, event: str) -> list[dict[str, Any]]:
+    return [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == event
+    ]
+
+
+async def test_concurrent_credential_attempts_have_safe_independent_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    sends: dict[tuple[str, str], int] = {}
+    branches = asyncio.Barrier(4)
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content)["model"]
+        key = (request.url.host, model)
+        attempt = sends[key] = sends.get(key, 0) + 1
+        if attempt == 1:
+            await branches.wait()
+            return httpx.Response(503)
+        if attempt == 2:
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"choices": [{"message": {"content": model}}]})
+
+    policy = RetryPolicy(2, 0, 0, 1)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        clients = [
+            OpenAIChatCompletionsClient(
+                name="logical",
+                api_url=f"https://{host}.example.test",
+                secret=SecretValue("fixture"),
+                executor=HttpJsonExecutor(http, policy, provider_name="logical"),
+                retry_policy=policy,
+            )
+            for host in ("a", "b")
+        ]
+        pool = CredentialPool("llm", "logical", [CredentialMember(c) for c in clients])
+
+        async def operation(client: OpenAIChatCompletionsClient) -> list[str]:
+            # A multi-branch adapter runs child tasks under one selected credential.
+            return await asyncio.gather(
+                *(client.complete_text(LLMInvocation("logical", model), ()) for model in ("x", "y"))
+            )
+
+        async with asyncio.timeout(3):
+            results = await asyncio.gather(pool.invoke(operation), pool.invoke(operation))
+        assert list(results) == [["x", "y"], ["x", "y"]]
+
+    assert len(sends) == 4 and set(sends.values()) == {3}
+    attempts = _event_fields(caplog, "http_attempt_started")
+    assert len(attempts) == 12
+    for fields in attempts:
+        host = ("a", "b")[fields["credential_index"]]
+        assert fields["endpoint"].startswith(f"https://{host}.example.test/")
+        assert (fields["namespace"], fields["provider"], fields["stage"]) == (
+            "llm",
+            "logical",
+            "llm",
+        )
+    for index in (0, 1):
+        assert sorted(
+            (f["protocol_attempt"], f["attempt"])
+            for f in attempts
+            if f["credential_index"] == index
+        ) == [(1, 1), (1, 1), (1, 2), (1, 2), (2, 1), (2, 1)]
+        retries = [
+            f for f in _event_fields(caplog, "provider_retrying") if f["credential_index"] == index
+        ]
+        assert {(f["model"], f["retry_scope"], f["next_attempt"]) for f in retries} == {
+            ("x", "protocol", 2),
+            ("y", "protocol", 2),
+        }
+
+
+async def test_pool_fallback_and_exhaustion_are_sanitized(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    pool = CredentialPool("academic", "logical", [CredentialMember(i) for i in range(2)])
+    logger = logging.getLogger("agent_search_gateway.test")
+    failure = ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "untrusted failure detail")
+    outer = CredentialPool("web", "parent", [CredentialMember(None)])
+
+    async def fail(member: int) -> None:
+        log_event(logger, logging.DEBUG, "member_probe", member=member)
+        raise failure
+
+    async def nested(_: None) -> None:
+        with pytest.raises(ExecutionFailure) as caught:
+            await pool.invoke(fail)
+        assert caught.value is failure
+        log_event(logger, logging.DEBUG, "parent_probe")
+
+    await outer.invoke(nested)
+    log_event(logger, logging.DEBUG, "outside_probe")
+    assert _event_fields(caplog, "parent_probe") == [
+        {"namespace": "web", "provider": "parent", "credential_index": 0}
+    ]
+    assert _event_fields(caplog, "outside_probe") == [{}]
+    assert [f["credential_index"] for f in _event_fields(caplog, "member_probe")] == [0, 1]
+    assert [f["credential_index"] for f in _event_fields(caplog, "credential_selected")] == [
+        0,
+        0,
+        1,
+    ]
+    assert [f["credential_index"] for f in _event_fields(caplog, "credential_fallback")] == [0]
+    assert [f["credential_index"] for f in _event_fields(caplog, "credential_exhausted")] == [1]
+    for event in ("credential_fallback", "credential_exhausted"):
+        for fields in _event_fields(caplog, event):
+            assert fields["reason"] == "execution_failure"
+            assert fields["namespace"] == "academic" and fields["provider"] == "logical"
+            assert failure.message not in str(fields)
+
+
+async def test_credential_sink_failure_preserves_result_error_and_cleanup(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    observed: list[str] = []
+
+    def broken_sink(record: logging.LogRecord) -> None:
+        observed.append(vars(record)["gateway_event"])
+        raise OSError("sink unavailable")
+
+    monkeypatch.setattr(caplog.handler, "emit", broken_sink)
+    gate = CapacityGate(
+        1,
+        provider="logical",
+        quota_kind="web",
+        logger=logging.getLogger("agent_search_gateway.test"),
+    )
+    pool = CredentialPool("web", "logical", [CredentialMember(1, gate)])
+    failure = ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "operation failed")
+
+    async def fail(_: int) -> None:
+        raise failure
+
+    async def succeed(value: int) -> int:
+        return value
+
+    with pytest.raises(ExecutionFailure) as caught:
+        await pool.invoke(fail)
+    assert caught.value is failure
+    assert await pool.invoke(succeed) == 1
+    assert gate.in_use == 0
+    assert {"credential_selected", "credential_exhausted", "quota_released"} <= set(observed)
+
+
+def test_url_state_sink_failure_preserves_committed_record(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.test/committed")
+    observed = []
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway.url_store")
+
+    def broken_sink(record: logging.LogRecord) -> None:
+        observed.append((vars(record)["gateway_event"], store.get(url)))
+        raise OSError("sink unavailable")
+
+    monkeypatch.setattr(caplog.handler, "emit", broken_sink)
+    committed = store.admit(url, "abstract")
+    assert store.get(url) is committed
+    assert observed == [("url_state_committed", committed)]
+
+
+async def test_url_state_events_follow_atomic_commits(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
+    store = URLStore()
+    url = normalize_url("https://example.test/item")
+    body = "Page body must stay out of state events"
+    await store.admit_candidate(url, "abstract", raw_content=body)
+    async with store.serialization(url):
+        blocked = asyncio.create_task(store.admit_candidate(url, "duplicate", content=body))
+        await asyncio.sleep(0)
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
+        store.accept_candidate(url, raw_content=body)
+        with pytest.raises(ValueError):
+            store.set_clean_content(url, " ")
+        store.set_clean_content(url, body)
+        store.mark_ready(url)
+    assert store.admit(url, "duplicate").status.value == "ready"
+    transitions = _event_fields(caplog, "url_state_committed")
+    assert [(f["previous_status"], f["status"]) for f in transitions] == [
+        (None, "need_fetch"),
+        ("need_fetch", "need_judge"),
+        ("need_judge", "need_clean"),
+        ("need_clean", "need_safety"),
+        ("need_safety", "ready"),
+    ]
+    assert all(body not in str(f) and str(url) not in str(f) for f in transitions)

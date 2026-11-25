@@ -236,7 +236,8 @@ async def test_live_academic(provider: str) -> None:
     obs = _Observation(provider, auth)
     with _probe(obs, secrets):
         async with httpx.AsyncClient(
-            event_hooks={"request": [obs.request], "response": [obs.response]}
+            limits=httpx.Limits(max_connections=None),
+            event_hooks={"request": [obs.request], "response": [obs.response]},
         ) as client:
             executor = HttpJsonExecutor(
                 client,
@@ -270,7 +271,8 @@ async def test_live_llm_large_input() -> None:
     obs = _Observation("llm_large_input", "bearer", cap=131072)
     with _probe(obs, (key,)):
         async with httpx.AsyncClient(
-            event_hooks={"request": [obs.request], "response": [obs.response]}
+            limits=httpx.Limits(max_connections=None),
+            event_hooks={"request": [obs.request], "response": [obs.response]},
         ) as client:
             executor = HttpJsonExecutor(client, _POLICY, provider_name="live_llm")
             llm = OpenAIChatCompletionsClient(

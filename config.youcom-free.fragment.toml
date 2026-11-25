@@ -5,4 +5,7 @@
 [web_providers.youcom]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.youcom.credentials]]
 api_url = "https://api.you.com/mcp/free"
+# No limits configured: no capacity or rate gate.

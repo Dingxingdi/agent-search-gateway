@@ -140,4 +140,4 @@ async def _run(env: Mapping[str, str], client_factory: Callable[[], httpx.AsyncC
 
 
 async def test_live_baidu_search() -> None:
-    await _run(os.environ, httpx.AsyncClient)
+    await _run(os.environ, lambda: httpx.AsyncClient(limits=httpx.Limits(max_connections=None)))

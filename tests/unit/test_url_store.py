@@ -65,9 +65,7 @@ async def test_candidate_meaningfulness_preserves_nonempty_text(
 ) -> None:
     store = URLStore()
     url = normalize_url("https://example.com/page")
-    record = await store.admit_candidate(
-        url, "Abstract", raw_content=raw_content, content=content
-    )
+    record = await store.admit_candidate(url, "Abstract", raw_content=raw_content, content=content)
     assert record.raw_content == (raw_content if raw_content.strip() else "")
     assert record.content == (content if content.strip() else "")
     assert record.status is status
@@ -149,9 +147,7 @@ async def test_accept_candidate_commits_judged_whole_pair(
 async def test_rejected_pair_clears_both_fields_and_accepts_new_search_candidate() -> None:
     store = URLStore()
     url = normalize_url("https://example.com/page")
-    before = await store.admit_candidate(
-        url, "Abstract", raw_content="raw-A", content="content-A"
-    )
+    before = await store.admit_candidate(url, "Abstract", raw_content="raw-A", content="content-A")
     async with store.serialization(url):
         rejected = store.reject_candidate(url)
     assert rejected.status is URLStatus.NEED_FETCH

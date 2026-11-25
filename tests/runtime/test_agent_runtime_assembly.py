@@ -13,7 +13,7 @@ from agent_search_gateway.errors import ConfigFailure, ErrorCode, ExecutionFailu
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
-from tests.runtime.conftest import only_member
+from tests.runtime.conftest import configured_capacity
 from tests.runtime.test_runtime_assembly import _config, _CountingAsyncClient, _environment
 from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import web_markdown
@@ -86,8 +86,9 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
         fields = getattr(events[0], "gateway_fields", {})
         assert fields["provider"] == "primary" and fields["model"] == model
         assert fields["stage"] == "agent_process"
-        assert runtime.quotas.get_agent("primary").max_observed_in_use == 1
-        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
+        gate = runtime.quotas.get_agent("primary")
+        assert gate is not None and gate.max_observed_in_use == 1
+        assert configured_capacity(runtime.llm_clients["primary"]).max_observed_in_use == 0
     finally:
         await runtime.aclose()
 
@@ -141,7 +142,8 @@ async def test_runtime_anchors_agent_paths_before_invocation_cwd_changes(
     assert invocation_cwd not in (tmp_path, later_cwd)
     assert invocation_cwd.name.startswith("agent-search-")
     assert not invocation_cwd.exists()
-    assert quotas.get_agent("primary").in_use == 0
+    gate = quotas.get_agent("primary")
+    assert gate is not None and gate.in_use == 0
 
 
 async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias(

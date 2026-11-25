@@ -26,6 +26,7 @@ from agent_search_gateway.providers.academic.defaults import (
 )
 from agent_search_gateway.providers.contracts import ChatMessage, ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
+from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.registry import WebProviderRegistration
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.jina import JinaReaderAdapter
@@ -35,7 +36,7 @@ from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from agent_search_gateway.rate_limit import make_rate_gate
 from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
-from tests.runtime.conftest import only_member
+from tests.runtime.conftest import configured_capacity, only_member
 from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import web_markdown
 from tests.support.controlled import ManualClock
@@ -382,8 +383,8 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     assert isinstance(only_member(parallel_search).adapter, ParallelAdapter)
     assert id(parallel_search) == id(parallel_fetch)
     assert set(runtime.llm_clients) == {"primary", "secondary"}
-    assert [only_member(p).capacity.limit for p in runtime.web_fetch_providers] == [3, 4, 6]
-    assert [only_member(p).capacity.limit for p in runtime.llm_clients.values()] == [2, 5]
+    assert [configured_capacity(p).limit for p in runtime.web_fetch_providers] == [3, 4, 6]
+    assert [configured_capacity(p).limit for p in runtime.llm_clients.values()] == [2, 5]
     assert "RUNTIME_CREDENTIAL_SENTINEL" not in repr(runtime)
     assert "PARALLEL_CREDENTIAL_SENTINEL" not in repr(runtime)
 
@@ -461,8 +462,9 @@ async def test_runtime_assembles_service_key_search_provider_with_owned_resource
         assert provider.name == provider_name
         assert member.adapter._api_url == (default_api_url if api_url is None else api_url)
         assert runtime.web_fetch_providers == ()
+        assert isinstance(member.adapter._http, HttpJsonExecutor)
         assert member.adapter._http._client is clients[0]
-        assert member.capacity.limit == 7
+        assert member.capacity is not None and member.capacity.limit == 7
         assert set(runtime.llm_clients) == {"primary", "secondary"}
         assert len(clients) == 1 + len(runtime.llm_clients)
         assert len({id(client) for client in clients}) == len(clients)
@@ -509,7 +511,8 @@ async def test_runtime_assembles_credentialless_jina_fetch_provider(
     assert isinstance(member.adapter, JinaReaderAdapter)
     assert provider.name == "jina"
     assert member.adapter._api_url == "https://reader.example.test"
-    assert member.capacity.limit == 5
+    assert member.capacity is not None and member.capacity.limit == 5
+    assert isinstance(member.adapter._http, HttpJsonExecutor)
     assert member.adapter._http._client is clients[0]
 
     await runtime.aclose()
@@ -559,11 +562,12 @@ async def test_runtime_assembles_brightdata_with_one_shared_dual_adapter(
     [fetch_provider] = runtime.web_fetch_providers
     member = only_member(search_provider)
     assert isinstance(member.adapter, BrightDataAdapter)
-    assert search_provider is fetch_provider
-    assert member.capacity.limit == 7
+    assert id(search_provider) == id(fetch_provider)
+    assert member.capacity is not None and member.capacity.limit == 7
     assert member.adapter._api_url == "https://bright.example.test"
     assert member.adapter._search_zone == "search-zone"
     assert member.adapter._fetch_zone == "fetch-zone"
+    assert isinstance(member.adapter._http, HttpJsonExecutor)
     assert member.adapter._http._client is clients[0]
     assert "BRIGHT_CREDENTIAL_SENTINEL" not in repr(runtime)
 
@@ -738,7 +742,7 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
         assert member.rate is None
         assert member.adapter._executor._rate_gate is member.rate
     assert only_member(runtime.academic_search_providers[0]).capacity is None
-    assert only_member(runtime.academic_search_providers[-1]).capacity.limit == 4
+    assert configured_capacity(runtime.academic_search_providers[-1]).limit == 4
     assert "tester@example.test" not in repr(runtime)
 
     await runtime.aclose()

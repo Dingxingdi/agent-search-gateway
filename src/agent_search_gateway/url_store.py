@@ -1,10 +1,12 @@
 """In-memory five-field URL state machine."""
 
+import logging
 from contextlib import AbstractAsyncContextManager
 from dataclasses import replace
 
 from .concurrency import PerKeyLockPool
 from .models import URLRecord, URLStatus
+from .observability import log_event
 from .url_normalization import NormalizedURL
 
 
@@ -123,7 +125,15 @@ class URLStore:
 
     def _commit(self, record: URLRecord) -> URLRecord:
         self._validate(record)
+        previous = self._records.get(record.url)
         self._records[record.url] = record
+        log_event(
+            logging.getLogger(__name__),
+            logging.DEBUG,
+            "url_state_committed",
+            previous_status=previous.status.value if previous is not None else None,
+            status=record.status.value,
+        )
         return record
 
     @staticmethod

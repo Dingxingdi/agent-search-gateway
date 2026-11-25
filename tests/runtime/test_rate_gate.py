@@ -54,7 +54,7 @@ async def test_capacity_and_rate_gates_are_independently_optional(
         assert await rate.permit(timeout_seconds=0) == 0
     if lease is not None:
         await lease.release()
-        assert capacity.in_use == 0
+        assert capacity is not None and capacity.in_use == 0
     if rate is not None:
         assert rate.next_available_in_seconds() == delay
 

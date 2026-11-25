@@ -183,6 +183,7 @@ async def test_agent_quota_is_independent_of_same_named_llm_quota() -> None:
 async def test_agent_quota_waiter_cancellation_and_release() -> None:
     quotas = ProviderQuotaManager(agent_limits={"a": 1, "b": 2})
     gate = quotas.get_agent("a")
+    assert gate is not None
     attempted, entered = asyncio.Event(), asyncio.Event()
 
     async def waiter() -> None:
@@ -201,5 +202,7 @@ async def test_agent_quota_waiter_cancellation_and_release() -> None:
         await waiter()
     assert entered.is_set()
     assert gate.in_use == 0
-    async with quotas.get_agent("b").lease(), quotas.get_agent("b").lease():
-        assert quotas.get_agent("b").in_use == 2
+    other_gate = quotas.get_agent("b")
+    assert other_gate is not None
+    async with other_gate.lease(), other_gate.lease():
+        assert other_gate.in_use == 2

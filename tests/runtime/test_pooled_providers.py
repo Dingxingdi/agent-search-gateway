@@ -20,7 +20,9 @@ from agent_search_gateway.providers.contracts import (
     LLMClient,
     OAResolver,
     PaperSearchHit,
+    PreparedLLMClient,
     URLFetchCandidate,
+    WebAdapter,
 )
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.llm.openai_chat import OpenAIChatCompletionsClient
@@ -56,7 +58,7 @@ async def test_web_search_and_fetch_share_one_pool(limit: str) -> None:
             return URLFetchCandidate(self.account)
 
     first, second = Web("A"), Web("B")
-    pool = CredentialPool(
+    pool = CredentialPool[WebAdapter](
         "web",
         "web",
         [
@@ -91,7 +93,7 @@ async def test_web_fetch_consumes_first_reservation_and_budget() -> None:
             return URLFetchCandidate(self.account)
 
     gate = CapacityGate(1)
-    pool = CredentialPool(
+    pool = CredentialPool[WebAdapter](
         "web", "web", [CredentialMember(Fetcher("A"), gate, rate), CredentialMember(Fetcher("B"))]
     )
     provider = PooledWebProvider(pool)
@@ -120,7 +122,7 @@ async def test_web_fetch_consumes_first_reservation_and_budget() -> None:
 )
 @pytest.mark.parametrize("outcome", ["empty", "value", "fallback", "failure"])
 async def test_typed_facades_preserve_success_and_failure_contracts(
-    kind, contract, operation, empty, value, outcome
+    kind: str, contract: type[object], operation: str, empty: object, value: object, outcome: str
 ) -> None:
     code = ErrorCode.LLM_STAGE_FAILED if kind == "llm" else ErrorCode.ALL_PROVIDERS_FAILED
     failures = [ExecutionFailure(code, message) for message in ("first", "last")]
@@ -186,7 +188,9 @@ def _physical_client(
         (LLMInvocation("logical", "m" * 1024), "input_budget_unfit"),
     ],
 )
-async def test_llm_prepare_failure_never_selects_credential(invalid, reason) -> None:
+async def test_llm_prepare_failure_never_selects_credential(
+    invalid: LLMInvocation, reason: str
+) -> None:
     hosts = []
     gates = [CapacityGate(1), CapacityGate(1)]
 
@@ -197,7 +201,7 @@ async def test_llm_prepare_failure_never_selects_credential(invalid, reason) -> 
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         clients = [_physical_client(http, host) for host in ("a", "b")]
-        pool = CredentialPool(
+        pool = CredentialPool[PreparedLLMClient](
             "llm",
             "logical",
             [CredentialMember(c, g) for c, g in zip(clients, gates, strict=True)],
@@ -236,7 +240,7 @@ async def test_all_llm_stages_share_alias_pool_and_keep_model_selection() -> Non
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         clients = [_physical_client(http, host, request_body_bytes=65536) for host in ("a", "b")]
-        pool = CredentialPool(
+        pool = CredentialPool[PreparedLLMClient](
             "llm",
             "logical",
             [CredentialMember(c, CapacityGate(1)) for c in clients],

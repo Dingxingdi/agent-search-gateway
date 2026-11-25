@@ -157,7 +157,7 @@ async def test_default_runtime_registers_resolved_secrets_before_runtime_build(
     third_secret = SecretValue("academic-secret-value")
     fourth_secret = SecretValue("contact-secret-value")
 
-    def member(key=None, email=None):
+    def member(key: SecretValue | None = None, email: SecretValue | None = None) -> SimpleNamespace:
         return SimpleNamespace(api_key=key, contact_email=email)
 
     config = SimpleNamespace(
@@ -166,15 +166,17 @@ async def test_default_runtime_registers_resolved_secrets_before_runtime_build(
                 SimpleNamespace(
                     enable_search=True,
                     enable_fetch=False,
-                    credentials=(member(first_secret), member()),
+                    credentials=(member(), member(first_secret), member()),
                 ),
             )
         ),
-        llm=SimpleNamespace(providers=(SimpleNamespace(credentials=(member(second_secret),)),)),
-        academic=SimpleNamespace(
-            providers=(SimpleNamespace(enabled=True, credentials=(member(third_secret),)),)
+        llm=SimpleNamespace(
+            providers=(SimpleNamespace(credentials=(member(), member(second_secret))),)
         ),
-        oa_resolver=SimpleNamespace(credentials=(member(email=fourth_secret),)),
+        academic=SimpleNamespace(
+            providers=(SimpleNamespace(enabled=True, credentials=(member(), member(third_secret))),)
+        ),
+        oa_resolver=SimpleNamespace(credentials=(member(), member(), member(email=fourth_secret))),
     )
     registry = object()
     expected_academic_registry = object()

@@ -24,7 +24,7 @@ async def test_live_tavily_search_response_shape() -> None:
     if not private_value:
         pytest.skip(f"{_TAVILY_ENV} is not set")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(limits=httpx.Limits(max_connections=None)) as client:
         executor = HttpJsonExecutor(
             client,
             _POLICY,
@@ -50,7 +50,7 @@ async def test_live_openai_chat_response_shape() -> None:
     if not private_value:
         pytest.skip(f"{_OPENAI_ENV} is not set")
 
-    client = httpx.AsyncClient()
+    client = httpx.AsyncClient(limits=httpx.Limits(max_connections=None))
     executor = HttpJsonExecutor(
         client,
         _POLICY,

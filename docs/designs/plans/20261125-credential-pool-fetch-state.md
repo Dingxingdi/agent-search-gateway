@@ -19,7 +19,7 @@
 - 本文件最初提交为待执行计划；现按用户授权实施。复选框表示已完成的步骤，实际验证证据与剩余范围见文末“实施记录”。
 - 已加载全局指令。主仓库与任务工作树根目录的 AGENTS.md 均不存在；任务工作树中未发现更深层 AGENTS.md。
 - 复用指定工作树。实施期间只修改任务文件；不改写用户实际配置、不切换主仓库分支、不停止共享 daemon。
-- 三份 spec 的评审阶段说明保留为历史文字；本计划以这些已提交的设计和用户当前的写计划请求为依据，不重新启动 brainstorming 或发布流程。
+- 三份 spec 的评审阶段说明保留为历史文字；本计划以这些已提交的设计和用户当前的实施请求为依据，不重新启动 brainstorming 或发布流程。
 
 ## 代码核对与实施原则
 
@@ -1248,13 +1248,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler te
 - Migrate affected live helpers without running them: `tests/integration/test_live_tavily_and_openai.py`、`tests/integration/test_live_parallel.py`、`tests/integration/test_live_new_web_providers.py`、`tests/integration/test_live_baiduqianfan.py`、`tests/integration/test_live_rate_limits_and_inputs.py`
 - Regression for those helpers: `tests/unit/test_live_smoke_validation.py`、`tests/unit/test_live_baiduqianfan_validation.py`、`tests/unit/test_live_preview_budget_validation.py`
 
-- [ ] **Step 1: 更新实际配置合同测试并观察失败**
+- [x] **Step 1: 更新实际配置合同测试并观察失败**
 
 `test_example_config_resolves_each_credential_with_stub_secrets` 让现有 _stub_environment 进入 credentials 数组，验证所有启用/禁用模板可在合成环境按规则启用。You.com 免费 MCP fragment 单独解析且不配置 key；REST 示例明确要求 key。对迁完的实际 config.example.toml/fragment 用合成环境运行 Doctor，适用 health 由本地 mock 提供，不收费联网。加第二成员与无 limits 示例，断言 parser 不继承示例推荐值。
 
 原文档测试中 provider.rate_policy/max_concurrency/secret 访问迁到成员；旧“默认 3”“知乎继承默认并发”等断言改为显式值或缺省无限制。不要用字面字符串覆盖率代替真实解析/运行时出站检查。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs/test_documented_config.py -v
@@ -1300,11 +1300,11 @@ uv run python scripts/build_docs.py
 - Verify: 本计划涉及的全部源码/测试/当前文档
 - Update after implementation: `docs/designs/plans/20261125-credential-pool-fetch-state.md`（实际完成情况与证据）
 
-- [ ] **Step 1: 按覆盖矩阵检查剩余失败风险**
+- [x] **Step 1: 按覆盖矩阵检查剩余失败风险**
 
 逐条核对下文覆盖表和三份 spec。缺少关键行为时先加一个能失败的测试，再补最小实现；若无缺口，不为验证文档或凑测试数新建镜像测试。特别核对新 schema、无默认 cap、单轮 fallback、取消、close-once、Search 零正文 stages、Safety 复用和已确认的错误终止边界。
 
-- [ ] **Step 2: 核实失败属于缺失行为而非测试基础设施**
+- [x] **Step 2: 核实失败属于缺失行为而非测试基础设施**
 
 运行任何新增缺口测试的确切 node，记录预期失败。缺环境/ImportError/错误 fixture 不是合格 RED；修正后再检查。已有回归全部绿色则直接进入最终检查，不故意制造失败。
 
@@ -1328,7 +1328,7 @@ uv run python scripts/build_docs.py
 
 可选 smoke 只在隔离临时配置/独立 socket 下运行少量已授权 provider。缺多组真实凭证不阻塞 mock 验收；记录真实尝试数与服务错误，不用 smoke 替代调度/并发证明。
 
-- [ ] **Step 5: 收敛实施记录**
+- [x] **Step 5: 收敛实施记录**
 
 检查 diff 只含本任务文件；更新每项实际完成状态、命令和通过/失败/跳过数。若存在未通过检查，明确列出原因与剩余步骤，不能全部勾选。最终提交实现遵循后续执行技能/用户指令；本写计划任务仅提交本计划并停止。
 
@@ -1392,7 +1392,7 @@ uv run python scripts/build_docs.py
 - 保留既有 singleflight leader/follower 区别；不把通用取消描述扩展成新所有权模型。
 - 所有新行为均有对应 task 和验收位置；实施复选框与文末实际命令、结果共同记录完成状态。
 
-## 实施记录（进行中）
+## 实施记录（待解除工具阻塞）
 
 2026-11-25：使用 subagent-driven-development，逐任务派发独立实现子代理并完成自查；复用本工作树。`uv sync --locked --all-groups` 成功，当前验证环境为 Linux / Python 3.12.3。真实 API 集成开关在离线测试中显式移除。
 
@@ -1419,7 +1419,8 @@ uv run python scripts/build_docs.py
 | 19 | 完成，覆盖移交 Task 20 | Doctor 107 通过；9 文件 Ruff lint/format、5 文件 mypy 通过。追加独立认证渲染哨兵被 LocalHost 内容防护拦截，既有安全渲染与健康检查通过，补充覆盖移交 Task 20。 |
 | 20 | 部分完成，BLOCKED | URLStore/daemon 82 通过，取消与提交/日志故障精确节点 9 通过；核心凭证上下文编辑被 LocalHost 内容防护拒绝，尚有 3 项身份/池事件和 1 项固定 gate 身份 RED。保留未勾选。 |
 | 21 | 验收实现完成，整组门槛受 Task 20 阻塞 | 新增 12 项真实 Runtime/CLI 验收覆盖八类场景；CLI/daemon 组 205 通过；Runtime 等组 651 通过、1 个 Task 20 gate 身份失败；4 文件 Ruff lint/format/mypy 通过。Step 4 保留未勾选。 |
-| 22–23 | 待实施 | 当前文档/实际示例迁移及全量检查；最终门槛必须如实包含 Task 20 阻塞。 |
+| 22 | 部分完成，BLOCKED | 11 文件独立迁移完成；目标集 104 passed / 26 failed（均为三份被拒源文件未迁）；7 Python 文件 Ruff lint/format/mypy 通过，docs build exit 0；双成员无 limits 继承反例 1 passed。Step 3–5 保留未勾选。 |
+| 23 | 审计和独立修正完成，最终门槛 BLOCKED | 完整 format 249 文件、lint、mypy 245 文件与 docs build 通过；完整离线 pytest 5,743 passed / 30 failed / 20 skipped。复现并修复 client 关闭取消导致其余资源漏清理，资源 16 通过；Step 3–4 因受阻文档/日志及失败门槛保留未勾选。 |
 
 配置检查点实际命令：
 
@@ -1429,7 +1430,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。Task 21 八类真实 Runtime 验收实现通过，但第二个整组门槛仍有 Task 20 固定 gate 身份失败；文档及全部仓库检查仍待 Tasks 22–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。Task 21 八类真实 Runtime 验收实现通过，但第二个整组门槛仍有 Task 20 固定 gate 身份失败；Task 22 已迁移独立文档与辅助入口，但主配置、README 和限流参考被内容防护拒绝，26 个实际文档合同仍失败；Task 23 已完成全部仓库检查：静态检查和文档构建通过，完整离线测试 5,743 通过、30 失败、20 跳过；30 个失败均对应前述工具阻塞。计划尚未全部完成。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
@@ -1527,6 +1528,48 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest 'tests/observability/test_provid
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential_pool_fetch_state.py tests/acceptance/test_gateway_workflows.py tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/cli tests/daemon -q --tb=short
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler tests/orchestrators tests/academic -q --tb=short
 ~~~
+
+### Task 22 当前文档及辅助入口实施记录
+
+- 已迁移 11 文件：CHANGELOG.md、config.youcom-free.fragment.toml、docs/public-interface.md、docs/youcom-free-mcp.md、tests/docs/test_documented_config.py、tests/acceptance/test_debug_and_doctor.py，以及五个计划内 live helper。没有提交生成的 site 文件，没有运行 live API。
+- public-interface 说明真实已完成的新 schema、独立可选 limits、RR/FF/单轮 fallback、fetch_order、逻辑容量/物理 attempt、Agent alias、六状态及 Doctor；没有宣称 Task 20 尚未实现的成员日志关联可用。免费 MCP 片段与 guide 的实际解析/Runtime 验收通过；CHANGELOG 只记 Unreleased breaking change，不决定版本。
+- 免费片段原本无显式 limits，迁移没有删除推荐值。强化测试仅在副本首成员设置 capacity=2、10/1 窗口及 interval=0.5；第二成员全部省略，真实 parser 返回无 gate 配置，真实 Doctor 显示两个成员。精确节点 1 passed。四个既有免费 guide/fragment 参数化用例也通过。
+- 五个 live helper 显式配置 HTTPX max_connections=None；Baidu 仅 live 入口用带 limits 的 client lambda，保留既有测试注入合同。生产 Runtime 始终向 factory 传 limits，没有无参 fallback，显式 keepalive=20。
+- 首次真实文档 RED 为 26 failed / 8 passed。断线前目标集为 26 failed / 102 passed，其后完成字段与类型断言迁移并强化测试；最终目标集两次均为 26 failed / 104 passed（分别 --tb=short 与 --tb=line）。七个改动 Python 文件 Ruff lint/format/mypy 均通过；build_docs exit 0。
+- 最终 26 个失败均在 test_documented_config：17 个 ConfigFailure 来自主示例旧 default_max_concurrency 或 provider 顶层字段；8 个 credentials KeyError 来自主示例或 README 的旧结构；1 个知乎注释仍声称继承旧默认值。新增真实主示例的两个合同参数先对原文件 resolve_config，均被旧 academic_providers.default_max_concurrency 拒绝，因此主示例 Doctor 尚未执行，不能记为通过。
+- 三份文件完全未落盘：config.example.toml 的首次删除旧默认并发行、README 的首次插入 TinyFish credentials 结构、docs/provider-rate-limits.md 的首次层级说明修改，均被 LocalHost 以 Secret-looking content is blocked from edit 拒绝。没有重提、拆分、编码、改名或换通道；只读未发现可确认且可安全移除的内联认证材料，部分环境引用被 reader 脱敏，未猜测原值。
+- 只读审计确认 src 中旧 default_max_concurrency 仅在显式拒绝逻辑；src/tests 无旧 URLRecord.available/merge_body 调用；检索到的 Runtime.build 均 await；provider.rate_policy 的剩余运行路径属于合法 Agent alias。共享 support 已符合新合同。Task 22 尚未完成，Step 3–5 保留未勾选。
+
+最终实际命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs tests/acceptance/test_debug_and_doctor.py tests/unit/test_live_smoke_validation.py tests/unit/test_live_baiduqianfan_validation.py tests/unit/test_live_preview_budget_validation.py -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs tests/acceptance/test_debug_and_doctor.py tests/unit/test_live_smoke_validation.py tests/unit/test_live_baiduqianfan_validation.py tests/unit/test_live_preview_budget_validation.py -q --tb=line
+uv run python scripts/build_docs.py
+~~~
+
+### Task 23 最终自审与完整检查记录
+
+- 已逐条对照三份 spec、覆盖矩阵、CONTRIBUTING.md 和 CI。独立核对了四类池、无默认 gate、真实 HTTPX limits、RR/FF/重试/fallback、首次预算 task/gate 绑定、Scheduler 预留与 lease/Judge 边界、Agent alias、URL 五字段六状态、Search 零正文 stage、整对候选、阶段恢复、READY/Focus、singleflight 与 22 个 Search adapter 的审计范围。
+- 首次完整静态检查发现一个格式文件及 12 个测试文件的 55 项 mypy 错误：33 项可选 capacity gate，9 项动态字段/具体 executor/协议身份/配置结构，其余 13 项泛型池、fixture 签名、client 列表及 current_task 类型。按已配置 fixture 显式断言 gate 非空、核对具体类型并校正签名，没有新增 type: ignore，也未修改生产接口迁就测试。test_url_store 两处格式已修正。
+- 独立发现并复现 Runtime 回滚缺陷：第二 adapter 构造失败，且其 client 的 aclose 自身抛 CancelledError 时，旧清理提前结束，较早 client 的 aclose 次数为 0。新增真实 Runtime.build 的 cancelled-close 参数节点先 RED；_RuntimeResources 现在隔离单个 client 关闭的取消错误并继续其余清理，保留原始构造异常，调用方取消仍由 join_cleanup 传播。资源生命周期 16 passed。该独立修复已提交 6172f39。
+- 本轮审计修改 14 文件，其中生产仅 runtime.py，其余 13 个测试文件；与已有待提交工作合并后 show_changes 为 29 个预期路径，无生成物、lockfile、用户配置、受阻文件或其他项目改动。没有运行真实 API smoke、没有运行其他 Python/平台 CI 矩阵。
+- 实测环境 Linux / Python 3.12.3。修复前完整离线两次均为 5,742 passed / 30 failed / 20 skipped；修复后为 5,743 passed / 30 failed / 20 skipped in 25.90s，退出 1，输出完整。所有 30 个失败 node 与修复前完全相同，无新增行为失败。新增的通过项就是先复现的资源回滚缺陷。
+
+| 最终命令 | 实际结果 |
+|---|---|
+| uv run ruff format --check src tests scripts | 249 files already formatted；退出 0。 |
+| uv run ruff check . | All checks passed；退出 0。 |
+| uv run mypy src tests scripts | 245 source files 无问题；退出 0。 |
+| env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest -q --tb=short | 5,743 passed / 30 failed / 20 skipped in 25.90s；退出 1。 |
+| uv run python scripts/build_docs.py | 退出 0；stdout/stderr 为空。 |
+
+剩余失败与继续位置：
+
+1. Task 20 的四个日志合同仍为 RED：三项成员身份/切换耗尽/sink 故障时的成员事件，以及 Runtime 固定 gate 身份。observability.py 的 scoped credential context 插入被 LocalHost 内容检查拒绝，未落盘；相应 gate/pool/HTTP/LLM 关联尚未完成。应在工具允许正常编辑后恢复原 Task 20，保持同 task 执行与固定 gate 身份，补齐原定回归。
+2. Task 22 的 26 个文档合同仍为 RED：主 config.example.toml、README.md 和 docs/provider-rate-limits.md 的首次小编辑被拒，完全未迁移。应在工具允许编辑后按既有计划保留环境引用及显式推荐数字，迁到 credentials，完成真实主示例 parse/Doctor 后重跑文档门槛。
+3. 上述工具问题解决并补齐实现后，重新执行 Task 21 的第二集成门槛与 Task 23 完整五项检查。当前 Task 20 所有未勾项、Task 21 Step 4、Task 22 Steps 3–5、Task 23 Steps 3–4 继续保持未勾选。
+4. 工具报错为 Secret-looking content is blocked from edit。已核对暴露的 LocalHost edit/write/apply_patch 接口没有专门审批覆盖参数，server_config 为只读；未修改工具策略或换通道提交被拒内容。现阶段需要 LocalHost 端审核这几处非认证代码/环境引用编辑的阻塞，不能把已有用户任务授权当作工具限制已解除。
 
 ## 计划编写与自检记录
 

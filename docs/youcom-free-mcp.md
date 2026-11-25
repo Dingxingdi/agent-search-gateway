@@ -14,6 +14,8 @@ MCP configuration. In your existing configuration, replace the entire
 [web_providers.youcom]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.youcom.credentials]]
 api_url = "https://api.you.com/mcp/free"
 ```
 
@@ -25,7 +27,7 @@ alongside an existing table with the same name. Set either capability to
 
 Delete the `api_key_env` line when switching to free MCP. An existing
 `YDC_API_KEY` environment variable may remain: the gateway does not automatically
-use it when `api_key_env` is omitted. Explicit credentials configured on this
+use it when `api_key_env` is omitted. Explicit API-key references configured on this
 free endpoint are rejected during configuration resolution, before any HTTP
 request.
 
@@ -41,7 +43,7 @@ in-memory URL admission and prepared content, so search again before using
 
 ## Existing REST behavior and quota
 
-The original REST configuration remains available and unchanged. It uses
+REST uses the same credentials-array schema and requires a key reference on every member. It uses
 `https://ydc-index.io` as an API root and references the daemon's `YDC_API_KEY`
 through `api_key_env`. The adapter appends the REST paths; Fetch uses the
 separate `/v1/contents` API with separate billing and the appropriate Contents
@@ -56,8 +58,10 @@ remaining-balance meter or a daily quota ledger shared across processes. The
 Choose a local rate policy suitable for your usage rather than treating the
 public daily allowance as a tracked gateway balance.
 
-Free MCP uses the existing shared HTTP executor, retry policy, concurrency quota,
-and local rate gate for the `youcom` provider. Failures follow the existing
+Free MCP uses the shared HTTP executor and existing retry policy. Each member's
+capacity and rate gates are independently optional: omitting limits creates no
+gates and inherits no provider or global cap. The fragment deliberately has no
+limits. Even this keyless endpoint requires a nonempty credentials array. Failures follow the existing
 Search fan-out and Fetch fallback behavior through other configured providers.
 The gateway never automatically switches a free MCP failure to paid You.com REST.
 

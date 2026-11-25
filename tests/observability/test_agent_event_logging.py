@@ -74,6 +74,7 @@ async def test_agent_failure_logs_allowlisted_reason_without_payload(
     for body in ("RESPONSE_SENTINEL", "ERROR_SENTINEL", "PROMPT_SENTINEL"):
         assert body not in without_debug_body_previews(combined)
     assert "llm_stage_" not in combined
+    assert "credential_index=" not in combined
 
 
 @pytest.mark.parametrize("scope", ["web", "paper"])
