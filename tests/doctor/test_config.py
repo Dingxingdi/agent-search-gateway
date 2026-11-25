@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from agent_search_gateway import doctor
-from agent_search_gateway.config import resolve_config
+from agent_search_gateway.config import load_toml, resolve_config
 from agent_search_gateway.doctor import DoctorCheck, DoctorStatus, run_doctor
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.socket_probe import SocketProbeResult, SocketState
@@ -41,7 +41,7 @@ async def test_doctor_resolves_real_config_and_mentions_only_environment_name(
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
     env_name = environment_name()
-    opaque = "opaque-runtime-value-7391"
+    opaque = "[REDACTED_SECRET]"
 
     report = await run_doctor(
         paths,
@@ -64,7 +64,9 @@ async def test_doctor_resolves_config_once_and_passes_enabled_target(
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
         target.write(
-            '[web_providers.open_websearch]\nenable_fetch = true\napi_url = "http://example.test"\n'
+            "[web_providers.open_websearch]\nenable_fetch = true\n"
+            "[[web_providers.open_websearch.credentials]]\n"
+            'api_url = "http://example.test"\n'
         )
     resolve = Mock(wraps=resolve_config)
     monkeypatch.setattr(doctor, "resolve_config", resolve)
@@ -76,11 +78,17 @@ async def test_doctor_resolves_config_once_and_passes_enabled_target(
 
     resolve.assert_called_once()
     probe.assert_awaited_once_with("http://example.test")
-    assert report.checks[:2] == (
-        DoctorCheck(DoctorStatus.OK, "configuration valid"),
-        DoctorCheck(DoctorStatus.OK, f"environment variable {environment_name()} is set"),
+    assert report.checks[0] == DoctorCheck(DoctorStatus.OK, "configuration valid")
+    assert (
+        DoctorCheck(DoctorStatus.OK, f"environment variable {environment_name()} is set")
+        in report.checks
     )
-    assert healthy in report.checks
+    assert any(
+        check.status is healthy.status
+        and check.message.endswith(healthy.message)
+        and "web_providers.open_websearch.credentials[0]" in check.message
+        for check in report.checks
+    )
 
 
 @pytest.mark.parametrize(
@@ -143,13 +151,16 @@ async def test_doctor_checks_youcom_protocol_credentials(
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
         target.write("[web_providers.youcom]\nenable_search = true\n")
+        target.write("[[web_providers.youcom.credentials]]\n")
         if api_url is not None:
             target.write(f'api_url = "{api_url}"\n')
         if with_key:
-            target.write('api_key_env = "TEST_WEB"\n')
+            target.write('api_key_env = "[REDACTED_SECRET]"\n')
 
     report = await run_doctor(
-        paths, environ={environment_name(): "x", "TEST_WEB": "x"}, socket_probe=_missing_socket
+        paths,
+        environ={environment_name(): "x", "[REDACTED_SECRET]": "x"},
+        socket_probe=_missing_socket,
     )
 
     assert report.checks[0].status is status
@@ -187,3 +198,67 @@ async def test_doctor_reports_invalid_agent_configuration(tmp_path: Path, model_
     assert report.exit_code == 1
     assert report.checks[0].status is DoctorStatus.FAIL
     assert "configuration invalid" in report.checks[0].message
+
+
+@pytest.mark.parametrize("invalid", ["endpoint", "missing_env"])
+async def test_doctor_reports_invalid_second_credential(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    data = load_toml(paths.config_file)
+    providers = data["llm_providers"]
+    assert isinstance(providers, dict)
+    primary = providers["primary"]
+    members = primary["credentials"]
+    second = dict(members[0])
+    if invalid == "endpoint":
+        second["api_url"] = 7
+    else:
+        second["api_key_env"] = environment_name() + "_MISSING"
+    members.append(second)
+    monkeypatch.setattr(doctor, "load_toml", lambda path: data)
+    probe = AsyncMock(side_effect=AssertionError("unexpected health request"))
+    monkeypatch.setattr(doctor, "_probe_open_websearch_health", probe)
+    report = await run_doctor(
+        paths, environ={environment_name(): "[REDACTED_SECRET]"}, socket_probe=_missing_socket
+    )
+    assert report.exit_code == 1
+    assert report.checks[0].status is DoctorStatus.FAIL
+    assert "llm_providers.primary.credentials[1]" in report.checks[0].message
+    assert "[REDACTED_SECRET]" not in repr(report)
+    assert report.checks[-1].status is DoctorStatus.INFO
+    probe.assert_not_awaited()
+
+
+async def test_doctor_reports_members_without_merging_shared_environment_reference(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    data = load_toml(paths.config_file)
+    providers = data["llm_providers"]
+    assert isinstance(providers, dict)
+    members = providers["primary"]["credentials"]
+    members.append(dict(members[0]))
+    data["web_providers"] = {"jina": {"enable_fetch": True, "credentials": [{}]}}
+    data["academic_providers"] = {"arxiv": {"enabled": True, "credentials": [{}]}}
+    data["oa_resolvers"] = {
+        "unpaywall": {"enabled": True, "credentials": [{"contact_email_env": environment_name()}]}
+    }
+    monkeypatch.setattr(doctor, "load_toml", lambda path: data)
+    report = await run_doctor(
+        paths, environ={environment_name(): "[REDACTED_SECRET]"}, socket_probe=_missing_socket
+    )
+    assert report.exit_code == 0
+    messages = [check.message for check in report.checks]
+    for identity in (
+        "web_providers.jina.credentials[0]",
+        "academic_providers.arxiv.credentials[0]",
+        "oa_resolvers.unpaywall.credentials[0]",
+        "llm_providers.primary.credentials[0]",
+        "llm_providers.primary.credentials[1]",
+    ):
+        assert f"{identity}: configuration valid" in messages
+    assert messages.count(f"environment variable {environment_name()} is set") == 1
+    assert "[REDACTED_SECRET]" not in repr(report)

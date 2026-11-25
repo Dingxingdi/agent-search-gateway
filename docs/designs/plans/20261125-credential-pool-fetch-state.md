@@ -1074,13 +1074,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tes
 - Test: `tests/doctor/test_no_network.py`
 - Test support: `tests/doctor/_support.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_doctor_reports_invalid_second_credential` 使第二组缺 env/选项非法，必须 FAIL 并定位 credentials[1]，不能只报告第一组有效。`test_doctor_checks_each_open_websearch_endpoint` 两个健康端点一好一坏，分别检查且最终退出失败。无认证 provider 不虚构 API key；未启用/未引用者无请求。
 
 使用合成秘密哨兵检查配置错误/渲染/健康失败不输出 key、email、认证 URL 或异常原文；保留 filesystem/socket/exit-code 断言。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor/test_config.py tests/doctor/test_open_websearch_health.py -k "credential or each_open_websearch" -v
@@ -1088,7 +1088,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor/test_config.py test
 
 预期：旧 Doctor 仍直接访问 provider.api_key_env/options，只检查一个 endpoint。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 沿用 resolve_config 的完整逐成员校验
@@ -1100,7 +1100,7 @@ open-webSearch 逐 credential 调用原 health helper，保留 timeout/body/redi
 
 对不具有既有 health check 的 provider 只做原配置诊断；不请求付费 Search/Fetch、余额或 model 列表。
 
-- [ ] **Step 4: 验证 GREEN 与 Doctor 回归**
+- [x] **Step 4: 验证 GREEN 与 Doctor 回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor -v
@@ -1108,7 +1108,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor -v
 
 预期：逐成员与原非网络/文件系统/socket 契约全部通过，输出安全。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 复用既有 health URL、超时和脱敏 helpers；不增加定时探测。重跑上列命令。
 
@@ -1416,7 +1416,9 @@ uv run python scripts/build_docs.py
 | 16 | 完成 | 关键词 Search 51、Paper/LLM/Agent/academic 65 通过；4 文件 Ruff lint/format 与 mypy 通过；Search 零正文 stage。 |
 | 17 | 完成 | Fetch/admission/scheduler/LLM 48、原 singleflight 2 通过；4 文件 Ruff lint/format 与 mypy 通过；六状态恢复与 READY 复用。 |
 | 18 | 完成 | 状态/交错/singleflight 五文件集合 140 通过；4 个改动测试文件 Ruff lint/format 与 mypy 通过；新用例直接 GREEN，未改生产代码。 |
-| 19–23 | 待实施 | Doctor、凭证/状态安全日志、真实 Runtime 端到端验收、文档及最终全量检查尚未完成。 |
+| 19 | 完成，覆盖移交 Task 20 | Doctor 107 通过；9 文件 Ruff lint/format、5 文件 mypy 通过。追加独立认证渲染哨兵被 LocalHost 内容防护拦截，既有安全渲染与健康检查通过，补充覆盖移交 Task 20。 |
+| 20 | 部分完成，BLOCKED | URLStore/daemon 82 通过，取消与提交/日志故障精确节点 9 通过；核心凭证上下文编辑被 LocalHost 内容防护拒绝，尚有 3 项身份/池事件和 1 项固定 gate 身份 RED。保留未勾选。 |
+| 21–23 | 待实施 | 独立的真实 Runtime 验收及文档迁移继续；最终完整检查须如实包含 Task 20 阻塞，不能宣称全绿。 |
 
 配置检查点实际命令：
 
@@ -1426,7 +1428,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前已完成 Tasks 1–18：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复组件通过。第二个真实 Runtime 集成门槛、Doctor、日志与全部仓库检查仍在 Tasks 19–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。第二个真实 Runtime 集成门槛、文档及全部仓库检查仍待 Tasks 21–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
@@ -1485,6 +1487,28 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_paper_s
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_admission.py tests/scheduler/test_fetch_outcomes.py tests/unit/test_llm_stages.py tests/unit/test_llm_judge_stage.py -q
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_singleflight.py -q
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/runtime/test_singleflight.py -q
+~~~
+
+### Tasks 19–20 当前实施记录
+
+- Task 19 通过现有 resolve_config 校验全部 active/referenced HTTP 成员，输出 namespace/provider/index；仅环境变量提示去重。open-webSearch 每个成员单独探测，任一失败使报告失败，不进行付费搜索探测。原 timeout/body/redirect/proxy、目录、socket 与退出码行为保持。
+- Task 19 的旧 TOML fixture 通过不复制认证材料的 SHA 结构编辑迁移。额外独立 email/认证 URL/Authorization 渲染哨兵被 LocalHost 防护拒绝后未重提；已有 userinfo 拒绝、安全 transport 错误、health key/body/header/endpoint 不泄漏及渲染回归通过，覆盖移交 Task 20。
+- Task 20 已让 URLStore 在验证和原子写入之后记录前后状态，非法转换与取消不伪造提交；抛错 handler 不能改变成功提交的结果。daemon 注册回归覆盖后续成员，Agent 日志断言没有 HTTP credential index。
+- Task 20 核心受阻：对 observability.py 的纯结构身份/context 编辑被拒，错误为 Secret-looking content is blocked from edit。片段没有认证值，亦未落盘；未拆分、编码或改用其他写入通道重提。已有 request ID / initial rate budget helper 的专用合同不能替代。操作 context、固定 gate identity、pool selected/fallback/exhausted/wait/cancel 及 HTTP/LLM 关联仍未完成。
+- Task 20 首次目标集为 647 passed / 4 failed；其中旧 keyword_judge 取消夹具已迁到显式 Fetch/Judge，精确 node 1 passed，完整取消参数组加两个 URLStore 节点 9 passed。未重跑整套，不将推算数量当实测。其余 3 个身份/池事件用例与目标集外 1 个固定 gate 身份用例仍为 RED，不删除或标 skip。
+- Task 20 改动文件 Ruff lint/format 通过，URLStore 与更新的 provider_event_logging 文件 scoped mypy 通过。Tasks 21–22 可继续其独立范围，不能通过后续任务重提被拒片段；最终门槛保持未通过直到阻塞解决。
+
+实际验证命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor -q
+uv run ruff check src/agent_search_gateway/doctor.py tests/doctor
+uv run ruff format --check src/agent_search_gateway/doctor.py tests/doctor
+uv run mypy src/agent_search_gateway/doctor.py tests/doctor/_support.py tests/doctor/test_config.py tests/doctor/test_open_websearch_health.py tests/doctor/test_no_network.py
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/test_observability_logging.py tests/unit/test_input_limits.py tests/doctor -q --tb=line
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_new_web_runtime_assembly.py -k gate_identity -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/daemon/test_daemon_debug.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest 'tests/observability/test_provider_event_logging.py::test_search_cancellation_closes_started_owner_once[fetch_judge]' -q --tb=short
 ~~~
 
 ## 计划编写与自检记录
