@@ -27,6 +27,16 @@ from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from tests.support.fakes import FakeKeywordSearchProvider, FakeURLFetchProvider
 
 
+def test_web_registration_limits_member_options_to_endpoints_and_account_zones() -> None:
+    for registration in build_default_registry().list_in_registration_order():
+        expected = {"api_url"}
+        if registration.name == "tinyfish":
+            expected = {"search_api_url", "fetch_api_url"}
+        elif registration.name == "brightdata":
+            expected.update({"search_zone", "fetch_zone"})
+        assert registration.credential_option_keys == expected
+
+
 def _factory() -> object:
     return object()
 

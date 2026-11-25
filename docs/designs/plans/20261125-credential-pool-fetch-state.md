@@ -16,7 +16,7 @@
 - 工作树：`/home/agent/agent-search-gateway/.worktrees/design-credential-pool-fetch-state-20261125`。
 - 分支：`design-credential-pool-fetch-state-20261125`。
 - 规划基线：`7442a5a927e83e8180ed20b94a554a84584128f6`；该提交包含三份 spec，生产代码基线为 `8da7aeb`（v2.0.0）。
-- 本文件是待执行计划；下文实施步骤均未完成。本轮只阅读、编写和审阅计划，不运行实施测试或修改生产代码。
+- 本文件最初提交为待执行计划；现按用户授权实施。复选框表示已完成的步骤，实际验证证据与剩余范围见文末“实施记录”。
 - 已加载全局指令。主仓库与任务工作树根目录的 AGENTS.md 均不存在；任务工作树中未发现更深层 AGENTS.md。
 - 复用指定工作树。实施期间只修改任务文件；不改写用户实际配置、不切换主仓库分支、不停止共享 daemon。
 - 三份 spec 的评审阶段说明保留为历史文字；本计划以这些已提交的设计和用户当前的写计划请求为依据，不重新启动 brainstorming 或发布流程。
@@ -116,11 +116,11 @@
 - Test: `tests/unit/test_config_llm.py`
 - Test: `tests/unit/test_config_agent.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 逐项参数化：三个 limits 均缺省、仅 capacity、仅 window、仅 interval、任意组合、空 windows。断言缺省 capacity 为 None、无 rate 规则，而不是 1/2/3。另写 `test_credential_strategy_defaults_and_rejects_invalid_values`，逐一断言缺省→round_robin、round_robin/fill_first 合法、fill_out/其他字符串/非字符串非法；四类 HTTP 入口在 Tasks 2–4 分别复用这组参数。再测 0/负数/bool/小数冒充整数、NaN/Infinity、未知窗口字段、错误容器。新增 `test_credential_limits_are_independently_optional`、`test_invalid_explicit_limits_report_field_path`，错误只给字段路径，不回显秘密或 endpoint。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py -k "credential_limits or invalid_explicit_limits or credential_strategy" -v
@@ -128,7 +128,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 预期：旧数据模型或默认值与新断言不同；先修正测试导入问题，再观察具体行为失败。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 定义 CredentialStrategy 与 frozen ResolvedCredential
@@ -141,7 +141,7 @@ effective options 只读且隐藏 repr；secret 使用 SecretValue
 
 新增共用 `_resolve_credential_strategy` 与 limits parser 供 Tasks 2–4 调用；本任务先验证这些公共 helpers/值对象，各类别入口在对应任务切换，不先增加兼容旧 schema 的入口。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py -k "credential_limits or invalid_explicit_limits or credential_strategy" -v
@@ -150,7 +150,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 预期：新公共校验的目标测试通过；各类别的有意 schema 变化随 Tasks 2–4 更新，而不是放松数值校验。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 提取重复字段路径与 optional numeric 校验，避免各类别复制策略/限流默认值；重跑上列组件命令。
 
@@ -164,13 +164,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 - Test: `tests/unit/test_config_web_providers.py`
 - Test: `tests/providers/test_registry.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_web_credentials_preserve_order_and_validate_every_member` 使用两个不同 endpoint/env；第二项无效必须整体失败。覆盖单项、无 key 的 Jina/open-webSearch、You.com REST 必需 key、官方免费 MCP 禁止 key、TinyFish 双端点、BrightData zone 公共值与成员覆盖。对 You.com 再测 REST 无 key、官方免费 MCP 带 key 这两种反向组合必须拒绝，每个成员独立调用原 validator。provider 业务参数保留原层级，credential 不接受任意参数。各 Web 策略输入按 Task 1 的缺省/合法/非法矩阵参数化，不仅测试已构造 pool。
 
 `test_fetch_order_prioritizes_then_appends_enabled_providers` 覆盖缺省、空、完整、部分排序、合法未启用项；重复/未知/search-only/非字符串/非数组报错。另测旧顶层 endpoint/auth/limits、default_max_concurrency 及新旧混用全部明确报迁移错误。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py -k "credentials or fetch_order or legacy or credential_strategy" -v
@@ -178,7 +178,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 预期：当前解析器不识别 credentials/fetch_order 或仍接受旧字段。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 先识别 web group 的 fetch_order 保留键，不把它当 provider
@@ -193,7 +193,7 @@ provider 的 strategy 用共用 _resolve_credential_strategy 解析
 
 保留既有 endpoint 默认与认证约束，不发明 base_url 字段。禁用项不解析真实 env/建池；仍拒绝明示的已删除旧字段，其他禁用校验遵循现有边界。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py tests/providers/test_registry.py -v
@@ -201,7 +201,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 预期：每组配置独立验证，fetch_order 不改变 enable_search/enable_fetch 或搜索列表。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 复用 registry allowlist/validator，不新增 vendor 认证调度；删除 Web 旧 default_max_concurrency 字段与默认值。重跑上列命令。
 
@@ -215,11 +215,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 - Test: `tests/unit/test_config_academic_providers.py`
 - Test: `tests/providers/academic/test_registry_defaults.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_academic_and_oa_validate_all_credentials` 覆盖 arXiv 无认证、OpenAlex 必需 key/可选 email、其他既有 optional auth、Unpaywall 必需 contact email。一个 OA resolver 两组凭证有效；两个 enabled resolver 仍失败。第二项缺 env 或无效 options 不可被第一项掩盖；禁用项不要求环境值。旧格式/default_max_concurrency 显式拒绝。Academic 和 OA 各用最小合法配置参数化 Task 1 的 strategy 矩阵，非法值返回各自完整配置路径。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_academic_providers.py -k "credentials or legacy or optional_limits or credential_strategy" -v
@@ -227,7 +227,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_academic_
 
 预期：旧单凭证结构/default=3 与新断言不同。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 保留 Academic/OA registration required/optional/none 认证规则
@@ -239,7 +239,7 @@ OA 仍仅允许一个 enabled resolver；该 resolver 内可以多个 credential
 
 不改变论文聚合、DOI 规范化或 OA best-effort 边界。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_academic_providers.py tests/providers/academic/test_registry_defaults.py -v
@@ -247,7 +247,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_academic_
 
 预期：所有认证模式和旧业务字段校验通过，缺省无限流。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 用同一个 credential/limits parser，保留各 registry 的厂商差异；同步更新直接位置参数构造的 resolved dataclass 测试，重跑上列命令。
 
@@ -260,11 +260,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_academic_
 - Test: `tests/unit/test_config_agent.py`
 - Test: `tests/unit/test_search_request_selectors.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_referenced_llm_alias_resolves_ordered_credentials` 保留 alias/protocol/api_endpoint/model，验证各成员独立 endpoint/key/limits；未引用 alias 不读取 env，已引用空 credentials 失败。`test_agent_limits_are_optional_without_credentials` 测 Agent 无配置不限流、有配置严格校验，拒绝 HTTP credentials/strategy。覆盖 LLM/Agent 各处 default_max_concurrency 和 HTTP alias 顶层旧字段拒绝；原模型与 provider 过滤不变。LLM alias 同样参数化共用 strategy 的缺省、两个合法值及非法字符串/类型；Agent 明确拒绝 strategy。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_llm.py tests/unit/test_config_agent.py -k "credentials or optional or legacy or credential_strategy" -v
@@ -272,7 +272,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_llm.py te
 
 预期：LLM 旧 secret/api_url 结构、默认 cap=2 和 Agent cap=1 暴露差异。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 LLM provider 保留协议/endpoint类型，模型在原 invocation 层
@@ -285,7 +285,7 @@ Agent max_concurrency 缺省 None，禁止 HTTP pool 字段
 
 更新 direct dataclass 构造测试；只改本次改变的内部结构，不兼容旧位置参数。
 
-- [ ] **Step 4: 验证 GREEN 与配置检查点**
+- [x] **Step 4: 验证 GREEN 与配置检查点**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py tests/unit/test_search_request_selectors.py -v
@@ -293,7 +293,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 预期：四类 HTTP/Agent 的配置合同全部通过；业务过滤、输入限制和 RetryPolicy 未变。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 检查配置定义及 parser 中不再有隐式 1/2/3 或 fallback default cap；保留它们仅作为“旧字段拒绝”的测试输入和迁移说明。重跑上列命令。
 
@@ -1390,7 +1390,29 @@ uv run python scripts/build_docs.py
 - URLStatus 的六个名称及 URLStore 各方法在所有任务一致；Search content-only 与 vendor Fetch raw contract 分开验证。
 - Search 正文与 Fetch 共用 store 的 per-URL 锁，转换函数同步提交、不重入锁；metadata-only 不改变既有状态。
 - 保留既有 singleflight leader/follower 区别；不把通用取消描述扩展成新所有权模型。
-- 所有新行为均有对应 task 和验收位置；任务复选框表示未来实施，不作为本轮已运行测试的证据。
+- 所有新行为均有对应 task 和验收位置；实施复选框与文末实际命令、结果共同记录完成状态。
+
+## 实施记录（进行中）
+
+2026-11-25：使用 subagent-driven-development，逐任务派发独立实现子代理并完成自查；复用本工作树。`uv sync --locked --all-groups` 成功，当前验证环境为 Linux / Python 3.12.3。真实 API 集成开关在离线测试中显式移除。
+
+| Task | 状态 | 已执行验证 |
+|---|---|---|
+| 1 | 完成 | 公共策略/limits 目标 51 通过；当时四类配置组件 1,162 通过；相关 Ruff / mypy 通过。 |
+| 2 | 完成 | Web 配置 + registry 700 通过；相邻 Academic/LLM/Agent 配置 562 通过；相关 Ruff / mypy 通过。 |
+| 3 | 完成 | Academic/OA 565 通过；合并相邻配置/registry 1,405 通过；相关 Ruff / mypy 通过。 |
+| 4 | 完成 | 四类配置及请求筛选检查点 1,648 通过、0 失败、0 跳过；相关 Ruff 通过；四文件 `mypy --follow-imports=silent` 通过。 |
+| 5–23 | 待实施 | Runtime、gate/pool、调度、URL 状态机、诊断、文档与全量验收尚未完成。 |
+
+配置检查点实际命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py tests/unit/test_search_request_selectors.py -q
+~~~
+
+相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
+
+当前为配置组件检查点，不能据此声称全仓库已通过。Task 2 抽查 Doctor 为 13 通过 / 6 失败，原因是旧 fixture 与已移除的 provider 字段；对应迁移归 Task 19。Runtime 消费旧结构的路径按计划归 Tasks 9–13。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 ## 计划编写与自检记录
 
@@ -1400,4 +1422,4 @@ uv run python scripts/build_docs.py
 - [x] 写入实施计划，提供各任务的 RED/GREEN、最小实现、回归命令。
 - [x] 对照 spec 检查覆盖与类型一致性，并完成独立只读审阅。
 
-已修正审阅发现的 Runtime/LLM/真实示例验收依赖、选择前 gate 身份、四类策略解析、You.com 模式认证、可用性重检及单候选超时、TOML 父表和实际符号名问题。此记录证明计划已检查；上文实施复选框仍全部未勾选，不表示生产功能或测试已经完成。
+已修正审阅发现的 Runtime/LLM/真实示例验收依赖、选择前 gate 身份、四类策略解析、You.com 模式认证、可用性重检及单候选超时、TOML 父表和实际符号名问题。此段仅记录最初计划评审；实施完成状态和真实验证结果见上方实施记录。

@@ -17,6 +17,10 @@ class AcademicProviderRegistration:
     authentication: Requirement = "none"
     contact: Requirement = "none"
 
+    @property
+    def credential_option_keys(self) -> frozenset[str]:
+        return self.allowed_config_keys & {"api_url"}
+
 
 @dataclass(frozen=True, slots=True)
 class OAResolverRegistration:
@@ -25,6 +29,10 @@ class OAResolverRegistration:
     allowed_config_keys: frozenset[str] = frozenset()
     authentication: Requirement = "none"
     contact: Requirement = "none"
+
+    @property
+    def credential_option_keys(self) -> frozenset[str]:
+        return self.allowed_config_keys & {"api_url"}
 
 
 class AcademicProviderRegistry:

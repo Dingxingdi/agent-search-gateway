@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 from .errors import ConfigFailure, ErrorCode
@@ -20,30 +21,17 @@ from .providers.academic.registry import (
     OAResolverRegistry,
     Requirement,
 )
-from .providers.registry import ProviderRegistry, WebProviderRegistration
+from .providers.registry import WEB_ENDPOINT_KEYS, ProviderRegistry, WebProviderRegistration
 
-_WEB_SHARED_KEYS = frozenset(
-    {
-        "use_proxy",
-        "enable_search",
-        "enable_fetch",
-        "api_key_env",
-        "max_concurrency",
-        "rate_limits",
-        "min_interval_seconds",
-    }
+_WEB_PROVIDER_KEYS = frozenset(
+    {"use_proxy", "enable_search", "enable_fetch", "credentials", "credential_strategy"}
 )
-_ACADEMIC_SHARED_KEYS = frozenset(
-    {
-        "use_proxy",
-        "enabled",
-        "max_concurrency",
-        "api_key_env",
-        "contact_email_env",
-        "rate_limits",
-        "min_interval_seconds",
-    }
+_WEB_CREDENTIAL_KEYS = frozenset(
+    {"api_key_env", "max_concurrency", "rate_limits", "min_interval_seconds"}
 )
+_ACADEMIC_SHARED_KEYS = frozenset({"use_proxy", "enabled", "credentials", "credential_strategy"})
+_ACADEMIC_CREDENTIAL_KEYS = _WEB_CREDENTIAL_KEYS | {"contact_email_env"}
+_ACADEMIC_LEGACY_KEYS = _ACADEMIC_CREDENTIAL_KEYS | {"api_url", "default_max_concurrency"}
 _ACADEMIC_RESERVED_OPTIONS = frozenset({"executor", "api_key", "contact_email", "name"})
 
 
@@ -57,6 +45,41 @@ class ResolvedRateWindow:
 class ResolvedRatePolicy:
     windows: tuple[ResolvedRateWindow, ...] = ()
     min_interval_seconds: float | None = None
+
+
+CredentialStrategy = Literal["round_robin", "fill_first"]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedCredential:
+    options: Mapping[str, object] = field(repr=False)
+    api_key_env: str | None = None
+    api_key: SecretValue | None = None
+    contact_email_env: str | None = None
+    contact_email: SecretValue | None = None
+    max_concurrency: int | None = None
+    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "options", MappingProxyType(dict(self.options)))
+
+
+def _resolve_credential_strategy(table: Mapping[str, object], label: str) -> CredentialStrategy:
+    value = table.get("credential_strategy", "round_robin")
+    if isinstance(value, str) and value in ("round_robin", "fill_first"):
+        return cast(CredentialStrategy, value)
+    raise _config_error(f"{label}.credential_strategy must be round_robin or fill_first")
+
+
+def _resolve_credential_limits(
+    table: Mapping[str, object], label: str
+) -> tuple[int | None, ResolvedRatePolicy]:
+    capacity = (
+        _positive_int(table["max_concurrency"], f"{label}.max_concurrency")
+        if "max_concurrency" in table
+        else None
+    )
+    return capacity, _resolve_rate_policy(table, label)
 
 
 def _positive_rate_seconds(value: object, label: str) -> float:
@@ -98,18 +121,16 @@ class ResolvedWebProviderConfig:
     name: str
     enable_search: bool
     enable_fetch: bool
-    max_concurrency: int
-    api_key_env: str | None
-    secret: SecretValue | None
     options: Mapping[str, object]
-    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    credentials: tuple[ResolvedCredential, ...]
+    credential_strategy: CredentialStrategy = "round_robin"
     use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedWebProviderGroup:
-    default_max_concurrency: int
     providers: tuple[ResolvedWebProviderConfig, ...]
+    fetch_order: tuple[str, ...] = ()
 
 
 def _config_error(message: str) -> ConfigFailure:
@@ -197,75 +218,92 @@ def _validate_options(
         _validate_firecrawl_options(options)
 
 
+def _resolve_web_credentials(
+    name: str,
+    table: Mapping[str, object],
+    registration: WebProviderRegistration | None,
+    options: Mapping[str, object],
+    environ: Mapping[str, str],
+    *,
+    enabled: bool,
+) -> tuple[ResolvedCredential, ...]:
+    label = f"web_providers.{name}.credentials"
+    raw_members = table.get("credentials", [])
+    if not isinstance(raw_members, list) or (enabled and not raw_members):
+        raise _config_error(f"{label} must be a non-empty array of tables when enabled")
+    credentials: list[ResolvedCredential] = []
+    for index, raw_member in enumerate(raw_members):
+        member_label = f"{label}[{index}]"
+        member = _require_mapping(raw_member, member_label)
+        overrides = {key: value for key, value in member.items() if key not in _WEB_CREDENTIAL_KEYS}
+        if registration and set(overrides) - registration.credential_option_keys:
+            raise _config_error(f"{member_label} contains an unknown credential option")
+        capacity, rate_policy = _resolve_credential_limits(member, member_label)
+        if not enabled or registration is None:
+            continue
+
+        requirement: Requirement = "none"
+        if registration.requires_api_key:
+            requirement = "required"
+        elif registration.supports_optional_api_key:
+            requirement = "optional"
+        env_name, auth = _resolve_environment_value(
+            member, key="api_key_env", requirement=requirement, label=member_label, environ=environ
+        )
+        effective = {**options, **overrides}
+        for key in registration.credential_option_keys & effective.keys():
+            _required_string(effective, key, member_label)
+        if registration.validate_config is not None:
+            try:
+                registration.validate_config(effective, auth is not None)
+            except ConfigFailure as exc:
+                raise _config_error(f"{member_label}: {exc.message}") from exc
+        credentials.append(
+            ResolvedCredential(
+                options=effective,
+                api_key_env=env_name,
+                api_key=auth,
+                max_concurrency=capacity,
+                rate_policy=rate_policy,
+            )
+        )
+    return tuple(credentials)
+
+
 def _resolve_one_web_provider(
     name: str,
     table: Mapping[str, object],
-    default_max_concurrency: int,
     registry: ProviderRegistry,
     environ: Mapping[str, str],
 ) -> ResolvedWebProviderConfig:
-    use_proxy = _resolve_use_proxy(table, f"web_providers.{name}")
+    label = f"web_providers.{name}"
+    for key in table:
+        if key in _WEB_CREDENTIAL_KEYS or key in WEB_ENDPOINT_KEYS:
+            raise _config_error(f"{label}.{key} was removed; move it into credentials")
+    use_proxy = _resolve_use_proxy(table, label)
     enable_search = _optional_bool(table, "enable_search")
     enable_fetch = _optional_bool(table, "enable_fetch")
-    options = {key: value for key, value in table.items() if key not in _WEB_SHARED_KEYS}
+    enabled = enable_search or enable_fetch
+    options = {key: value for key, value in table.items() if key not in _WEB_PROVIDER_KEYS}
     registration = registry.get(name)
-
     if registration is not None:
         _validate_options(registration, options)
-
-    max_concurrency = _positive_int(
-        table.get("max_concurrency", default_max_concurrency),
-        f"web provider {name} max_concurrency",
-    )
-
-    rate_policy = _resolve_rate_policy(table, f"web_providers.{name}")
-
-    if not enable_search and not enable_fetch:
-        return ResolvedWebProviderConfig(
-            name=name,
-            enable_search=False,
-            enable_fetch=False,
-            max_concurrency=max_concurrency,
-            api_key_env=None,
-            secret=None,
-            options=MappingProxyType(dict(options)),
-            rate_policy=rate_policy,
-            use_proxy=use_proxy,
-        )
-
-    if registration is None:
+        if enable_search and not registration.capabilities.search:
+            raise _config_error(f"web provider {name} does not support search")
+        if enable_fetch and not registration.capabilities.fetch:
+            raise _config_error(f"web provider {name} does not support fetch")
+    elif enabled:
         raise _config_error(f"unknown enabled web provider: {name}")
-    if enable_search and not registration.capabilities.search:
-        raise _config_error(f"web provider {name} does not support search")
-    if enable_fetch and not registration.capabilities.fetch:
-        raise _config_error(f"web provider {name} does not support fetch")
-
-    api_key_env = None
-    secret = None
-    if registration.requires_api_key or "api_key_env" in table:
-        if not registration.requires_api_key and not registration.supports_optional_api_key:
-            raise _config_error(f"web provider {name} does not accept api_key_env")
-        env_name = table.get("api_key_env")
-        if not isinstance(env_name, str) or not env_name.strip():
-            raise _config_error(f"web provider {name} requires api_key_env")
-        secret_text = environ.get(env_name)
-        if not secret_text:
-            raise _config_error(f"environment variable {env_name} is required")
-        api_key_env = env_name
-        secret = SecretValue(secret_text)
-
-    if registration.validate_config is not None:
-        registration.validate_config(options, secret is not None)
 
     return ResolvedWebProviderConfig(
         name=name,
         enable_search=enable_search,
         enable_fetch=enable_fetch,
-        max_concurrency=max_concurrency,
-        api_key_env=api_key_env,
-        secret=secret,
-        options=MappingProxyType(dict(options)),
-        rate_policy=rate_policy,
+        options=MappingProxyType(options),
+        credential_strategy=_resolve_credential_strategy(table, label),
+        credentials=_resolve_web_credentials(
+            name, table, registration, options, environ, enabled=enabled
+        ),
         use_proxy=use_proxy,
     )
 
@@ -276,57 +314,46 @@ def resolve_web_provider_config(
     environ: Mapping[str, str],
 ) -> ResolvedWebProviderGroup:
     web_table = _require_mapping(data.get("web_providers", {}), "web_providers")
-    default_max_concurrency = _positive_int(
-        web_table.get("default_max_concurrency", 3),
-        "web_providers.default_max_concurrency",
+    if "default_max_concurrency" in web_table:
+        raise _config_error(
+            "web_providers.default_max_concurrency was removed; set max_concurrency in credentials"
+        )
+    fetch_order = _validate_choice_list(
+        web_table.get("fetch_order", []),
+        "web_providers.fetch_order",
+        frozenset(item.name for item in registry.for_stage("fetch")),
+        allow_empty=True,
     )
-
     providers: list[ResolvedWebProviderConfig] = []
     for name, value in web_table.items():
-        if name == "default_max_concurrency":
+        if name == "fetch_order":
             continue
         provider_table = _require_mapping(value, f"web_providers.{name}")
-        providers.append(
-            _resolve_one_web_provider(
-                name,
-                provider_table,
-                default_max_concurrency,
-                registry,
-                environ,
-            )
-        )
-    return ResolvedWebProviderGroup(default_max_concurrency, tuple(providers))
+        providers.append(_resolve_one_web_provider(name, provider_table, registry, environ))
+    return ResolvedWebProviderGroup(tuple(providers), fetch_order)
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedAcademicProviderConfig:
     name: str
     enabled: bool
-    max_concurrency: int
-    api_key_env: str | None
-    api_key: SecretValue | None
-    contact_email_env: str | None
-    contact_email: SecretValue | None
     options: Mapping[str, object]
-    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    credentials: tuple[ResolvedCredential, ...]
+    credential_strategy: CredentialStrategy = "round_robin"
     use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedAcademicProviderGroup:
-    default_max_concurrency: int = 3
     providers: tuple[ResolvedAcademicProviderConfig, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedOAResolverConfig:
     name: str
-    api_key_env: str | None
-    api_key: SecretValue | None
-    contact_email_env: str | None
-    contact_email: SecretValue | None
     options: Mapping[str, object]
-    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
+    credentials: tuple[ResolvedCredential, ...]
+    credential_strategy: CredentialStrategy = "round_robin"
     use_proxy: bool = True
 
 
@@ -352,7 +379,10 @@ def _validate_academic_options(
     name: str,
     registration: AcademicProviderRegistration | OAResolverRegistration,
     options: dict[str, object],
+    *,
+    label: str | None = None,
 ) -> None:
+    label = label or name
     reserved = set(options) & _ACADEMIC_RESERVED_OPTIONS
     if reserved:
         names = ", ".join(sorted(reserved))
@@ -362,9 +392,8 @@ def _validate_academic_options(
         names = ", ".join(sorted(unknown))
         raise _config_error(f"unknown config key(s) for {name}: {names}")
     if "api_url" in options:
-        _validate_http_url(options["api_url"], f"{name}.api_url")
+        _validate_http_url(options["api_url"], f"{label}.api_url")
     if isinstance(registration, AcademicProviderRegistration) and name == "arxiv":
-        label = "academic_providers.arxiv"
         if "query_fields" in options:
             options["query_fields"] = _validate_choice_list(
                 options["query_fields"], f"{label}.query_fields", frozenset({"ti", "abs"})
@@ -405,8 +434,91 @@ def _resolve_environment_value(
         raise _config_error(f"{label}.{key} must be a non-empty string")
     resolved_value = environ.get(env_name)
     if not resolved_value:
-        raise _config_error(f"environment variable {env_name} is required")
+        raise _config_error(f"{label}.{key}: environment variable {env_name} is required")
     return env_name, SecretValue(resolved_value)
+
+
+def _resolve_academic_credentials(
+    table: Mapping[str, object],
+    registration: AcademicProviderRegistration | OAResolverRegistration,
+    options: Mapping[str, object],
+    environ: Mapping[str, str],
+    *,
+    label: str,
+    enabled: bool,
+) -> tuple[ResolvedCredential, ...]:
+    raw_members = table.get("credentials", [])
+    if not isinstance(raw_members, list) or (enabled and not raw_members):
+        raise _config_error(f"{label}.credentials must be a non-empty array of tables when enabled")
+    credentials: list[ResolvedCredential] = []
+    for index, raw_member in enumerate(raw_members):
+        member_label = f"{label}.credentials[{index}]"
+        member = _require_mapping(raw_member, member_label)
+        overrides = {
+            key: value for key, value in member.items() if key not in _ACADEMIC_CREDENTIAL_KEYS
+        }
+        if set(overrides) - registration.credential_option_keys:
+            raise _config_error(f"{member_label} contains an unknown credential option")
+        capacity, rate_policy = _resolve_credential_limits(member, member_label)
+        effective = {**options, **overrides}
+        _validate_academic_options(registration.name, registration, effective, label=member_label)
+        values: dict[str, tuple[str | None, SecretValue | None]] = {}
+        for key, requirement in (
+            ("api_key_env", registration.authentication),
+            ("contact_email_env", registration.contact),
+        ):
+            if enabled:
+                values[key] = _resolve_environment_value(
+                    member, key=key, requirement=requirement, label=member_label, environ=environ
+                )
+            elif key in member:
+                if requirement == "none":
+                    raise _config_error(f"{member_label} does not accept {key}")
+                _required_string(member, key, member_label)
+        if not enabled:
+            continue
+        auth_env, auth_value = values["api_key_env"]
+        contact_env, contact_value = values["contact_email_env"]
+        credentials.append(
+            ResolvedCredential(
+                options=effective,
+                api_key_env=auth_env,
+                api_key=auth_value,
+                contact_email_env=contact_env,
+                contact_email=contact_value,
+                max_concurrency=capacity,
+                rate_policy=rate_policy,
+            )
+        )
+    return tuple(credentials)
+
+
+def _resolve_academic_entry(
+    table: Mapping[str, object],
+    registration: AcademicProviderRegistration | OAResolverRegistration,
+    environ: Mapping[str, str],
+    label: str,
+) -> tuple[bool, bool, dict[str, object], tuple[ResolvedCredential, ...], CredentialStrategy]:
+    for key in table:
+        if key in _ACADEMIC_LEGACY_KEYS:
+            raise _config_error(f"{label}.{key} was removed; move it into credentials")
+    enabled = _enabled(table, label)
+    use_proxy = _resolve_use_proxy(table, label)
+    strategy = _resolve_credential_strategy(table, label)
+    raw_options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
+    options = dict(raw_options)
+    _validate_academic_options(registration.name, registration, options, label=label)
+    credentials = _resolve_academic_credentials(
+        table, registration, raw_options, environ, label=label, enabled=enabled
+    )
+    return enabled, use_proxy, options, credentials, strategy
+
+
+def _reject_academic_default_limit(group: Mapping[str, object], label: str) -> None:
+    if "default_max_concurrency" in group:
+        raise _config_error(
+            f"{label}.default_max_concurrency was removed; set max_concurrency in credentials"
+        )
 
 
 def resolve_academic_provider_config(
@@ -415,84 +527,28 @@ def resolve_academic_provider_config(
     environ: Mapping[str, str],
 ) -> ResolvedAcademicProviderGroup:
     group = _require_mapping(data.get("academic_providers", {}), "academic_providers")
-    default_limit = _positive_int(
-        group.get("default_max_concurrency", 3),
-        "academic_providers.default_max_concurrency",
-    )
+    _reject_academic_default_limit(group, "academic_providers")
     providers: list[ResolvedAcademicProviderConfig] = []
     for name, raw_value in group.items():
-        if name == "default_max_concurrency":
-            continue
-        table = _require_mapping(raw_value, f"academic_providers.{name}")
+        label = f"academic_providers.{name}"
+        table = _require_mapping(raw_value, label)
         registration = registry.get(name)
         if registration is None:
             raise _config_error(f"unknown academic provider: {name}")
-        enabled = _enabled(table, f"academic_providers.{name}")
-        use_proxy = _resolve_use_proxy(table, f"academic_providers.{name}")
-        options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
-        _validate_academic_options(name, registration, options)
-        limit = _positive_int(
-            table.get("max_concurrency", default_limit),
-            f"academic provider {name} max_concurrency",
-        )
-        rate_policy = _resolve_rate_policy(table, f"academic_providers.{name}")
-        if not enabled:
-            for key, requirement in (
-                ("api_key_env", registration.authentication),
-                ("contact_email_env", registration.contact),
-            ):
-                if requirement == "none" and key in table:
-                    raise _config_error(f"academic provider {name} does not accept {key}")
-                if key in table and (
-                    not isinstance(table[key], str) or not str(table[key]).strip()
-                ):
-                    raise _config_error(
-                        f"academic provider {name}.{key} must be a non-empty string"
-                    )
-            providers.append(
-                ResolvedAcademicProviderConfig(
-                    name,
-                    False,
-                    limit,
-                    None,
-                    None,
-                    None,
-                    None,
-                    MappingProxyType(dict(options)),
-                    rate_policy,
-                    use_proxy=use_proxy,
-                )
-            )
-            continue
-        auth_env, auth_value = _resolve_environment_value(
-            table,
-            key="api_key_env",
-            requirement=registration.authentication,
-            label=f"academic provider {name}",
-            environ=environ,
-        )
-        contact_env, contact_value = _resolve_environment_value(
-            table,
-            key="contact_email_env",
-            requirement=registration.contact,
-            label=f"academic provider {name}",
-            environ=environ,
+        enabled, use_proxy, options, credentials, strategy = _resolve_academic_entry(
+            table, registration, environ, label
         )
         providers.append(
             ResolvedAcademicProviderConfig(
-                name,
-                enabled,
-                limit,
-                auth_env,
-                auth_value,
-                contact_env,
-                contact_value,
-                MappingProxyType(dict(options)),
-                rate_policy,
+                name=name,
+                enabled=enabled,
+                options=MappingProxyType(options),
+                credentials=credentials,
+                credential_strategy=strategy,
                 use_proxy=use_proxy,
             )
         )
-    return ResolvedAcademicProviderGroup(default_limit, tuple(providers))
+    return ResolvedAcademicProviderGroup(tuple(providers))
 
 
 def resolve_oa_resolver_config(
@@ -501,43 +557,26 @@ def resolve_oa_resolver_config(
     environ: Mapping[str, str],
 ) -> ResolvedOAResolverConfig | None:
     group = _require_mapping(data.get("oa_resolvers", {}), "oa_resolvers")
+    _reject_academic_default_limit(group, "oa_resolvers")
     resolved: ResolvedOAResolverConfig | None = None
     for name, raw_value in group.items():
-        table = _require_mapping(raw_value, f"oa_resolvers.{name}")
+        label = f"oa_resolvers.{name}"
+        table = _require_mapping(raw_value, label)
         registration = registry.get(name)
         if registration is None:
             raise _config_error(f"unknown OA resolver: {name}")
-        enabled = _enabled(table, f"oa_resolvers.{name}")
-        use_proxy = _resolve_use_proxy(table, f"oa_resolvers.{name}")
-        options = {key: value for key, value in table.items() if key not in _ACADEMIC_SHARED_KEYS}
-        _validate_academic_options(name, registration, options)
-        rate_policy = _resolve_rate_policy(table, f"oa_resolvers.{name}")
+        enabled, use_proxy, options, credentials, strategy = _resolve_academic_entry(
+            table, registration, environ, label
+        )
         if not enabled:
             continue
         if resolved is not None:
             raise _config_error("only one OA resolver may be enabled")
-        auth_env, auth_value = _resolve_environment_value(
-            table,
-            key="api_key_env",
-            requirement=registration.authentication,
-            label=f"OA resolver {name}",
-            environ=environ,
-        )
-        contact_env, contact_value = _resolve_environment_value(
-            table,
-            key="contact_email_env",
-            requirement=registration.contact,
-            label=f"OA resolver {name}",
-            environ=environ,
-        )
         resolved = ResolvedOAResolverConfig(
-            name,
-            auth_env,
-            auth_value,
-            contact_env,
-            contact_value,
-            MappingProxyType(dict(options)),
-            rate_policy,
+            name=name,
+            options=MappingProxyType(options),
+            credentials=credentials,
+            credential_strategy=strategy,
             use_proxy=use_proxy,
         )
     return resolved
@@ -548,16 +587,13 @@ class LLMProviderConfig:
     name: str
     protocol: str
     api_endpoint: str
-    api_url: str
-    api_key_env: str
-    secret: SecretValue
-    max_concurrency: int
+    credentials: tuple[ResolvedCredential, ...]
+    credential_strategy: CredentialStrategy = "round_robin"
     use_proxy: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class ResolvedLLMConfig:
-    default_max_concurrency: int
     providers: tuple[LLMProviderConfig, ...]
     search_invocations: tuple[LLMInvocation, ...]
     judge: LLMInvocation
@@ -571,9 +607,10 @@ class AgentProviderConfig:
     name: str
     harness: str
     command: str
-    max_concurrency: int
+    max_concurrency: int | None
     timeout_seconds: float
     pass_env: tuple[str, ...]
+    rate_policy: ResolvedRatePolicy = ResolvedRatePolicy()
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,6 +634,13 @@ class ResolvedConfig:
     oa_resolver: ResolvedOAResolverConfig | None = None
     agent: ResolvedAgentConfig = field(default_factory=ResolvedAgentConfig)
     input_limits: ResolvedInputLimits = ResolvedInputLimits()
+
+
+def _reject_removed_default_limit(table: Mapping[str, object], label: str) -> None:
+    if "default_max_concurrency" in table:
+        raise _config_error(
+            f"{label}.default_max_concurrency was removed; configure explicit max_concurrency"
+        )
 
 
 def _required_string(table: Mapping[str, object], key: str, label: str) -> str:
@@ -650,6 +694,7 @@ def _search_invocations(
     global_table: Mapping[str, object],
 ) -> tuple[LLMInvocation, ...]:
     search_table = _require_mapping(data.get("search_llm", {}), "search_llm")
+    _reject_removed_default_limit(search_table, "search_llm")
     raw_entries = search_table.get("providers", [])
     if not isinstance(raw_entries, list):
         raise _config_error("search_llm.providers must be an array of tables")
@@ -657,6 +702,7 @@ def _search_invocations(
     resolved: list[LLMInvocation] = []
     for index, raw_entry in enumerate(raw_entries):
         entry = _require_mapping(raw_entry, f"search_llm.providers[{index}]")
+        _reject_removed_default_limit(entry, f"search_llm.providers[{index}]")
         resolved.append(
             _resolve_invocation(
                 f"search_llm.providers[{index}]",
@@ -672,10 +718,12 @@ def _fetch_invocations(
     global_table: Mapping[str, object],
 ) -> tuple[LLMInvocation, LLMInvocation, LLMInvocation, LLMInvocation]:
     fetch_table = _require_mapping(data.get("fetch_llm", {}), "fetch_llm")
+    _reject_removed_default_limit(fetch_table, "fetch_llm")
     names = ("judge", "safety", "content_clean", "focus_summary")
     invocations: list[LLMInvocation] = []
     for name in names:
         stage_table = _require_mapping(fetch_table.get(name, {}), f"fetch_llm.{name}")
+        _reject_removed_default_limit(stage_table, f"fetch_llm.{name}")
         invocations.append(
             _resolve_invocation(
                 f"fetch_llm.{name}",
@@ -688,12 +736,16 @@ def _fetch_invocations(
 def _resolve_referenced_llm_providers(
     llm_table: Mapping[str, object],
     referenced: set[str],
-    default_max_concurrency: int,
     environ: Mapping[str, str],
 ) -> tuple[LLMProviderConfig, ...]:
     providers: list[LLMProviderConfig] = []
     for name, raw_value in llm_table.items():
-        if name == "default_max_concurrency" or name not in referenced:
+        label = f"llm_providers.{name}"
+        if isinstance(raw_value, Mapping):
+            for key in raw_value:
+                if key in _ACADEMIC_LEGACY_KEYS | {"api_key", "contact_email", "secret"}:
+                    raise _config_error(f"{label}.{key} was removed; move it into credentials")
+        if name not in referenced:
             continue
         table = _require_mapping(raw_value, f"llm_providers.{name}")
         use_proxy = _resolve_use_proxy(table, f"llm_providers.{name}")
@@ -701,24 +753,39 @@ def _resolve_referenced_llm_providers(
         endpoint = _required_string(table, "api_endpoint", f"llm_providers.{name}")
         if protocol != "openai" or endpoint != "chat_completions":
             raise _config_error(f"unsupported LLM provider protocol/endpoint: {name}")
-        api_url = _required_string(table, "api_url", f"llm_providers.{name}")
-        api_key_env = _required_string(table, "api_key_env", f"llm_providers.{name}")
-        secret_text = environ.get(api_key_env)
-        if not secret_text:
-            raise _config_error(f"environment variable {api_key_env} is required")
-        max_concurrency = _positive_int(
-            table.get("max_concurrency", default_max_concurrency),
-            f"llm provider {name} max_concurrency",
-        )
+        raw_members = table.get("credentials")
+        if not isinstance(raw_members, list) or not raw_members:
+            raise _config_error(
+                f"llm_providers.{name}.credentials must be a non-empty array of tables"
+            )
+        credentials: list[ResolvedCredential] = []
+        for index, raw_member in enumerate(raw_members):
+            label = f"llm_providers.{name}.credentials[{index}]"
+            member = _require_mapping(raw_member, label)
+            _reject_removed_default_limit(member, label)
+            if set(member) - (_WEB_CREDENTIAL_KEYS | {"api_url"}):
+                raise _config_error(f"{label} contains an unknown credential option")
+            api_url = _required_string(member, "api_url", label)
+            auth_env, auth_value = _resolve_environment_value(
+                member, key="api_key_env", requirement="required", label=label, environ=environ
+            )
+            capacity, rate_policy = _resolve_credential_limits(member, label)
+            credentials.append(
+                ResolvedCredential(
+                    options={"api_url": api_url},
+                    api_key_env=auth_env,
+                    api_key=auth_value,
+                    max_concurrency=capacity,
+                    rate_policy=rate_policy,
+                )
+            )
         providers.append(
             LLMProviderConfig(
                 name=name,
                 protocol=protocol,
                 api_endpoint=endpoint,
-                api_url=api_url,
-                api_key_env=api_key_env,
-                secret=SecretValue(secret_text),
-                max_concurrency=max_concurrency,
+                credentials=tuple(credentials),
+                credential_strategy=_resolve_credential_strategy(table, f"llm_providers.{name}"),
                 use_proxy=use_proxy,
             )
         )
@@ -735,22 +802,21 @@ def resolve_llm_config(
     environ: Mapping[str, str],
 ) -> ResolvedLLMConfig:
     llm_table = _require_mapping(data.get("llm_providers", {}), "llm_providers")
-    default_max_concurrency = _positive_int(
-        llm_table.get("default_max_concurrency", 2),
-        "llm_providers.default_max_concurrency",
-    )
+    if "default_max_concurrency" in llm_table:
+        raise _config_error(
+            "llm_providers.default_max_concurrency was removed; set max_concurrency in credentials"
+        )
     global_table = _require_mapping(data.get("global_default_llm", {}), "global_default_llm")
+    _reject_removed_default_limit(global_table, "global_default_llm")
     search_invocations = _search_invocations(data, global_table)
     judge, safety, content_clean, focus_summary = _fetch_invocations(data, global_table)
     all_invocations = (*search_invocations, judge, safety, content_clean, focus_summary)
     providers = _resolve_referenced_llm_providers(
         llm_table,
         {invocation.provider for invocation in all_invocations},
-        default_max_concurrency,
         environ,
     )
     return ResolvedLLMConfig(
-        default_max_concurrency=default_max_concurrency,
         providers=providers,
         search_invocations=search_invocations,
         judge=judge,
@@ -773,9 +839,14 @@ def _positive_float(value: object, label: str) -> float:
 
 def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
     search = _require_mapping(data.get("search_agent", {}), "search_agent")
+    _reject_removed_default_limit(search, "search_agent")
     if set(search) - {"providers"}:
         raise _config_error("search_agent contains unsupported fields")
     group = _require_mapping(data.get("agent_providers", {}), "agent_providers")
+    if "default_max_concurrency" in group:
+        raise _config_error(
+            "agent_providers.default_max_concurrency was removed; set max_concurrency on each alias"
+        )
     entries = search.get("providers", [])
     if not isinstance(entries, list):
         raise _config_error("search_agent.providers must be an array of tables")
@@ -783,6 +854,7 @@ def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
     for index, raw_entry in enumerate(entries):
         label = f"search_agent.providers[{index}]"
         entry = _require_mapping(raw_entry, label)
+        _reject_removed_default_limit(entry, label)
         if set(entry) - {"provider", "model"}:
             raise _config_error(f"{label} contains unsupported fields")
         invocations.append(
@@ -794,11 +866,36 @@ def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
     referenced = {invocation.provider for invocation in invocations}
     providers: list[AgentProviderConfig] = []
     for name, raw_table in group.items():
+        label = f"agent_providers.{name}"
+        if isinstance(raw_table, Mapping):
+            if "default_max_concurrency" in raw_table:
+                raise _config_error(
+                    f"{label}.default_max_concurrency was removed; set max_concurrency on the alias"
+                )
+            for key in raw_table:
+                if key in {
+                    "credentials",
+                    "credential_strategy",
+                    "api_url",
+                    "api_key_env",
+                    "api_key",
+                    "contact_email_env",
+                    "contact_email",
+                    "secret",
+                }:
+                    raise _config_error(f"{label}.{key} is not supported for CLI Agent providers")
         if name not in referenced:
             continue
-        label = f"agent_providers.{name}"
         table = _require_mapping(raw_table, label)
-        if set(table) - {"harness", "command", "max_concurrency", "timeout_seconds", "pass_env"}:
+        if set(table) - {
+            "harness",
+            "command",
+            "max_concurrency",
+            "rate_limits",
+            "min_interval_seconds",
+            "timeout_seconds",
+            "pass_env",
+        }:
             raise _config_error(f"{label} contains unsupported fields")
         harness = _required_string(table, "harness", label)
         if harness != "antigravity":
@@ -822,14 +919,14 @@ def resolve_agent_config(data: Mapping[str, object]) -> ResolvedAgentConfig:
             for item in pass_env
         ):
             raise _config_error(f"{label}.pass_env must be an array of environment variable names")
+        capacity, rate_policy = _resolve_credential_limits(table, label)
         providers.append(
             AgentProviderConfig(
                 name=name,
                 harness=harness,
                 command=command,
-                max_concurrency=_positive_int(
-                    table.get("max_concurrency", 1), f"{label}.max_concurrency"
-                ),
+                max_concurrency=capacity,
+                rate_policy=rate_policy,
                 timeout_seconds=timeout,
                 pass_env=tuple(pass_env),
             )

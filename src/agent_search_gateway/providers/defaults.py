@@ -87,6 +87,7 @@ def build_default_registry() -> ProviderRegistry:
             ProviderCapabilities(search=True, fetch=True),
             BrightDataAdapter,
             frozenset({"api_url", "search_zone", "fetch_zone"}),
+            credential_override_keys=frozenset({"search_zone", "fetch_zone"}),
         ),
         WebProviderRegistration(
             "scrape_do",

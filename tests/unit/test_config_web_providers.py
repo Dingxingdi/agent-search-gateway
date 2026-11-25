@@ -1,3 +1,5 @@
+from collections import UserString
+
 import pytest
 
 from agent_search_gateway.config import resolve_web_provider_config
@@ -6,6 +8,368 @@ from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.contracts import ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.registry import ProviderRegistry, WebProviderRegistration
+
+
+@pytest.mark.parametrize("capacity", [None, 2])
+@pytest.mark.parametrize("raw_windows", [None, [], [{"requests": 4, "period_seconds": 1.5}]])
+@pytest.mark.parametrize("interval", [None, 0.25])
+def test_credential_limits_are_independently_optional(
+    capacity: int | None,
+    raw_windows: list[dict[str, object]] | None,
+    interval: float | None,
+) -> None:
+    from agent_search_gateway.config import _resolve_credential_limits
+
+    table: dict[str, object] = {}
+    if capacity is not None:
+        table["max_concurrency"] = capacity
+    if raw_windows is not None:
+        table["rate_limits"] = raw_windows
+    if interval is not None:
+        table["min_interval_seconds"] = interval
+
+    actual_capacity, policy = _resolve_credential_limits(table, "web_providers.dual.credentials[1]")
+    assert actual_capacity == capacity
+    assert tuple((w.requests, w.period_seconds) for w in policy.windows) == (
+        ((4, 1.5),) if raw_windows else ()
+    )
+    assert policy.min_interval_seconds == interval
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error_field"),
+    [
+        *(("max_concurrency", v, "max_concurrency") for v in (None, 0, -1, True, 1.5, "2")),
+        *(
+            ("min_interval_seconds", v, "min_interval_seconds")
+            for v in (None, 0, -1, True, float("inf"), float("nan"), "synthetic-secret")
+        ),
+        ("rate_limits", None, "rate_limits"),
+        ("rate_limits", {}, "rate_limits"),
+        ("rate_limits", (), "rate_limits"),
+        ("rate_limits", "https://private.invalid", "rate_limits"),
+        ("rate_limits", [False], "rate_limits[0]"),
+        ("rate_limits", [{"period_seconds": 1}], "rate_limits[0].requests"),
+        ("rate_limits", [{"requests": 1}], "rate_limits[0].period_seconds"),
+        ("rate_limits", [{"synthetic-secret": 1}], "rate_limits[0]"),
+        *(
+            ("rate_limits", [{"requests": v, "period_seconds": 1}], "rate_limits[0].requests")
+            for v in (0, -1, True, 1.5)
+        ),
+        *(
+            ("rate_limits", [{"requests": 1, "period_seconds": v}], "rate_limits[0].period_seconds")
+            for v in (0, -1, True, float("inf"), float("nan"))
+        ),
+    ],
+)
+def test_invalid_explicit_limits_report_field_path(
+    field: str, value: object, error_field: str
+) -> None:
+    from agent_search_gateway.config import _resolve_credential_limits
+
+    label = "web_providers.dual.credentials[1]"
+    with pytest.raises(ConfigFailure) as caught:
+        _resolve_credential_limits({field: value}, label)
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    message = str(caught.value)
+    assert f"{label}.{error_field}" in message
+    assert "synthetic-secret" not in message
+    assert "private.invalid" not in message
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        ({}, "round_robin"),
+        ({"credential_strategy": "round_robin"}, "round_robin"),
+        ({"credential_strategy": "fill_first"}, "fill_first"),
+        ({"credential_strategy": "fill_out"}, None),
+        ({"credential_strategy": "https://private.invalid/key"}, None),
+        ({"credential_strategy": UserString("fill_first")}, None),
+        ({"credential_strategy": True}, None),
+        ({"credential_strategy": []}, None),
+        ({"credential_strategy": None}, None),
+    ],
+)
+def test_credential_strategy_defaults_and_rejects_invalid_values(
+    table: dict[str, object], expected: str | None
+) -> None:
+    from agent_search_gateway.config import _resolve_credential_strategy
+
+    label = "web_providers.dual"
+    if expected is None:
+        with pytest.raises(ConfigFailure) as caught:
+            _resolve_credential_strategy(table, label)
+        assert caught.value.code is ErrorCode.CONFIG_ERROR
+        assert f"{label}.credential_strategy" in str(caught.value)
+        assert "private.invalid" not in str(caught.value)
+    else:
+        assert _resolve_credential_strategy(table, label) == expected
+
+
+def test_resolved_credential_snapshots_read_only_options_and_hides_sensitive_values() -> None:
+    from dataclasses import FrozenInstanceError
+
+    from agent_search_gateway.config import ResolvedCredential, ResolvedRatePolicy
+
+    endpoint = "https://private.invalid/endpoint"
+    options: dict[str, object] = {"base_url": endpoint}
+    key = SecretValue("synthetic-api-key")
+    email = SecretValue("contact@example.invalid")
+    credential = ResolvedCredential(
+        options=options,
+        api_key_env="TEST_KEY",
+        api_key=key,
+        contact_email_env="TEST_EMAIL",
+        contact_email=email,
+    )
+    options.clear()
+    assert credential.options == {"base_url": endpoint}
+    with pytest.raises(TypeError):
+        credential.options["base_url"] = ""
+    with pytest.raises(FrozenInstanceError):
+        credential.max_concurrency = 3  # type: ignore[misc]
+    assert not hasattr(credential, "__dict__")
+    assert credential.max_concurrency is None
+    assert credential.rate_policy == ResolvedRatePolicy()
+    assert (credential.api_key_env, credential.api_key) == ("TEST_KEY", key)
+    assert (credential.contact_email_env, credential.contact_email) == ("TEST_EMAIL", email)
+    for sensitive in (endpoint, key.reveal(), email.reveal()):
+        assert sensitive not in repr(credential)
+
+
+def test_web_credentials_preserve_order_and_validate_every_member() -> None:
+    members = [
+        {"api_url": "https://one.example", "api_key_env": "ONE"},
+        {"api_url": "https://two.example", "api_key_env": "TWO"},
+    ]
+    data = {"web_providers": {"tavily": {"enable_search": True, "credentials": members}}}
+    registry = build_default_registry()
+    [provider] = resolve_web_provider_config(data, registry, {"ONE": "a", "TWO": "b"}).providers
+    assert [(c.options, c.api_key_env) for c in provider.credentials] == [
+        ({"api_url": "https://one.example"}, "ONE"),
+        ({"api_url": "https://two.example"}, "TWO"),
+    ]
+    assert [c.api_key.reveal() for c in provider.credentials if c.api_key] == ["a", "b"]
+    assert dict(provider.options) == {}
+    with pytest.raises(ConfigFailure, match=r"tavily\.credentials\[1\]"):
+        resolve_web_provider_config(data, registry, {"ONE": "a"})
+
+
+@pytest.mark.parametrize("order", [None, [], ["exa", "jina"], ["jina"], ["zenrows", "exa"]])
+def test_fetch_order_prioritizes_then_appends_enabled_providers(order: list[str] | None) -> None:
+    web: dict[str, object] = {
+        "exa": {
+            "enable_search": True,
+            "enable_fetch": True,
+            "credentials": [{"api_key_env": "KEY"}],
+        },
+        "jina": {"enable_fetch": True, "credentials": [{}]},
+        "zenrows": {"enable_fetch": False},
+    }
+    if order is not None:
+        web["fetch_order"] = order
+    group = resolve_web_provider_config(
+        {"web_providers": web}, build_default_registry(), {"KEY": "x"}
+    )
+    assert group.fetch_order == tuple(order or [])
+    assert [p.name for p in group.providers if p.enable_search] == ["exa"]
+    assert [p.name for p in group.providers if p.enable_fetch] == ["exa", "jina"]
+
+
+@pytest.mark.parametrize("order", [["jina", "jina"], ["unknown"], ["brave"], [1], "jina", {}])
+def test_fetch_order_rejects_invalid_entries(order: object) -> None:
+    with pytest.raises(ConfigFailure, match="web_providers.fetch_order"):
+        resolve_web_provider_config(
+            {"web_providers": {"fetch_order": order}}, build_default_registry(), {}
+        )
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [
+        ("tavily", "api_url"),
+        ("tavily", "api_key_env"),
+        ("tavily", "max_concurrency"),
+        ("tavily", "rate_limits"),
+        ("tavily", "min_interval_seconds"),
+        ("tinyfish", "search_api_url"),
+        ("tinyfish", "fetch_api_url"),
+        ("unknown_disabled", "api_url"),
+    ],
+)
+def test_legacy_fields_require_migration(name: str, field: str, enabled: bool, mixed: bool) -> None:
+    provider: dict[str, object] = {"enable_search": enabled, field: "synthetic-private-value"}
+    if mixed:
+        provider["credentials"] = [{"api_key_env": "KEY"}]
+    with pytest.raises(ConfigFailure) as error:
+        resolve_web_provider_config(
+            {"web_providers": {name: provider}}, build_default_registry(), {}
+        )
+    assert f"web_providers.{name}.{field}" in str(error.value)
+    assert "credentials" in str(error.value)
+    assert "synthetic-private-value" not in str(error.value)
+
+
+def test_legacy_default_max_concurrency_requires_migration() -> None:
+    with pytest.raises(ConfigFailure, match=r"default_max_concurrency.*credentials"):
+        resolve_web_provider_config(
+            {"web_providers": {"default_max_concurrency": 3}}, _registry(), {}
+        )
+
+
+@pytest.mark.parametrize(
+    ("table", "expected"),
+    [
+        ({}, "round_robin"),
+        ({"credential_strategy": "round_robin"}, "round_robin"),
+        ({"credential_strategy": "fill_first"}, "fill_first"),
+        ({"credential_strategy": "fill_out"}, None),
+        ({"credential_strategy": "https://private.invalid/key"}, None),
+        ({"credential_strategy": UserString("fill_first")}, None),
+        ({"credential_strategy": True}, None),
+        ({"credential_strategy": []}, None),
+        ({"credential_strategy": None}, None),
+    ],
+)
+def test_web_credential_strategy(table: dict[str, object], expected: str | None) -> None:
+    config = {"web_providers": {"jina": {"enable_fetch": True, "credentials": [{}], **table}}}
+    if expected is None:
+        with pytest.raises(ConfigFailure, match="web_providers.jina.credential_strategy"):
+            resolve_web_provider_config(config, build_default_registry(), {})
+    else:
+        [provider] = resolve_web_provider_config(config, build_default_registry(), {}).providers
+        assert provider.credential_strategy == expected
+
+
+def test_brightdata_credentials_override_only_their_own_zones() -> None:
+    table = {
+        "enable_fetch": True,
+        "search_zone": "shared-search",
+        "fetch_zone": "shared-fetch",
+        "credentials": [
+            {"api_key_env": "KEY", "fetch_zone": "first"},
+            {"api_key_env": "KEY", "search_zone": "second"},
+        ],
+    }
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {"brightdata": table}}, build_default_registry(), {"KEY": "x"}
+    ).providers
+    assert dict(provider.options) == {"search_zone": "shared-search", "fetch_zone": "shared-fetch"}
+    assert [c.options for c in provider.credentials] == [
+        {"search_zone": "shared-search", "fetch_zone": "first"},
+        {"search_zone": "second", "fetch_zone": "shared-fetch"},
+    ]
+
+
+@pytest.mark.parametrize(
+    ("member", "reason"),
+    [
+        ({"api_url": "https://ydc-index.io"}, "REST requires an API key"),
+        (
+            {"api_url": "https://api.you.com/mcp/free", "api_key_env": "KEY"},
+            "does not accept an API key",
+        ),
+    ],
+)
+def test_youcom_credentials_validate_each_endpoint_and_key_pair(
+    member: dict[str, str], reason: str
+) -> None:
+    rest = {"api_url": "https://ydc-index.io", "api_key_env": "KEY"}
+    free = {"api_url": "https://api.you.com/mcp/free"}
+    members = [rest, free]
+    config = {"web_providers": {"youcom": {"enable_fetch": True, "credentials": members}}}
+    registry = build_default_registry()
+    [provider] = resolve_web_provider_config(config, registry, {"KEY": "x"}).providers
+    assert [c.api_key is not None for c in provider.credentials] == [True, False]
+    members.append(member)
+    with pytest.raises(ConfigFailure) as error:
+        resolve_web_provider_config(config, registry, {"KEY": "x"})
+    assert "web_providers.youcom.credentials[2]" in str(error.value)
+    assert reason in str(error.value)
+
+
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [
+        ("tavily", "api_url"),
+        ("tinyfish", "search_api_url"),
+        ("tinyfish", "fetch_api_url"),
+        ("brightdata", "search_zone"),
+        ("brightdata", "fetch_zone"),
+    ],
+)
+@pytest.mark.parametrize("value", [None, 42, "   ", {"private.invalid": 1}])
+def test_web_credentials_validate_explicit_endpoint_and_zone_types(
+    name: str, field: str, value: object
+) -> None:
+    members = [{"api_key_env": "KEY"}, {"api_key_env": "KEY", field: value}]
+    data = {"web_providers": {name: {"enable_fetch": True, "credentials": members}}}
+    with pytest.raises(ConfigFailure) as error:
+        resolve_web_provider_config(data, build_default_registry(), {"KEY": "x"})
+    assert f"web_providers.{name}.credentials[1].{field}" in str(error.value)
+    assert "private.invalid" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{}, {"credentials": []}, {"credentials": {}}, {"credentials": "x"}, {"credentials": [False]}],
+)
+def test_web_credentials_must_be_a_nonempty_array_of_tables(fields: dict[str, object]) -> None:
+    config = {"web_providers": {"jina": {"enable_fetch": True, **fields}}}
+    with pytest.raises(ConfigFailure, match="web_providers.jina.credentials"):
+        resolve_web_provider_config(config, build_default_registry(), {})
+
+
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [
+        ("firecrawl", "search_limit"),
+        ("parallel", "mode"),
+        ("open_websearch", "engines"),
+        ("tavily", "fetch_zone"),
+        ("tinyfish", "api_url"),
+        ("jina", "base_url"),
+        ("jina", "use_proxy"),
+        ("jina", "credentials"),
+        ("jina", "arbitrary_option"),
+    ],
+)
+def test_web_credentials_reject_unregistered_overrides(name: str, field: str) -> None:
+    config = {
+        "web_providers": {name: {"enable_fetch": True, "credentials": [{field: "private.invalid"}]}}
+    }
+    with pytest.raises(ConfigFailure) as error:
+        resolve_web_provider_config(config, build_default_registry(), {})
+    assert f"web_providers.{name}.credentials[0]" in str(error.value)
+    assert "private.invalid" not in str(error.value)
+
+
+def test_tinyfish_credentials_keep_both_registered_endpoints() -> None:
+    members = [
+        {
+            "api_key_env": "KEY",
+            "search_api_url": "https://s1.example",
+            "fetch_api_url": "https://f1.example",
+        },
+        {
+            "api_key_env": "KEY",
+            "search_api_url": "https://s2.example",
+            "fetch_api_url": "https://f2.example",
+        },
+    ]
+    config = {"web_providers": {"tinyfish": {"enable_search": True, "credentials": members}}}
+    [provider] = resolve_web_provider_config(
+        config, build_default_registry(), {"KEY": "x"}
+    ).providers
+    assert [
+        (c.options["search_api_url"], c.options["fetch_api_url"]) for c in provider.credentials
+    ] == [
+        ("https://s1.example", "https://f1.example"),
+        ("https://s2.example", "https://f2.example"),
+    ]
 
 
 def _factory() -> object:
@@ -51,22 +415,26 @@ def _optional_registry(*, required: bool = False) -> ProviderRegistry:
 
 
 def test_optional_web_provider_resolves_without_key() -> None:
-    data = {"web_providers": {"optional": {"enable_search": True}}}
+    data = {"web_providers": {"optional": {"enable_search": True, "credentials": [{}]}}}
     [provider] = resolve_web_provider_config(data, _optional_registry(), {}).providers
-    assert provider.api_key_env is None
-    assert provider.secret is None
+    assert provider.credentials[0].api_key_env is None
+    assert provider.credentials[0].api_key is None
 
 
 def test_optional_web_provider_resolves_explicit_key() -> None:
     env_name = "ENV_A"
-    data = {"web_providers": {"optional": {"enable_search": True, "api_key_env": env_name}}}
+    data = {
+        "web_providers": {
+            "optional": {"enable_search": True, "credentials": [{"api_key_env": env_name}]}
+        }
+    }
     [provider] = resolve_web_provider_config(
         data, _optional_registry(), {"ENV_A": "synthetic-value"}
     ).providers
-    assert provider.api_key_env == "ENV_A"
-    assert isinstance(provider.secret, SecretValue)
-    assert provider.secret.reveal() == "synthetic-value"
-    assert "synthetic-value" not in repr(provider.secret)
+    assert provider.credentials[0].api_key_env == "ENV_A"
+    assert isinstance(provider.credentials[0].api_key, SecretValue)
+    assert provider.credentials[0].api_key.reveal() == "synthetic-value"
+    assert "synthetic-value" not in repr(provider.credentials[0].api_key)
 
 
 @pytest.mark.parametrize(
@@ -76,14 +444,18 @@ def test_optional_web_provider_resolves_explicit_key() -> None:
 def test_optional_web_provider_rejects_invalid_explicit_key(
     env_name: object, environ: dict[str, str]
 ) -> None:
-    data = {"web_providers": {"optional": {"enable_search": True, "api_key_env": env_name}}}
+    data = {
+        "web_providers": {
+            "optional": {"enable_search": True, "credentials": [{"api_key_env": env_name}]}
+        }
+    }
     with pytest.raises(ConfigFailure) as caught:
         resolve_web_provider_config(data, _optional_registry(), environ)
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
 def test_required_key_takes_precedence_over_optional() -> None:
-    data = {"web_providers": {"optional": {"enable_search": True}}}
+    data = {"web_providers": {"optional": {"enable_search": True, "credentials": [{}]}}}
     with pytest.raises(ConfigFailure, match="requires api_key_env"):
         resolve_web_provider_config(data, _optional_registry(required=True), {})
 
@@ -91,13 +463,16 @@ def test_required_key_takes_precedence_over_optional() -> None:
 def test_resolve_web_provider_config_or_fail_startup() -> None:
     data = {
         "web_providers": {
-            "default_max_concurrency": 3,
             "dual": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "DUAL_KEY",
-                "max_concurrency": 5,
-                "api_url": "https://api.example.test",
+                "credentials": [
+                    {
+                        "api_key_env": "DUAL_KEY",
+                        "max_concurrency": 5,
+                        "api_url": "https://api.example.test",
+                    }
+                ],
                 "mode": "fast",
                 "search_fetch_policy": {"max_age_seconds": 3600},
                 "extract_fetch_policy": {
@@ -108,23 +483,23 @@ def test_resolve_web_provider_config_or_fail_startup() -> None:
             "search_only": {
                 "enable_search": False,
                 "enable_fetch": False,
-                "api_url": "https://disabled.example.test",
+                "credentials": [{"api_url": "https://disabled.example.test"}],
             },
         }
     }
 
     resolved = resolve_web_provider_config(data, _registry(), {"DUAL_KEY": "super-secret"})
-    assert resolved.default_max_concurrency == 3
+    assert resolved.fetch_order == ()
     dual = resolved.providers[0]
     assert dual.name == "dual"
     assert dual.enable_search is True
     assert dual.enable_fetch is True
-    assert dual.max_concurrency == 5
-    assert dual.api_key_env == "DUAL_KEY"
-    assert dual.secret is not None
-    assert dual.secret.reveal() == "super-secret"
-    assert "super-secret" not in repr(dual.secret)
-    assert dict(dual.options) == {
+    assert dual.credentials[0].max_concurrency == 5
+    assert dual.credentials[0].api_key_env == "DUAL_KEY"
+    assert dual.credentials[0].api_key is not None
+    assert dual.credentials[0].api_key.reveal() == "super-secret"
+    assert "super-secret" not in repr(dual.credentials[0].api_key)
+    assert dict(dual.credentials[0].options) == {
         "api_url": "https://api.example.test",
         "mode": "fast",
         "search_fetch_policy": {"max_age_seconds": 3600},
@@ -141,18 +516,16 @@ def test_resolve_web_provider_config_or_fail_startup() -> None:
     disabled = resolved.providers[1]
     assert disabled.name == "search_only"
     assert disabled.enable_search is False
-    assert disabled.secret is None
+    assert disabled.credentials == ()
 
 
-def test_jina_resolves_without_credential() -> None:
+def test_jina_resolves_without_key() -> None:
     data = {
         "web_providers": {
-            "default_max_concurrency": 3,
             "jina": {
                 "enable_search": False,
                 "enable_fetch": True,
-                "max_concurrency": 5,
-                "api_url": "https://reader.example.test",
+                "credentials": [{"max_concurrency": 5, "api_url": "https://reader.example.test"}],
             },
         }
     }
@@ -163,10 +536,10 @@ def test_jina_resolves_without_credential() -> None:
     assert jina.name == "jina"
     assert jina.enable_search is False
     assert jina.enable_fetch is True
-    assert jina.max_concurrency == 5
-    assert jina.api_key_env is None
-    assert jina.secret is None
-    assert dict(jina.options) == {"api_url": "https://reader.example.test"}
+    assert jina.credentials[0].max_concurrency == 5
+    assert jina.credentials[0].api_key_env is None
+    assert jina.credentials[0].api_key is None
+    assert dict(jina.credentials[0].options) == {"api_url": "https://reader.example.test"}
 
 
 def test_jina_rejects_api_key_env() -> None:
@@ -175,8 +548,9 @@ def test_jina_rejects_api_key_env() -> None:
             "jina": {
                 "enable_search": False,
                 "enable_fetch": True,
-                "api_key_env": "[REDACTED_SECRET]",
-                "api_url": "https://reader.example.test",
+                "credentials": [
+                    {"api_key_env": "TEST_ENV", "api_url": "https://reader.example.test"}
+                ],
             }
         }
     }
@@ -185,23 +559,27 @@ def test_jina_rejects_api_key_env() -> None:
         resolve_web_provider_config(data, build_default_registry(), {})
 
     assert caught.value.code is ErrorCode.CONFIG_ERROR
-    assert "web provider jina does not accept api_key_env" in str(caught.value)
+    assert "web_providers.jina.credentials[0] does not accept api_key_env" in str(caught.value)
 
 
 @pytest.mark.parametrize(
     ("provider_name", "provider_data", "environment"),
     [
-        ("missing", {"enable_search": True, "api_key_env": "KEY"}, {"KEY": "x"}),
+        ("missing", {"enable_search": True, "credentials": [{"api_key_env": "KEY"}]}, {"KEY": "x"}),
         (
             "search_only",
-            {"enable_fetch": True, "api_key_env": "KEY", "api_url": "https://x"},
+            {"enable_fetch": True, "credentials": [{"api_key_env": "KEY", "api_url": "https://x"}]},
             {"KEY": "x"},
         ),
-        ("dual", {"enable_search": True, "api_key_env": "MISSING"}, {}),
-        ("dual", {"enable_search": True, "api_key_env": "KEY", "max_concurrency": 0}, {"KEY": "x"}),
+        ("dual", {"enable_search": True, "credentials": [{"api_key_env": "MISSING"}]}, {}),
         (
             "dual",
-            {"enable_search": True, "api_key_env": "KEY", "unknown": True},
+            {"enable_search": True, "credentials": [{"api_key_env": "KEY", "max_concurrency": 0}]},
+            {"KEY": "x"},
+        ),
+        (
+            "dual",
+            {"enable_search": True, "credentials": [{"api_key_env": "KEY"}], "unknown": True},
             {"KEY": "x"},
         ),
     ],
@@ -211,7 +589,7 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
     provider_data: dict[str, object],
     environment: dict[str, str],
 ) -> None:
-    data = {"web_providers": {"default_max_concurrency": 3, provider_name: provider_data}}
+    data = {"web_providers": {provider_name: provider_data}}
     with pytest.raises(ConfigFailure) as caught:
         resolve_web_provider_config(data, _registry(), environment)
     assert caught.value.code is ErrorCode.CONFIG_ERROR
@@ -221,29 +599,36 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
 @pytest.mark.parametrize(
     ("provider_data", "environment", "error_match"),
     [
-        ({"enable_search": True}, {}, "requires api_key_env"),
+        ({"enable_search": True, "credentials": [{}]}, {}, "requires api_key_env"),
         (
-            {"enable_search": True, "api_key_env": "SERVICE_KEY"},
+            {"enable_search": True, "credentials": [{"api_key_env": "SERVICE_KEY"}]},
             {},
             "environment variable SERVICE_KEY is required",
         ),
         (
-            {"enable_search": True, "api_key_env": "SERVICE_KEY"},
+            {"enable_search": True, "credentials": [{"api_key_env": "SERVICE_KEY"}]},
             {"SERVICE_KEY": ""},
             "environment variable SERVICE_KEY is required",
         ),
         (
-            {"enable_fetch": True, "api_key_env": "SERVICE_KEY"},
+            {"enable_fetch": True, "credentials": [{"api_key_env": "SERVICE_KEY"}]},
             {"SERVICE_KEY": "synthetic-service-value"},
             "does not support fetch",
         ),
         (
-            {"enable_search": True, "api_key_env": "SERVICE_KEY", "rate_limits": 3},
+            {
+                "enable_search": True,
+                "credentials": [{"api_key_env": "SERVICE_KEY", "rate_limits": 3}],
+            },
             {"SERVICE_KEY": "synthetic-service-value"},
             "rate_limits must be an array of tables",
         ),
         (
-            {"enable_search": True, "api_key_env": "SERVICE_KEY", "unknown": True},
+            {
+                "enable_search": True,
+                "credentials": [{"api_key_env": "SERVICE_KEY"}],
+                "unknown": True,
+            },
             {"SERVICE_KEY": "synthetic-service-value"},
             "unknown config key",
         ),
@@ -287,10 +672,9 @@ def test_service_key_search_config_preserves_only_explicit_options(
 ) -> None:
     provider_data: dict[str, object] = {
         "enable_search": True,
-        "api_key_env": "SERVICE_KEY",
     }
     options = {} if api_url is None else {"api_url": api_url}
-    provider_data.update(options)
+    provider_data["credentials"] = [{"api_key_env": "SERVICE_KEY", **options}]
 
     resolved = resolve_web_provider_config(
         {"web_providers": {provider_name: provider_data}},
@@ -302,10 +686,10 @@ def test_service_key_search_config_preserves_only_explicit_options(
     assert provider.name == provider_name
     assert provider.enable_search is True
     assert provider.enable_fetch is False
-    assert provider.api_key_env == "SERVICE_KEY"
-    assert provider.secret is not None
-    assert provider.secret.reveal() == "synthetic-service-value"
-    assert dict(provider.options) == options
+    assert provider.credentials[0].api_key_env == "SERVICE_KEY"
+    assert provider.credentials[0].api_key is not None
+    assert provider.credentials[0].api_key.reveal() == "synthetic-service-value"
+    assert dict(provider.credentials[0].options) == options
 
 
 @pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
@@ -317,10 +701,11 @@ def test_disabled_service_key_search_provider_skips_credentials(
     provider_data: dict[str, object] = {
         "enable_search": False,
         "enable_fetch": False,
-        "api_url": "https://disabled.example.test",
     }
+    credential = {"api_url": "https://disabled.example.test"}
     if api_key_env is not None:
-        provider_data["api_key_env"] = api_key_env
+        credential["api_key_env"] = api_key_env
+    provider_data["credentials"] = [credential]
 
     resolved = resolve_web_provider_config(
         {"web_providers": {provider_name: provider_data}},
@@ -332,15 +717,18 @@ def test_disabled_service_key_search_provider_skips_credentials(
     assert provider.name == provider_name
     assert provider.enable_search is False
     assert provider.enable_fetch is False
-    assert provider.api_key_env is None
-    assert provider.secret is None
-    assert dict(provider.options) == {"api_url": "https://disabled.example.test"}
+    assert provider.credentials == ()
+    assert dict(provider.options) == {}
 
 
 @pytest.mark.parametrize("enabled", [True, False])
 def test_baiduqianfan_example_key_is_required_only_for_enabled_search(enabled: bool) -> None:
     key_env = "BAIDUQIANFAN_API_KEY"
-    config = {"web_providers": {"baiduqianfan": {"enable_search": enabled, "api_key_env": key_env}}}
+    config = {
+        "web_providers": {
+            "baiduqianfan": {"enable_search": enabled, "credentials": [{"api_key_env": key_env}]}
+        }
+    }
     environment = {key_env: "example-service-key"} if enabled else {}
     [provider] = resolve_web_provider_config(
         config, build_default_registry(), environment
@@ -349,10 +737,13 @@ def test_baiduqianfan_example_key_is_required_only_for_enabled_search(enabled: b
     assert provider.enable_search is enabled
     assert provider.enable_fetch is False
     if enabled:
-        assert provider.api_key_env == key_env
-        assert provider.secret is not None and provider.secret.reveal() == environment[key_env]
+        assert provider.credentials[0].api_key_env == key_env
+        assert (
+            provider.credentials[0].api_key is not None
+            and provider.credentials[0].api_key.reveal() == environment[key_env]
+        )
     else:
-        assert provider.api_key_env is None and provider.secret is None
+        assert provider.credentials == ()
 
 
 def test_disabled_parallel_requires_no_credential_and_preserves_allowed_options() -> None:
@@ -361,7 +752,7 @@ def test_disabled_parallel_requires_no_credential_and_preserves_allowed_options(
             "parallel": {
                 "enable_search": False,
                 "enable_fetch": False,
-                "api_url": "https://parallel.example.test",
+                "credentials": [{"api_url": "https://parallel.example.test"}],
                 "mode": "invalid-but-unused",
                 "search_fetch_policy": {"max_age_seconds": 1},
                 "extract_fetch_policy": {"unknown_nested": True},
@@ -373,9 +764,8 @@ def test_disabled_parallel_requires_no_credential_and_preserves_allowed_options(
 
     [parallel] = resolved.providers
     assert parallel.name == "parallel"
-    assert parallel.secret is None
+    assert parallel.credentials == ()
     assert dict(parallel.options) == {
-        "api_url": "https://parallel.example.test",
         "mode": "invalid-but-unused",
         "search_fetch_policy": {"max_age_seconds": 1},
         "extract_fetch_policy": {"unknown_nested": True},
@@ -416,8 +806,7 @@ def test_new_provider_capabilities_are_enforced_by_generic_config_resolution(
         "web_providers": {
             provider_name: {
                 unsupported_flag: True,
-                "api_key_env": "KEY",
-                "api_url": "https://provider.example.test",
+                "credentials": [{"api_key_env": "KEY", "api_url": "https://provider.example.test"}],
             }
         }
     }
@@ -436,17 +825,22 @@ def test_new_provider_allowed_options_flow_through_generic_resolution() -> None:
             "brightdata": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "BRIGHT_KEY",
-                "api_url": "https://bright.example.test",
+                "credentials": [
+                    {
+                        "api_key_env": "BRIGHT_KEY",
+                        "api_url": "https://bright.example.test",
+                        "max_concurrency": 7,
+                    }
+                ],
                 "search_zone": "search-zone",
                 "fetch_zone": "fetch-zone",
-                "max_concurrency": 7,
             },
             "scrape_do": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "SCRAPE_KEY",
-                "api_url": "https://scrape.example.test",
+                "credentials": [
+                    {"api_key_env": "SCRAPE_KEY", "api_url": "https://scrape.example.test"}
+                ],
             },
         }
     }
@@ -458,21 +852,21 @@ def test_new_provider_allowed_options_flow_through_generic_resolution() -> None:
     )
     brightdata, scrape_do = resolved.providers
 
-    assert dict(brightdata.options) == {
+    assert dict(brightdata.credentials[0].options) == {
         "api_url": "https://bright.example.test",
         "search_zone": "search-zone",
         "fetch_zone": "fetch-zone",
     }
-    assert brightdata.max_concurrency == 7
-    assert brightdata.secret is not None
-    assert brightdata.secret.reveal() == "bright-secret"
-    assert "bright-secret" not in repr(brightdata.secret)
+    assert brightdata.credentials[0].max_concurrency == 7
+    assert brightdata.credentials[0].api_key is not None
+    assert brightdata.credentials[0].api_key.reveal() == "bright-secret"
+    assert "bright-secret" not in repr(brightdata.credentials[0].api_key)
     for shared_key in ("enable_search", "enable_fetch", "api_key_env", "max_concurrency"):
         assert shared_key not in brightdata.options
 
-    assert dict(scrape_do.options) == {"api_url": "https://scrape.example.test"}
-    assert scrape_do.secret is not None
-    assert scrape_do.secret.reveal() == "scrape-secret"
+    assert dict(scrape_do.credentials[0].options) == {"api_url": "https://scrape.example.test"}
+    assert scrape_do.credentials[0].api_key is not None
+    assert scrape_do.credentials[0].api_key.reveal() == "scrape-secret"
 
 
 def test_new_provider_unknown_option_is_rejected_generically() -> None:
@@ -480,8 +874,9 @@ def test_new_provider_unknown_option_is_rejected_generically() -> None:
         "web_providers": {
             "scraperapi": {
                 "enable_search": True,
-                "api_key_env": "KEY",
-                "api_url": "https://scraperapi.example.test",
+                "credentials": [
+                    {"api_key_env": "KEY", "api_url": "https://scraperapi.example.test"}
+                ],
                 "country": "us",
             }
         }
@@ -499,7 +894,7 @@ def test_disabled_new_provider_needs_no_credential_or_constructor_validation() -
             "brightdata": {
                 "enable_search": False,
                 "enable_fetch": False,
-                "api_url": " ",
+                "credentials": [{"api_url": " "}],
                 "search_zone": " ",
                 "fetch_zone": " ",
             }
@@ -509,9 +904,8 @@ def test_disabled_new_provider_needs_no_credential_or_constructor_validation() -
     resolved = resolve_web_provider_config(data, build_default_registry(), {})
 
     [brightdata] = resolved.providers
-    assert brightdata.secret is None
+    assert brightdata.credentials == ()
     assert dict(brightdata.options) == {
-        "api_url": " ",
         "search_zone": " ",
         "fetch_zone": " ",
     }
@@ -529,20 +923,21 @@ def test_new_provider_rejects_invalid_concurrency_override(
 ) -> None:
     with pytest.raises(ConfigFailure, match="positive integer"):
         resolve_web_provider_config(
-            {"web_providers": {provider_name: {"max_concurrency": value}}},
+            {"web_providers": {provider_name: {"credentials": [{"max_concurrency": value}]}}},
             build_default_registry(),
             {},
         )
 
 
 @pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
-def test_new_provider_inherits_group_concurrency(provider_name: str) -> None:
+def test_new_provider_has_no_default_concurrency(provider_name: str) -> None:
+    member = {} if provider_name == "open_websearch" else {"api_key_env": "KEY"}
     [provider] = resolve_web_provider_config(
-        {"web_providers": {"default_max_concurrency": 5, provider_name: {}}},
+        {"web_providers": {provider_name: {"enable_search": True, "credentials": [member]}}},
         build_default_registry(),
-        {},
+        {"KEY": "x"},
     ).providers
-    assert provider.max_concurrency == 5
+    assert provider.credentials[0].max_concurrency is None
 
 
 @pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
@@ -587,19 +982,17 @@ def test_disabled_open_websearch_preserves_unvalidated_options() -> None:
                 "open_websearch": {
                     "enable_search": False,
                     "enable_fetch": False,
-                    "api_url": " ",
+                    "credentials": [{"api_url": " ", "api_key_env": "MISSING"}],
                     "engines": engines,
-                    "api_key_env": "MISSING",
                 }
             }
         },
         build_default_registry(),
         {},
     ).providers
-    assert dict(provider.options) == {"api_url": " ", "engines": []}
+    assert dict(provider.options) == {"engines": []}
     assert provider.options["engines"] is engines
-    assert provider.secret is None
-    assert provider.api_key_env is None
+    assert provider.credentials == ()
 
 
 @pytest.mark.parametrize("provider_name", _NEW_PROVIDERS)
@@ -608,12 +1001,12 @@ def test_new_provider_options_preserve_shared_fields(provider_name: str) -> None
     table: dict[str, object] = {
         "enable_search": True,
         "enable_fetch": True,
-        "api_url": "https://provider.example.test/",
-        "max_concurrency": 7,
     }
+    member: dict[str, object] = {"api_url": "https://provider.example.test/", "max_concurrency": 7}
+    table["credentials"] = [member]
     expected: dict[str, object] = {"api_url": "https://provider.example.test/"}
     if provider_name in _NEW_KEYED_PROVIDERS:
-        table["api_key_env"] = "KEY"
+        member["api_key_env"] = "KEY"
     else:
         table["engines"] = engines
         expected["engines"] = engines
@@ -622,8 +1015,8 @@ def test_new_provider_options_preserve_shared_fields(provider_name: str) -> None
         build_default_registry(),
         {"KEY": "fixture-value"},
     ).providers
-    assert dict(provider.options) == expected
-    assert provider.max_concurrency == 7
+    assert dict(provider.credentials[0].options) == expected
+    assert provider.credentials[0].max_concurrency == 7
     if provider_name == "open_websearch":
         assert provider.options["engines"] is engines
         assert isinstance(provider.options["engines"], list)
@@ -638,10 +1031,15 @@ def test_new_provider_independent_capability_switches(
     search: bool,
     fetch: bool,
 ) -> None:
-    table: dict[str, object] = {"enable_search": search, "enable_fetch": fetch}
+    member: dict[str, object] = {}
+    table: dict[str, object] = {
+        "enable_search": search,
+        "enable_fetch": fetch,
+        "credentials": [member],
+    }
     environment = {}
     if provider_name in _NEW_KEYED_PROVIDERS:
-        table["api_key_env"] = "KEY"
+        member["api_key_env"] = "KEY"
         if search or fetch:
             environment["KEY"] = "fixture-value"
     [provider] = resolve_web_provider_config(
@@ -652,19 +1050,23 @@ def test_new_provider_independent_capability_switches(
     assert provider.enable_search is search
     assert provider.enable_fetch is fetch
     if not search and not fetch:
-        assert provider.secret is None
-        assert provider.api_key_env is None
+        assert provider.credentials == ()
     elif provider_name in _NEW_KEYED_PROVIDERS:
-        assert provider.secret is not None
+        assert provider.credentials[0].api_key is not None
     else:
-        assert provider.secret is None
+        assert provider.credentials[0].api_key is None
 
 
 @pytest.mark.parametrize("include_key", [False, True])
 def test_open_websearch_credential_policy(include_key: bool) -> None:
-    table: dict[str, object] = {"enable_search": True, "enable_fetch": True}
+    member: dict[str, object] = {}
+    table: dict[str, object] = {
+        "enable_search": True,
+        "enable_fetch": True,
+        "credentials": [member],
+    }
     if include_key:
-        table["api_key_env"] = "KEY"
+        member["api_key_env"] = "KEY"
         with pytest.raises(ConfigFailure, match="does not accept api_key_env"):
             resolve_web_provider_config(
                 {"web_providers": {"open_websearch": table}},
@@ -677,8 +1079,8 @@ def test_open_websearch_credential_policy(include_key: bool) -> None:
             build_default_registry(),
             {},
         ).providers
-        assert provider.secret is None
-        assert provider.api_key_env is None
+        assert provider.credentials[0].api_key is None
+        assert provider.credentials[0].api_key_env is None
 
 
 @pytest.mark.parametrize("provider_name", _NEW_KEYED_PROVIDERS)
@@ -687,7 +1089,7 @@ def test_new_keyed_provider_resolves_only_explicit_secret(provider_name: str) ->
         "web_providers": {
             provider_name: {
                 "enable_search": True,
-                "api_key_env": "KEY",
+                "credentials": [{"api_key_env": "KEY"}],
             }
         }
     }
@@ -697,10 +1099,10 @@ def test_new_keyed_provider_resolves_only_explicit_secret(provider_name: str) ->
         {"KEY": "fixture-value", "OTHER": "unused"},
     ).providers
 
-    assert isinstance(provider.secret, SecretValue)
-    assert provider.secret.reveal() == "fixture-value"
-    assert provider.api_key_env == "KEY"
-    assert "fixture-value" not in repr(provider.secret)
+    assert isinstance(provider.credentials[0].api_key, SecretValue)
+    assert provider.credentials[0].api_key.reveal() == "fixture-value"
+    assert provider.credentials[0].api_key_env == "KEY"
+    assert "fixture-value" not in repr(provider.credentials[0].api_key)
     assert "fixture-value" not in repr(provider)
 
 
@@ -710,9 +1112,8 @@ def test_new_keyed_provider_requires_named_environment_value(
     provider_name: str,
     credential: str | None,
 ) -> None:
-    table: dict[str, object] = {"enable_fetch": True}
-    if credential is not None:
-        table["api_key_env"] = credential
+    member = {} if credential is None else {"api_key_env": credential}
+    table: dict[str, object] = {"enable_fetch": True, "credentials": [member]}
     with pytest.raises(ConfigFailure) as caught:
         resolve_web_provider_config(
             {"web_providers": {provider_name: table}},
@@ -730,13 +1131,17 @@ def test_web_provider_resolves_multiple_rate_windows_without_adapter_options() -
             "web_providers": {
                 "dual": {
                     "enable_search": True,
-                    "api_key_env": "TEST_RATE",
                     "mode": "fast",
-                    "rate_limits": [
-                        {"requests": 2, "period_seconds": 1},
-                        {"requests": 30, "period_seconds": 60.5},
+                    "credentials": [
+                        {
+                            "api_key_env": "TEST_RATE",
+                            "rate_limits": [
+                                {"requests": 2, "period_seconds": 1},
+                                {"requests": 30, "period_seconds": 60.5},
+                            ],
+                            "min_interval_seconds": 0.25,
+                        }
                     ],
-                    "min_interval_seconds": 0.25,
                 }
             }
         },
@@ -744,7 +1149,7 @@ def test_web_provider_resolves_multiple_rate_windows_without_adapter_options() -
         {"TEST_RATE": "x"},
     ).providers
 
-    policy = provider.rate_policy
+    policy = provider.credentials[0].rate_policy
     assert isinstance(policy.windows, tuple)
     assert [(window.requests, window.period_seconds) for window in policy.windows] == [
         (2, 1.0),
@@ -788,17 +1193,16 @@ def test_web_rate_policy_values(
             "web_providers": {
                 "dual": {
                     "enable_search": True,
-                    "api_key_env": "TEST_RATE",
-                    **rate_fields,
+                    "credentials": [{"api_key_env": "TEST_RATE", **rate_fields}],
                 }
             }
         },
         _registry(),
         {"TEST_RATE": "x"},
     ).providers
-    windows = [(w.requests, w.period_seconds) for w in provider.rate_policy.windows]
+    windows = [(w.requests, w.period_seconds) for w in provider.credentials[0].rate_policy.windows]
     assert windows == expected_windows
-    assert provider.rate_policy.min_interval_seconds == expected_interval
+    assert provider.credentials[0].rate_policy.min_interval_seconds == expected_interval
     assert dict(provider.options) == {}
 
 
@@ -833,8 +1237,7 @@ def test_web_rate_policy_rejects_invalid_window_structure(
                 "web_providers": {
                     "dual": {
                         "enable_search": enabled,
-                        "api_key_env": "TEST_RATE",
-                        "rate_limits": rate_limits,
+                        "credentials": [{"api_key_env": "TEST_RATE", "rate_limits": rate_limits}],
                     }
                 }
             },
@@ -842,7 +1245,7 @@ def test_web_rate_policy_rejects_invalid_window_structure(
             {"TEST_RATE": "x"},
         )
     assert caught.value.code is ErrorCode.CONFIG_ERROR
-    assert f"web_providers.dual.{field}" in str(caught.value)
+    assert f"web_providers.dual.credentials[0].{field}" in str(caught.value)
     assert "do-not-echo" not in str(caught.value)
 
 
@@ -870,8 +1273,12 @@ def test_web_rate_policy_rejects_invalid_requests(value: object, enabled: bool) 
                 "web_providers": {
                     "dual": {
                         "enable_search": enabled,
-                        "api_key_env": "TEST_RATE",
-                        "rate_limits": [{"requests": value, "period_seconds": 1}],
+                        "credentials": [
+                            {
+                                "api_key_env": "TEST_RATE",
+                                "rate_limits": [{"requests": value, "period_seconds": 1}],
+                            }
+                        ],
                     }
                 }
             },
@@ -879,7 +1286,7 @@ def test_web_rate_policy_rejects_invalid_requests(value: object, enabled: bool) 
             {"TEST_RATE": "x"},
         )
     assert caught.value.code is ErrorCode.CONFIG_ERROR
-    assert "web_providers.dual.rate_limits[0].requests" in str(caught.value)
+    assert "web_providers.dual.credentials[0].rate_limits[0].requests" in str(caught.value)
     assert "positive integer" in str(caught.value)
     assert "do-not-echo" not in str(caught.value)
 
@@ -933,8 +1340,7 @@ def test_web_rate_policy_rejects_invalid_seconds(
                 "web_providers": {
                     "dual": {
                         "enable_search": enabled,
-                        "api_key_env": "TEST_RATE",
-                        **rate_fields,
+                        "credentials": [{"api_key_env": "TEST_RATE", **rate_fields}],
                     }
                 }
             },
@@ -943,7 +1349,7 @@ def test_web_rate_policy_rejects_invalid_seconds(
         )
     assert caught.value.code is ErrorCode.CONFIG_ERROR
     path = f"rate_limits[0].{field}" if field == "period_seconds" else field
-    assert f"web_providers.dual.{path}" in str(caught.value)
+    assert f"web_providers.dual.credentials[0].{path}" in str(caught.value)
     assert "positive number" in str(caught.value)
     assert "do-not-echo" not in str(caught.value)
 
@@ -954,8 +1360,12 @@ def test_disabled_web_rate_policy_needs_no_credentials(name: str) -> None:
         {
             "web_providers": {
                 name: {
-                    "rate_limits": [{"requests": 2, "period_seconds": 1}],
-                    "min_interval_seconds": 0.5,
+                    "credentials": [
+                        {
+                            "rate_limits": [{"requests": 2, "period_seconds": 1}],
+                            "min_interval_seconds": 0.5,
+                        }
+                    ],
                     "mode": "fast",
                 }
             }
@@ -963,17 +1373,16 @@ def test_disabled_web_rate_policy_needs_no_credentials(name: str) -> None:
         _registry(),
         {},
     ).providers
-    assert provider.secret is None
-    assert provider.api_key_env is None
-    assert [(w.requests, w.period_seconds) for w in provider.rate_policy.windows] == [(2, 1.0)]
-    assert provider.rate_policy.min_interval_seconds == 0.5
+    assert provider.credentials == ()
     assert dict(provider.options) == {"mode": "fast"}
 
 
 def test_unknown_disabled_web_rate_policy_is_still_validated() -> None:
-    with pytest.raises(ConfigFailure, match="web_providers.unknown_disabled.rate_limits"):
+    with pytest.raises(
+        ConfigFailure, match=r"web_providers\.unknown_disabled\.credentials\[0\]\.rate_limits"
+    ):
         resolve_web_provider_config(
-            {"web_providers": {"unknown_disabled": {"rate_limits": "unused"}}},
+            {"web_providers": {"unknown_disabled": {"credentials": [{"rate_limits": "unused"}]}}},
             _registry(),
             {},
         )
@@ -982,36 +1391,37 @@ def test_unknown_disabled_web_rate_policy_is_still_validated() -> None:
 def test_web_rate_policy_preserves_enabled_provider_and_credential_checks() -> None:
     with pytest.raises(ConfigFailure, match="unknown enabled web provider"):
         resolve_web_provider_config(
-            {"web_providers": {"unknown": {"enable_search": True, "rate_limits": []}}},
+            {
+                "web_providers": {
+                    "unknown": {"enable_search": True, "credentials": [{"rate_limits": []}]}
+                }
+            },
             _registry(),
             {},
         )
     with pytest.raises(ConfigFailure, match="requires api_key_env"):
         resolve_web_provider_config(
-            {"web_providers": {"dual": {"enable_search": True, "rate_limits": []}}},
+            {
+                "web_providers": {
+                    "dual": {"enable_search": True, "credentials": [{"rate_limits": []}]}
+                }
+            },
             _registry(),
             {},
         )
 
 
-def test_web_old_constructor_defaults_to_empty_rate_policy() -> None:
-    from agent_search_gateway.config import ResolvedWebProviderConfig
-
-    provider = ResolvedWebProviderConfig("dual", True, True, 3, None, None, {})
-    assert provider.rate_policy.windows == ()
-    assert provider.rate_policy.min_interval_seconds is None
-    assert provider.use_proxy is True
-
-
-def test_web_provider_use_proxy_preserves_positional_rate_policy_and_frozen_config() -> None:
+def test_web_provider_is_frozen_and_defaults_to_proxy() -> None:
     from dataclasses import FrozenInstanceError
 
-    from agent_search_gateway.config import ResolvedRatePolicy, ResolvedWebProviderConfig
-
-    policy = ResolvedRatePolicy(min_interval_seconds=0.5)
-    provider = ResolvedWebProviderConfig("dual", True, True, 3, None, None, {}, policy)
-    assert provider.rate_policy is policy
+    [provider] = resolve_web_provider_config(
+        {"web_providers": {"jina": {"enable_fetch": True, "credentials": [{}]}}},
+        build_default_registry(),
+        {},
+    ).providers
     assert provider.use_proxy is True
+    assert provider.credentials[0].rate_policy.windows == ()
+    assert provider.credentials[0].rate_policy.min_interval_seconds is None
     with pytest.raises(FrozenInstanceError):
         provider.use_proxy = False  # type: ignore[misc]
 
@@ -1022,15 +1432,17 @@ def test_no_auth_web_provider_resolves_rate_policy() -> None:
             "web_providers": {
                 "jina": {
                     "enable_fetch": True,
-                    "rate_limits": [{"requests": 2, "period_seconds": 1}],
+                    "credentials": [{"rate_limits": [{"requests": 2, "period_seconds": 1}]}],
                 }
             }
         },
         build_default_registry(),
         {},
     ).providers
-    assert provider.secret is None
-    assert [(w.requests, w.period_seconds) for w in provider.rate_policy.windows] == [(2, 1.0)]
+    assert provider.credentials[0].api_key is None
+    assert [
+        (w.requests, w.period_seconds) for w in provider.credentials[0].rate_policy.windows
+    ] == [(2, 1.0)]
     assert dict(provider.options) == {}
 
 
@@ -1043,23 +1455,25 @@ def test_web_provider_use_proxy_defaults_and_boolean_values(
     branch: str, proxy_fields: dict[str, object], expected: bool
 ) -> None:
     name = "jina" if branch == "no_key" else "firecrawl"
-    table: dict[str, object] = {"api_url": "https://provider.example.test", **proxy_fields}
+    member = {"api_url": "https://provider.example.test"}
+    table: dict[str, object] = {"credentials": [member], **proxy_fields}
     environment = {}
     if branch == "no_key":
         table["enable_fetch"] = True
     elif branch == "with_key":
-        table.update(enable_search=True, api_key_env="TEST_KEY")
+        table["enable_search"] = True
+        member["api_key_env"] = "TEST_KEY"
         environment["TEST_KEY"] = "fixture-value"
     [provider] = resolve_web_provider_config(
         {"web_providers": {name: table}}, build_default_registry(), environment
     ).providers
     assert provider.use_proxy is expected
-    assert dict(provider.options) == {"api_url": "https://provider.example.test"}
+    if branch != "disabled":
+        assert dict(provider.credentials[0].options) == {"api_url": "https://provider.example.test"}
     assert provider.enable_search is (branch == "with_key")
     assert provider.enable_fetch is (branch == "no_key")
     if branch == "disabled":
-        assert provider.secret is None
-        assert provider.api_key_env is None
+        assert provider.credentials == ()
 
 
 @pytest.mark.parametrize("name", ["firecrawl", "jina", "unknown_disabled"])
@@ -1070,7 +1484,7 @@ def test_web_provider_use_proxy_is_strict_boolean(name: str, enabled: bool, valu
     if name == "jina":
         table["enable_fetch"] = enabled
     elif name != "unknown_disabled":
-        table.update(enable_search=enabled, api_key_env="TEST_KEY")
+        table.update(enable_search=enabled, credentials=[{"api_key_env": "TEST_KEY"}])
     with pytest.raises(ConfigFailure) as caught:
         resolve_web_provider_config(
             {"web_providers": {name: table}},
@@ -1116,7 +1530,7 @@ def test_firecrawl_options_are_validated_before_runtime(
                 "firecrawl": {
                     "enable_search": enabled,
                     "enable_fetch": enabled,
-                    "api_key_env": "TEST_KEY",
+                    "credentials": [{"api_key_env": "TEST_KEY"}],
                     "use_proxy": False,
                     **options,
                 }
@@ -1131,7 +1545,7 @@ def test_firecrawl_options_are_validated_before_runtime(
     assert provider.use_proxy is False
     assert provider.enable_search is enabled
     assert provider.enable_fetch is enabled
-    assert (provider.secret is not None) is enabled
+    assert bool(provider.credentials and provider.credentials[0].api_key) is enabled
 
 
 _INVALID_FIRECRAWL_LIMITS: list[object] = [0, -1, 101, True, False, 1.0, "10", None, [], {}]
