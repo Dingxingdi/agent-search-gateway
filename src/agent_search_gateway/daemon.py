@@ -10,6 +10,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
 
+from .concurrency import join_cleanup
 from .config import load_toml, resolve_config
 from .errors import ConfigFailure, ErrorCode, GatewayError
 from .models import (
@@ -170,18 +171,23 @@ class ForegroundDaemon:
         self.paths.results_dir.mkdir(parents=True, exist_ok=True)
         try:
             await self._prepare_socket_path()
-            self._runtime = self._create_runtime()
+            self._runtime = await self._create_runtime()
             try:
                 self._server = await asyncio.start_unix_server(
                     self._handle_connection,
                     path=self.paths.socket_file,
                 )
-            except OSError as exc:
-                await self._close_runtime_after_startup_failure()
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Failed to bind daemon socket: {self.paths.socket_file}",
-                ) from exc
+            except BaseException as exc:
+                with suppress(asyncio.CancelledError):
+                    await join_cleanup(
+                        asyncio.create_task(self._close_runtime_after_startup_failure())
+                    )
+                if isinstance(exc, OSError):
+                    raise ConfigFailure(
+                        ErrorCode.CONFIG_ERROR,
+                        f"Failed to bind daemon socket: {self.paths.socket_file}",
+                    ) from exc
+                raise
             socket_stat = self.paths.socket_file.stat()
             self._socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
             if self._debug:
@@ -251,7 +257,7 @@ class ForegroundDaemon:
                 f"Failed to remove stale daemon socket: {path}",
             ) from exc
 
-    def _create_runtime(self) -> RuntimeLike:
+    async def _create_runtime(self) -> RuntimeLike:
         try:
             if self._runtime_factory is not None:
                 return self._runtime_factory()
@@ -267,32 +273,24 @@ class ForegroundDaemon:
                 oa_resolver_registry=resolver_registry,
             )
             if self._logging_session is not None:
-                web_secrets = (
-                    provider.secret
-                    for provider in config.web.providers
-                    if provider.secret is not None
-                )
-                llm_secrets = (provider.secret for provider in config.llm.providers)
-                academic_secrets = (
-                    secret
-                    for provider in config.academic.providers
-                    for secret in (provider.api_key, provider.contact_email)
-                    if secret is not None
-                )
-                resolver_secrets = (
-                    secret
-                    for resolver in (config.oa_resolver,)
-                    if resolver is not None
-                    for secret in (resolver.api_key, resolver.contact_email)
-                    if secret is not None
+                active = (
+                    *(
+                        item
+                        for item in config.web.providers
+                        if item.enable_search or item.enable_fetch
+                    ),
+                    *(item for item in config.academic.providers if item.enabled),
+                    *((config.oa_resolver,) if config.oa_resolver is not None else ()),
+                    *config.llm.providers,
                 )
                 self._logging_session.add_secrets(
-                    web_secrets,
-                    llm_secrets,
-                    academic_secrets,
-                    resolver_secrets,
+                    secret
+                    for provider in active
+                    for credential in provider.credentials
+                    for secret in (credential.api_key, credential.contact_email)
+                    if secret is not None
                 )
-            return Runtime.build(
+            return await Runtime.build(
                 config,
                 self.paths,
                 registry=registry,
@@ -315,7 +313,7 @@ class ForegroundDaemon:
         try:
             await runtime.aclose()
         except Exception:
-            self._logger.error("daemon runtime close failed during startup cleanup")
+            log_event(self._logger, logging.ERROR, "daemon_runtime_close_failed")
 
     async def _handle_connection(
         self,
@@ -587,4 +585,4 @@ class ForegroundDaemon:
 
     async def stop_for_test(self) -> None:
         task = await self._begin_shutdown()
-        await task
+        await join_cleanup(task)

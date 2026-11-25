@@ -568,7 +568,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 - Create: `tests/runtime/test_runtime_resources.py`
 - Read: `tests/runtime/test_provider_proxy.py`、`src/agent_search_gateway/daemon.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 此步仅测不依赖旧 builder 的公共 factory 和私有资源 owner；实际 Runtime/多成员/bind 回滚在 Task 11。
 
@@ -576,7 +576,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 
 `test_resource_owner_closes_registered_clients_once` 注册两个不同 client 后关闭两次，实际各 close 一次；`test_resource_owner_continues_after_close_failure` 让其中一个关闭失败，其他仍回收且日志安全。资源 owner 是 Task 11 生产装配将直接使用的组件，不是测试专用接口。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resources.py -k "http_client_factory or resource_owner" -v
@@ -584,7 +584,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 
 预期：旧 factory 没有 limits，或尚无统一 close-once 资源所有权。不会尝试用尚未迁移的 resolved config 调用旧 Runtime builder。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 公共 HTTP factory 始终传 limits(None, 20)
@@ -597,7 +597,7 @@ proxy: 保留原 trust_env 环境行为；direct: trust_env=False、原 SSLConte
 
 资源所有权只管理真实 client，不另为 façade 建关闭链。Task 11 将此 owner 接到异步构造、成功 Runtime 和异常回滚；本步不声称实际 Runtime/bind 清理已验证。
 
-- [ ] **Step 4: 验证 GREEN 与基础组件回归**
+- [x] **Step 4: 验证 GREEN 与基础组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resources.py -k "http_client_factory or resource_owner" -v
@@ -605,7 +605,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 
 预期：公共 factory 的代理/TLS/limits 参数和独立 owner 的 close-once 通过。既有基于 Runtime.build 的完整 proxy/daemon 测试待 Task 11 接入并在 Task 13 集成检查点运行。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 只保留 register/aclose 所需状态；不添加全局 client 池、后台探测或业务 retry。重跑上列命令。记录对真实 Runtime 的待接入项，不把基础 owner 通过等同于构造失败回滚通过。
 
@@ -627,7 +627,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 - Test: `tests/daemon/test_daemon_debug.py`
 - Test support: `tests/runtime/conftest.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_runtime_builds_one_pool_per_logical_provider` 检查单/多/无 key 皆走同一流程；各成员独立 client/adapter/gates；Web Search/Fetch 共池，LLM alias 各 stage 共池，不同 namespace/alias 不混用。通过 façade 的真实 MockTransport 出站捕获各自 endpoint/auth，BrightData zone、TinyFish/You.com/Academic/OA 特例正确；不在本步调用尚未接完的 FetchScheduler 行为。
 
@@ -635,7 +635,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 
 在 Task 10 的基础测试之外新增 `test_partial_build_closes_each_allocated_client_once`：第二成员 adapter/factory、后续类别 factory 构造失败，所有已分配资源恰好关闭一次。再测 `test_cleanup_failure_preserves_original_startup_error`、`test_bind_failure_closes_all_members_once`、重复 aclose 和构造取消。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_assembly.py tests/runtime/test_academic_runtime_assembly.py -k "one_pool or credential or sorts_fetch" -v
@@ -644,7 +644,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 
 预期：旧 builder 不能消费新 schema/创建各成员，或实际 Runtime 尚未接入 owner；基础 owner 测试通过不能代替本步行为证据。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 Runtime.build 改 async，创建 Task 10 的资源 owner
@@ -669,7 +669,7 @@ HTTPX 参数由公共 factory 始终传递；同步 build 调用者改 await，�
 
 本任务完成 HTTP façade/资源/启动接线；Agent 可选 invocation 行为在 Task 12、Scheduler 选择行为在 Task 13。不得为过渡恢复旧 HTTP provider 聚合 gate 或旧 TOML。受这两个后置行为影响的完整 runtime 测试在 Task 13 才作为全绿门槛。
 
-- [ ] **Step 4: 验证 GREEN 与本步 HTTP/资源目标**
+- [x] **Step 4: 验证 GREEN 与本步 HTTP/资源目标**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_assembly.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_optional_credentials.py -k "one_pool or credential or sorts_fetch" -v
@@ -678,7 +678,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 
 预期：HTTP 实例/认证绑定、已排序 façade、正常/重复/部分构造/bind 关闭和主错保留通过。完整 `tests/runtime`、proxy 与 daemon 回归由 Task 13 接完 Agent/Scheduler 后执行；提前运行可作为诊断，但不能把依赖后续任务的失败删掉或标为通过。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 同步迁移 direct dataclass、旧同步 build、零参数 HTTP factory 和相关 fake。观察成员行为代替旧 `.quotas.get_*` 内省；记录 Task 12/13 的剩余集成依赖。重跑本步目标命令。
 
@@ -1407,7 +1407,9 @@ uv run python scripts/build_docs.py
 | 7 | 完成 | pool/rate/retry 92 通过（含 pool 35）；复现并修复成功交付前待生效取消；相关 Ruff / 严格 mypy 通过。 |
 | 8 | 完成 | executor/LLM/pool/retry/input 376 通过；LLM Search 及 gated live 文件 4 通过、8 个原有 live skip；7 文件 Ruff 通过。 |
 | 9 | 完成 | pool/façade 66 通过；过滤/调用选择 115 通过；20 文件 Ruff、4 生产文件 scoped mypy 通过。扩大诊断 329 通过、5 项后续配置/Doctor 迁移失败。 |
-| 10–23 | 待实施 | Runtime 装配与资源、Agent gates、Fetch 调度、URL 状态机、诊断、文档和全量验收尚未完成。 |
+| 10 | 完成 | 公共 HTTP factory/资源 owner 7 项 RED→GREEN；真实 HTTPX 直连/环境代理 transport 的活动连接上限均为无限制表示，keepalive 为 20；2 文件 Ruff 通过。 |
+| 11 | 完成 | HTTP 装配目标 16 通过、76 deselected；资源及相关启动/Academic/optional 26 通过（含资源 15）；扩大回归 291 通过、7 个明确 Task 12/13 依赖 deselected。19 文件 Ruff lint/format 通过；三个生产模块 mypy 仅余 Task 12 的 quota=None 参数类型问题。 |
+| 12–23 | 待实施 | Agent gates、Fetch 调度、URL 状态机、诊断、文档和全量验收尚未完成。 |
 
 配置检查点实际命令：
 
@@ -1417,7 +1419,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前为 Task 1–9 组件检查点，不能据此声称全仓库已通过。Task 9 扩大诊断中的 5 项失败为两项 debug gateway 旧配置 fixture（Task 11）和三项 Doctor 旧配置/实现（Task 19），未删除或跳过这些断言。Runtime 消费旧结构及 Scheduler 的接线按 Tasks 10–13 完成。首次 rate budget 的旧标量参数仅为 Scheduler 迁移过渡，Task 13 收敛到统一 SelectionBudget。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前为 Task 1–11 组件检查点，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点以及代理/认证 fixture 已迁移；Doctor 仍归 Task 19。首次 rate budget 的旧标量参数仅为 Scheduler 迁移过渡，Task 13 收敛到统一 SelectionBudget。未修改用户实际配置、共享 daemon 或主仓库分支。
+
+Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，Task 13 集成门槛将全部运行。
+
+Task 11 已复现并修复部分构造、反复取消、并发关闭和 socket bind 失败时的资源清理；`join_cleanup(task)` 屏蔽等待者取消并等待真实清理完成，随后传播取消。多个 Runtime.aclose 调用等待同一个关闭任务，清理或日志错误不掩盖原始启动错误。所有 HTTP 成员 key/email 在资源分配前注册脱敏。TinyFish、BrightData、You.com REST/MCP、Academic/OA 和 LLM 的成员 endpoint/auth/options 以真实适配器 + MockTransport 出站验证。
 
 Task 7 控制者复核发现：未限流的 operation 请求取消后同步成功返回，调用方仍可能接收结果。实现子代理先复现，再在同一 task 内交付结果前加入取消检查；回归证明无结果写入、无下一个成员调用且容量释放。Task 8/9 验证真实 executor/LLM 的内部重试保持所选凭证、准备字节复用以及池外准备失败时零发送/零游标推进。
 

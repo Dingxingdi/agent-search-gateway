@@ -9,6 +9,7 @@ from agent_search_gateway.errors import ErrorCode, InputFailure
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
+from tests.runtime.conftest import only_member
 from tests.runtime.test_runtime_assembly import _config, _environment
 
 
@@ -24,11 +25,11 @@ async def test_keyword_selector_excludes_fetch_only_and_disabled_providers(
 
     registry = build_default_registry()
     paths = RuntimePaths.from_home(tmp_path)
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(_config(), registry, _environment()),
         paths,
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     original = runtime.web_search_providers
     try:
@@ -65,11 +66,11 @@ async def test_llm_selectors_do_not_match_client_protocol_or_fetch_namespace(
         return httpx.Response(500)
 
     registry = build_default_registry()
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(_config(), registry, _environment()),
         RuntimePaths.from_home(tmp_path),
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     try:
         assert set(runtime.llm_clients) == {"primary", "secondary"}
@@ -79,8 +80,8 @@ async def test_llm_selectors_do_not_match_client_protocol_or_fetch_namespace(
             )
         assert error.value.code is ErrorCode.BAD_REQUEST
         assert calls == []
-        assert runtime.quotas.get_llm("primary").max_observed_in_use == 0
-        assert runtime.quotas.get_llm("secondary").max_observed_in_use == 0
+        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
+        assert only_member(runtime.llm_clients["secondary"]).capacity.max_observed_in_use == 0
     finally:
         await runtime.aclose()
 
@@ -111,11 +112,11 @@ async def test_selected_runtime_invocation_keeps_payload_quota_and_assembly(tmp_
         ]
     }
     resolved = resolve_config(raw, registry, _environment())
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     web_search, web_fetch = runtime.web_search_providers, runtime.web_fetch_providers
     clients, quotas = runtime.llm_clients, runtime.quotas
@@ -136,8 +137,8 @@ async def test_selected_runtime_invocation_keeps_payload_quota_and_assembly(tmp_
         assert body["messages"][-1]["content"] == "prompt"
         assert "provider" not in body and "scope" not in body
         assert "secondary" not in str(body["messages"])
-        assert runtime.quotas.get_llm("primary").max_observed_in_use == 0
-        assert runtime.quotas.get_llm("secondary").max_observed_in_use == 1
+        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
+        assert only_member(runtime.llm_clients["secondary"]).capacity.max_observed_in_use == 1
         assert (
             runtime.web_search_providers is web_search and runtime.web_fetch_providers is web_fetch
         )

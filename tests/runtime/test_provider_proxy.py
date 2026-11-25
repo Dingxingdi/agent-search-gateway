@@ -29,6 +29,7 @@ from agent_search_gateway.providers.llm.openai_chat import OpenAIChatCompletions
 from agent_search_gateway.providers.web.firecrawl import FirecrawlAdapter
 from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
 from agent_search_gateway.runtime import Runtime
+from tests.runtime.conftest import only_member
 from tests.runtime.test_runtime_assembly import _config, _environment
 
 
@@ -45,6 +46,7 @@ def _proxy_config(*direct: str, disabled_direct: bool = False) -> ResolvedConfig
     raw["academic_providers"] = {
         "arxiv": {
             "enabled": "arxiv" in direct,
+            "credentials": [{}],
             "use_proxy": "arxiv" not in direct and not disabled_direct,
         }
     }
@@ -52,7 +54,7 @@ def _proxy_config(*direct: str, disabled_direct: bool = False) -> ResolvedConfig
         "unpaywall": {
             "enabled": "unpaywall" in direct,
             "use_proxy": "unpaywall" not in direct and not disabled_direct,
-            "contact_email_env": "TEST_CONTACT",
+            "credentials": [{"contact_email_env": "TEST_CONTACT"}],
         }
     }
     return resolve_config(
@@ -64,7 +66,7 @@ def _proxy_config(*direct: str, disabled_direct: bool = False) -> ResolvedConfig
     )
 
 
-def _mock_client() -> httpx.AsyncClient:
+def _mock_client(**kwargs: object) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200)))
 
 
@@ -81,14 +83,14 @@ async def _direct_contexts(tmp_path: Path, *direct: str) -> list[ssl.SSLContext]
         calls.append(kwargs)
         return _mock_client()
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         _proxy_config(*direct), RuntimePaths.from_home(tmp_path), http_client_factory=factory
     )
     await runtime.aclose()
     contexts = []
     for kwargs in calls:
-        if kwargs:
-            assert kwargs.keys() == {"trust_env", "verify"}
+        if "trust_env" in kwargs:
+            assert kwargs.keys() == {"trust_env", "verify", "limits"}
             assert kwargs["trust_env"] is False
             context = kwargs["verify"]
             assert isinstance(context, ssl.SSLContext)
@@ -185,7 +187,7 @@ async def test_ssl_cert_directory_passed_as_capath(
     "invalid",
     ["missing-file", "broken-file", "missing-dir", "not-dir", "list-missing", "list-file"],
 )
-def test_invalid_ssl_ca_fails_before_any_factory(
+async def test_invalid_ssl_ca_fails_before_any_factory(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid: str, direct: str
 ) -> None:
     path = tmp_path / "private-ca-path"
@@ -200,7 +202,7 @@ def test_invalid_ssl_ca_fails_before_any_factory(
     factory = Mock(side_effect=_mock_client)
 
     with pytest.raises(ConfigFailure) as caught:
-        Runtime.build(
+        await Runtime.build(
             _proxy_config(direct), RuntimePaths.from_home(tmp_path), http_client_factory=factory
         )
 
@@ -210,7 +212,9 @@ def test_invalid_ssl_ca_fails_before_any_factory(
     factory.assert_not_called()
 
 
-def test_direct_factory_rejects_zero_argument_factory_without_fallback(tmp_path: Path) -> None:
+async def test_direct_factory_rejects_zero_argument_factory_without_fallback(
+    tmp_path: Path,
+) -> None:
     calls = 0
 
     def factory() -> httpx.AsyncClient:
@@ -219,7 +223,7 @@ def test_direct_factory_rejects_zero_argument_factory_without_fallback(tmp_path:
         return _mock_client()
 
     with pytest.raises(ConfigFailure) as caught:
-        Runtime.build(
+        await Runtime.build(
             _proxy_config("tavily"), RuntimePaths.from_home(tmp_path), http_client_factory=factory
         )
 
@@ -228,14 +232,14 @@ def test_direct_factory_rejects_zero_argument_factory_without_fallback(tmp_path:
 
 
 @pytest.mark.parametrize("disabled_direct", [False, True])
-async def test_proxy_factory_needs_no_arguments_or_prepared_ssl_context(
+async def test_proxy_factory_receives_only_limits_without_prepared_ssl_context(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, disabled_direct: bool
 ) -> None:
     create_context = Mock(side_effect=AssertionError("unexpected direct context"))
     monkeypatch.setattr(httpx, "create_ssl_context", create_context)
     factory = Mock(side_effect=_mock_client)
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         _proxy_config(disabled_direct=disabled_direct),
         RuntimePaths.from_home(tmp_path),
         http_client_factory=factory,
@@ -243,7 +247,9 @@ async def test_proxy_factory_needs_no_arguments_or_prepared_ssl_context(
     await runtime.aclose()
 
     assert factory.called
-    assert all(not call.args and not call.kwargs for call in factory.call_args_list)
+    assert all(
+        not call.args and call.kwargs.keys() == {"limits"} for call in factory.call_args_list
+    )
     create_context.assert_not_called()
 
 
@@ -252,24 +258,27 @@ def _mixed_config() -> ResolvedConfig:
     raw["web_providers"] = {
         "zhihu": {
             "enable_search": True,
-            "api_key_env": "ENV_A",
+            "credentials": [{"api_key_env": "ENV_A"}],
             "use_proxy": False,
         },
         "firecrawl": {
             "enable_search": True,
             "enable_fetch": True,
-            "api_key_env": "ENV_B",
-            "api_url": "https://firecrawl.example.test",
+            "credentials": [{"api_key_env": "ENV_B", "api_url": "https://firecrawl.example.test"}],
             "use_proxy": True,
         },
         "brave": {"enable_search": False, "use_proxy": False},
     }
     raw["academic_providers"] = {
-        "arxiv": {"enabled": True, "use_proxy": True},
+        "arxiv": {"enabled": True, "use_proxy": True, "credentials": [{}]},
         "openalex": {"enabled": False, "use_proxy": False},
     }
     raw["oa_resolvers"] = {
-        "unpaywall": {"enabled": True, "contact_email_env": "TEST_CONTACT", "use_proxy": False},
+        "unpaywall": {
+            "enabled": True,
+            "credentials": [{"contact_email_env": "TEST_CONTACT"}],
+            "use_proxy": False,
+        },
     }
     llm = raw["llm_providers"]
     assert isinstance(llm, dict)
@@ -289,17 +298,21 @@ def _mixed_config() -> ResolvedConfig:
 def _mixed_executors(runtime: Runtime) -> dict[str, HttpJsonExecutor]:
     zhihu, firecrawl = runtime.web_search_providers
     (arxiv,) = runtime.academic_search_providers
+    zhihu, firecrawl = only_member(zhihu).adapter, only_member(firecrawl).adapter
+    arxiv = only_member(arxiv).adapter
+    resolver = only_member(runtime.oa_resolver).adapter
     assert isinstance(zhihu, ZhihuAdapter)
     assert isinstance(firecrawl, FirecrawlAdapter)
     assert isinstance(arxiv, ArxivProvider)
-    assert isinstance(runtime.oa_resolver, UnpaywallResolver)
+    assert isinstance(resolver, UnpaywallResolver)
     executors = {
         "web:zhihu": cast(HttpJsonExecutor, zhihu._http),
         "web:firecrawl": cast(HttpJsonExecutor, firecrawl._http),
         "academic:arxiv": cast(HttpJsonExecutor, arxiv._executor),
-        "oa:unpaywall": cast(HttpJsonExecutor, runtime.oa_resolver._executor),
+        "oa:unpaywall": cast(HttpJsonExecutor, resolver._executor),
     }
     for name, client in runtime.llm_clients.items():
+        client = only_member(client).adapter
         assert isinstance(client, OpenAIChatCompletionsClient)
         executors[f"llm:{name}"] = client._executor
     return executors
@@ -328,7 +341,7 @@ class _RecordedClient(httpx.AsyncClient):
         await super().aclose()
 
 
-def _recorded_runtime(
+async def _recorded_runtime(
     tmp_path: Path, config: ResolvedConfig
 ) -> tuple[Runtime, list[_RecordedClient]]:
     created: list[_RecordedClient] = []
@@ -338,12 +351,14 @@ def _recorded_runtime(
         created.append(client)
         return client
 
-    runtime = Runtime.build(config, RuntimePaths.from_home(tmp_path), http_client_factory=factory)
+    runtime = await Runtime.build(
+        config, RuntimePaths.from_home(tmp_path), http_client_factory=factory
+    )
     return runtime, created
 
 
 async def test_families_mixed_modes_bind_each_client_to_its_provider(tmp_path: Path) -> None:
-    runtime, created = _recorded_runtime(tmp_path, _mixed_config())
+    runtime, created = await _recorded_runtime(tmp_path, _mixed_config())
     try:
         executors = _mixed_executors(runtime)
         expected = {
@@ -361,9 +376,9 @@ async def test_families_mixed_modes_bind_each_client_to_its_provider(tmp_path: P
         for name, executor in executors.items():
             client = cast(_RecordedClient, executor._client)
             if expected[name]:
-                assert client.factory_kwargs == {}
+                assert client.factory_kwargs.keys() == {"limits"}
             else:
-                assert client.factory_kwargs.keys() == {"trust_env", "verify"}
+                assert client.factory_kwargs.keys() == {"trust_env", "verify", "limits"}
                 assert client.factory_kwargs["trust_env"] is False
                 contexts.append(client.factory_kwargs["verify"])
             assert await executor.request_json(
@@ -374,14 +389,16 @@ async def test_families_mixed_modes_bind_each_client_to_its_provider(tmp_path: P
         assert all(context is contexts[0] for context in contexts)
         assert len(runtime.web_fetch_providers) == 1
         assert cast(object, runtime.web_fetch_providers[0]) is runtime.web_search_providers[1]
-        assert executors["web:firecrawl"] is runtime._web_http_executors[1]
+        assert (
+            executors["web:firecrawl"] is only_member(runtime.web_fetch_providers[0]).adapter._http
+        )
     finally:
         await runtime.aclose()
 
 
 async def test_isolation_connect_error_keeps_clients_modes_and_retry_policy(tmp_path: Path) -> None:
     config = _mixed_config()
-    runtime, created = _recorded_runtime(tmp_path, config)
+    runtime, created = await _recorded_runtime(tmp_path, config)
     try:
         executors = _mixed_executors(runtime)
         bindings = {name: executor._client for name, executor in executors.items()}
@@ -413,7 +430,7 @@ async def test_isolation_connect_error_keeps_clients_modes_and_retry_policy(tmp_
 
 
 async def test_close_mixed_runtime_twice_closes_each_client_once(tmp_path: Path) -> None:
-    runtime, created = _recorded_runtime(tmp_path, _mixed_config())
+    runtime, created = await _recorded_runtime(tmp_path, _mixed_config())
     await runtime.aclose()
     await runtime.aclose()
 
@@ -427,7 +444,7 @@ async def test_logging_reports_namespaced_boolean_modes_without_proxy_credential
     for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         monkeypatch.setenv(variable, "http://proxy-user:proxy-password@proxy.example.test:8080")
     with caplog.at_level(logging.DEBUG, logger="agent_search_gateway.runtime"):
-        runtime, _ = _recorded_runtime(tmp_path, _mixed_config())
+        runtime, _ = await _recorded_runtime(tmp_path, _mixed_config())
         await runtime.aclose()
 
     records = [
@@ -642,15 +659,14 @@ async def test_provider_http_routing_uses_environment_or_direct_connection(
             raw["web_providers"] = {
                 "brave": {
                     "enable_search": True,
-                    "api_key_env": "ENV_B",
-                    "api_url": target_url,
+                    "credentials": [{"api_key_env": "ENV_B", "api_url": target_url}],
                     "use_proxy": use_proxy,
                 }
             }
             config = resolve_config(raw, build_default_registry(), _environment())
-            runtime = Runtime.build(config, RuntimePaths.from_home(tmp_path))
+            runtime = await Runtime.build(config, RuntimePaths.from_home(tmp_path))
             try:
-                (executor,) = runtime._web_http_executors
+                executor = only_member(runtime.web_search_providers[0]).adapter._http
                 url = f"{target_url}/routing?source=provider"
                 async with asyncio.timeout(3):
                     response = await executor._client.get(url)

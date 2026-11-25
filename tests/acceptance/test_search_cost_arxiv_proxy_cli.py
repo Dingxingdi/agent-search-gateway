@@ -58,8 +58,7 @@ async def _gateway(
             name: {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_url": f"https://{name}.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": f"https://{name}.test", "api_key_env": "TEST_KEY"}],
                 **(web_options or {}).get(name, {}),
             }
             for name in web
@@ -69,8 +68,7 @@ async def _gateway(
             "chat": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": "https://llm.test", "api_key_env": "TEST_KEY"}],
             }
         },
         "global_default_llm": {"provider": "chat", "model": "default"},
@@ -88,12 +86,12 @@ async def _gateway(
     )
     clients: list[httpx.AsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = httpx.AsyncClient(transport=transport)
         clients.append(client)
         return client
 
-    runtime = Runtime.build(config, paths, http_client_factory=client_factory)
+    runtime = await Runtime.build(config, paths, http_client_factory=client_factory)
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
         yield runtime
     assert all(client.is_closed for client in clients)
@@ -277,8 +275,8 @@ async def test_tavily_search_body_still_runs_cheap_check_and_judge(
 
 def _academic(options: dict[str, object]) -> dict[str, object]:
     return {
-        "arxiv": {"enabled": True, "api_url": _ARXIV, **options},
-        "crossref": {"enabled": True, "api_url": "https://crossref.test"},
+        "arxiv": {"enabled": True, "credentials": [{"api_url": _ARXIV}], **options},
+        "crossref": {"enabled": True, "credentials": [{"api_url": "https://crossref.test"}]},
     }
 
 

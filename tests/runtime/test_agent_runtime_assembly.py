@@ -12,6 +12,7 @@ from agent_search_gateway.errors import ConfigFailure, ErrorCode, ExecutionFailu
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
+from tests.runtime.conftest import only_member
 from tests.runtime.test_runtime_assembly import _config, _CountingAsyncClient, _environment
 from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import web_markdown
@@ -55,10 +56,10 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
     resolved = resolve_config(
         agent_config(str(command), model=model), build_default_registry(), _environment()
     )
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     try:
         assert not evidence.exists()
@@ -85,7 +86,7 @@ async def test_runtime_agent_search_uses_configured_cli_without_llm_transport(
         assert fields["provider"] == "primary" and fields["model"] == model
         assert fields["stage"] == "agent_process"
         assert runtime.quotas.get_agent("primary").max_observed_in_use == 1
-        assert runtime.quotas.get_llm("primary").max_observed_in_use == 0
+        assert only_member(runtime.llm_clients["primary"]).capacity.max_observed_in_use == 0
     finally:
         await runtime.aclose()
 
@@ -102,7 +103,7 @@ async def test_runtime_applies_configured_agent_prompt_limit(tmp_path: Path) -> 
     )
     raw = agent_config(str(command))
     raw["input_limits"] = {"agent_prompt_bytes": 4096}
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, build_default_registry(), _environment()),
         RuntimePaths.from_home(tmp_path),
         http_client_factory=_CountingAsyncClient,
@@ -179,7 +180,7 @@ async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_
         ]
     }
     raw["retry"] = {"max_attempts": 3}
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, build_default_registry(), _environment()),
         RuntimePaths.from_home(tmp_path),
         http_client_factory=_CountingAsyncClient,
@@ -220,7 +221,7 @@ async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_
 async def test_runtime_build_is_lazy_and_closes_only_http_resources_once(tmp_path: Path) -> None:
     clients: list[_CountingAsyncClient] = []
 
-    def factory() -> httpx.AsyncClient:
+    def factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
@@ -228,7 +229,9 @@ async def test_runtime_build_is_lazy_and_closes_only_http_resources_once(tmp_pat
     resolved = resolve_config(
         agent_config("/not-installed/agy"), build_default_registry(), _environment()
     )
-    runtime = Runtime.build(resolved, RuntimePaths.from_home(tmp_path), http_client_factory=factory)
+    runtime = await Runtime.build(
+        resolved, RuntimePaths.from_home(tmp_path), http_client_factory=factory
+    )
     await runtime.aclose()
     await runtime.aclose()
     assert clients and all(client.close_calls == 1 for client in clients)
@@ -241,9 +244,9 @@ async def test_runtime_shared_paper_priority_retains_academic_llm_then_agent(
     from tests.support.agent_search import paper_markdown
 
     raw = agent_config("/not-installed/agy")
-    raw["academic_providers"] = {"crossref": {"enabled": True}}
+    raw["academic_providers"] = {"crossref": {"enabled": True, "credentials": [{}]}}
     raw["search_llm"] = {"providers": [{"provider": "secondary", "model": "search"}]}
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, build_default_registry(), _environment()),
         RuntimePaths.from_home(tmp_path),
         http_client_factory=_CountingAsyncClient,

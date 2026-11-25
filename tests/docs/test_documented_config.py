@@ -347,8 +347,9 @@ async def test_example_http_options_reach_runtime_requests(
     target = normalize_url("https://example.test/article")
 
     def client_factory(
-        *, trust_env: bool = True, verify: ssl.SSLContext | bool = True
+        *, limits: httpx.Limits, trust_env: bool = True, verify: ssl.SSLContext | bool = True
     ) -> httpx.AsyncClient:
+        assert limits.max_connections is None
         if not trust_env:
             assert isinstance(verify, ssl.SSLContext)
             assert verify.verify_mode == ssl.CERT_REQUIRED and verify.check_hostname
@@ -377,7 +378,7 @@ async def test_example_http_options_reach_runtime_requests(
         clients.append(client)
         return client
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         config, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
     )
     try:
@@ -649,10 +650,10 @@ async def test_documented_youcom_mcp_example_builds_without_credentials(
         requests.append(request)
         raise AssertionError("Documented configuration assembly must not send HTTP")
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(deny_http))
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
     )
     try:
@@ -737,10 +738,10 @@ async def test_open_websearch_example_has_explicit_multi_engine_list(
             },
         )
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
     )
     try:
@@ -979,10 +980,10 @@ async def test_tinyfish_example_and_custom_endpoints_reach_the_runtime_http_boun
             request=request,
         )
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(handler))
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved, RuntimePaths.from_home(tmp_path), http_client_factory=client_factory
     )
     try:

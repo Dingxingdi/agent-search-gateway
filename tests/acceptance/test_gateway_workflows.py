@@ -268,23 +268,25 @@ async def test_debug_gateway_rate_fallback_preserves_admitted_fetch_result(
             "tavily": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "TEST_KEY",
-                "api_url": "https://tavily.test",
-                "min_interval_seconds": 600,
+                "credentials": [
+                    {
+                        "api_key_env": "TEST_KEY",
+                        "api_url": "https://tavily.test",
+                        "min_interval_seconds": 600,
+                    }
+                ],
             },
             "firecrawl": {
                 "enable_search": False,
                 "enable_fetch": True,
-                "api_key_env": "TEST_KEY",
-                "api_url": "https://firecrawl.test",
+                "credentials": [{"api_key_env": "TEST_KEY", "api_url": "https://firecrawl.test"}],
             },
         },
         "llm_providers": {
             "chat": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": "https://llm.test", "api_key_env": "TEST_KEY"}],
             }
         },
         "global_default_llm": {"provider": "chat", "model": "default"},
@@ -328,10 +330,12 @@ async def test_debug_gateway_rate_fallback_preserves_admitted_fetch_result(
     request_ids = iter(("aaaabbbb", "ccccdddd"))
     try:
         registry = build_default_registry()
-        runtime = Runtime.build(
+        runtime = await Runtime.build(
             resolve_config(config, registry, {"TEST_KEY": "offline-credential"}),
             paths,
-            http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            http_client_factory=lambda **_: httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
         )
         daemon = ForegroundDaemon(
             paths,

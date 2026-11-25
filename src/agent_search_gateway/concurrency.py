@@ -15,6 +15,19 @@ K = TypeVar("K", bound=Hashable)
 RateNamespace = Literal["web", "academic", "oa"]
 
 
+async def join_cleanup(task: asyncio.Task[None]) -> None:
+    """Wait for cleanup to finish even if the caller is repeatedly cancelled."""
+    cancelled = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    task.result()
+    if cancelled is not None:
+        raise cancelled
+
+
 class CapacityLease:
     def __init__(self, gate: "CapacityGate", *, acquired: bool = False) -> None:
         self._gate = gate

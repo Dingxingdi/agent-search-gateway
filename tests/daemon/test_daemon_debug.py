@@ -156,18 +156,25 @@ async def test_default_runtime_registers_resolved_secrets_before_runtime_build(
     second_secret = SecretValue("llm-secret-value")
     third_secret = SecretValue("academic-secret-value")
     fourth_secret = SecretValue("contact-secret-value")
+
+    def member(key=None, email=None):
+        return SimpleNamespace(api_key=key, contact_email=email)
+
     config = SimpleNamespace(
         web=SimpleNamespace(
             providers=(
-                SimpleNamespace(secret=first_secret),
-                SimpleNamespace(secret=None),
+                SimpleNamespace(
+                    enable_search=True,
+                    enable_fetch=False,
+                    credentials=(member(first_secret), member()),
+                ),
             )
         ),
-        llm=SimpleNamespace(providers=(SimpleNamespace(secret=second_secret),)),
+        llm=SimpleNamespace(providers=(SimpleNamespace(credentials=(member(second_secret),)),)),
         academic=SimpleNamespace(
-            providers=(SimpleNamespace(api_key=third_secret, contact_email=None),)
+            providers=(SimpleNamespace(enabled=True, credentials=(member(third_secret),)),)
         ),
-        oa_resolver=SimpleNamespace(api_key=None, contact_email=fourth_secret),
+        oa_resolver=SimpleNamespace(credentials=(member(email=fourth_secret),)),
     )
     registry = object()
     expected_academic_registry = object()
@@ -200,7 +207,7 @@ async def test_default_runtime_registers_resolved_secrets_before_runtime_build(
 
     monkeypatch.setattr("agent_search_gateway.daemon.resolve_config", fake_resolve)
 
-    def fake_build(
+    async def fake_build(
         config_value: object,
         runtime_paths: RuntimePaths,
         *,

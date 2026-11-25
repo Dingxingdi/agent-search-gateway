@@ -32,7 +32,7 @@ async def test_agent_shutdown_awaits_process_group_cleanup_before_stopping(
     monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.05)
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     paths = RuntimePaths(tmp_path / "config.toml", tmp_path / "daemon.sock", tmp_path / "results")
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
         paths,
         http_client_factory=_CountingAsyncClient,

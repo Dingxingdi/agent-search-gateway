@@ -8,6 +8,7 @@ import httpx
 import pytest
 
 from agent_search_gateway.config import resolve_config
+from agent_search_gateway.credential_pool import CredentialPool
 from agent_search_gateway.errors import ConfigFailure
 from agent_search_gateway.llm.prompts import (
     content_clean_messages,
@@ -25,16 +26,16 @@ from agent_search_gateway.providers.academic.defaults import (
 )
 from agent_search_gateway.providers.contracts import ChatMessage, ProviderCapabilities
 from agent_search_gateway.providers.defaults import build_default_registry
-from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.registry import WebProviderRegistration
 from agent_search_gateway.providers.web.brightdata import BrightDataAdapter
 from agent_search_gateway.providers.web.jina import JinaReaderAdapter
 from agent_search_gateway.providers.web.parallel import ParallelAdapter
 from agent_search_gateway.providers.web.yuanbao import YuanbaoAdapter
 from agent_search_gateway.providers.web.zhihu import ZhihuAdapter
-from agent_search_gateway.rate_limit import RateGate
+from agent_search_gateway.rate_limit import make_rate_gate
 from agent_search_gateway.runtime import Runtime
 from agent_search_gateway.url_normalization import normalize_url
+from tests.runtime.conftest import only_member
 from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import web_markdown
 from tests.support.controlled import ManualClock
@@ -42,7 +43,7 @@ from tests.support.logging import structured_test_logger
 
 
 class _CountingAsyncClient(httpx.AsyncClient):
-    def __init__(self) -> None:
+    def __init__(self, **kwargs: object) -> None:
         super().__init__(
             transport=httpx.MockTransport(lambda request: httpx.Response(500, request=request))
         )
@@ -56,37 +57,44 @@ class _CountingAsyncClient(httpx.AsyncClient):
 def _config() -> dict[str, object]:
     return {
         "web_providers": {
-            "default_max_concurrency": 3,
             "tavily": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "ENV_A",
-                "api_url": "https://tavily.example.test",
+                "credentials": [
+                    {
+                        "api_key_env": "ENV_A",
+                        "api_url": "https://tavily.example.test",
+                        "max_concurrency": 3,
+                    }
+                ],
             },
             "brave": {
                 "enable_search": True,
                 "enable_fetch": False,
-                "api_key_env": "ENV_B",
-                "api_url": "https://brave.example.test",
+                "credentials": [
+                    {
+                        "api_key_env": "ENV_B",
+                        "api_url": "https://brave.example.test",
+                        "max_concurrency": 3,
+                    }
+                ],
             },
             "tinyfish": {
                 "enable_search": False,
                 "enable_fetch": True,
-                "api_key_env": "ENV_C",
-                "search_api_url": "https://search.tiny.example.test",
-                "fetch_api_url": "https://fetch.tiny.example.test",
-                "max_concurrency": 4,
+                "credentials": [
+                    {
+                        "api_key_env": "ENV_C",
+                        "search_api_url": "https://search.tiny.example.test",
+                        "fetch_api_url": "https://fetch.tiny.example.test",
+                        "max_concurrency": 4,
+                    }
+                ],
             },
-            "firecrawl": {
-                "enable_search": False,
-                "enable_fetch": False,
-                "api_url": "https://disabled.example.test",
-            },
+            "firecrawl": {"enable_search": False, "enable_fetch": False},
             "parallel": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "ENV_F",
-                "api_url": "https://parallel.example.test",
                 "mode": "turbo",
                 "search_fetch_policy": {"max_age_seconds": 3600},
                 "extract_fetch_policy": {
@@ -94,23 +102,37 @@ def _config() -> dict[str, object]:
                     "timeout_seconds": 30,
                     "disable_cache_fallback": True,
                 },
-                "max_concurrency": 6,
+                "credentials": [
+                    {
+                        "api_key_env": "ENV_F",
+                        "api_url": "https://parallel.example.test",
+                        "max_concurrency": 6,
+                    }
+                ],
             },
         },
         "llm_providers": {
-            "default_max_concurrency": 2,
             "primary": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm-primary.example.test",
-                "api_key_env": "ENV_D",
+                "credentials": [
+                    {
+                        "api_url": "https://llm-primary.example.test",
+                        "api_key_env": "ENV_D",
+                        "max_concurrency": 2,
+                    }
+                ],
             },
             "secondary": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm-secondary.example.test",
-                "api_key_env": "ENV_E",
-                "max_concurrency": 5,
+                "credentials": [
+                    {
+                        "api_url": "https://llm-secondary.example.test",
+                        "api_key_env": "ENV_E",
+                        "max_concurrency": 5,
+                    }
+                ],
             },
         },
         "global_default_llm": {"provider": "primary", "model": "global"},
@@ -160,11 +182,11 @@ async def test_runtime_llm_caps_each_stage_request(
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
     registry = build_default_registry()
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, registry, _environment()),
         RuntimePaths.from_home(tmp_path),
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     body = "HEAD" + "前🙂" * 2000 + "OMITTED" + "后" * 2000 + "TAIL"
     messages = build_messages(body)
@@ -196,13 +218,17 @@ async def test_runtime_search_and_fetch_share_one_rate_gate(
 ) -> None:
     clock = ManualClock()
     monkeypatch.setattr(
-        "agent_search_gateway.runtime.RateGate",
-        partial(RateGate, monotonic=clock.monotonic, sleep=clock.sleep),
+        "agent_search_gateway.runtime.CredentialPool",
+        partial(CredentialPool, monotonic=clock.monotonic, sleep=clock.sleep),
+    )
+    monkeypatch.setattr(
+        "agent_search_gateway.runtime.make_rate_gate",
+        partial(make_rate_gate, monotonic=clock.monotonic, sleep=clock.sleep),
     )
     raw = _config()
     web = raw["web_providers"]
     assert isinstance(web, dict)
-    web["tavily"]["rate_limits"] = [{"requests": 1, "period_seconds": 1}]
+    web["tavily"]["credentials"][0]["rate_limits"] = [{"requests": 1, "period_seconds": 1}]
     target = normalize_url("https://example.test/paper")
     sends: list[tuple[str, float]] = []
 
@@ -216,11 +242,11 @@ async def test_runtime_search_and_fetch_share_one_rate_gate(
         return httpx.Response(200, json={"results": [], "web": {"results": []}})
 
     registry = build_default_registry()
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, registry, _environment()),
         RuntimePaths.from_home(tmp_path),
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     try:
         tavily, brave, _ = runtime.web_search_providers
@@ -245,7 +271,7 @@ async def test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent(tmp_pa
     web = raw["web_providers"]
     llm = raw["llm_providers"]
     assert isinstance(web, dict) and isinstance(llm, dict)
-    web["tavily"]["min_interval_seconds"] = 3600
+    web["tavily"]["credentials"][0]["min_interval_seconds"] = 3600
     llm["tavily"] = llm.pop("primary")
     raw["global_default_llm"] = {"provider": "tavily", "model": "global"}
     command = write_fake_cli(
@@ -262,11 +288,11 @@ async def test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent(tmp_pa
         assert request.url.path == "/v1/chat/completions"
         return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(raw, registry, _environment()),
         RuntimePaths.from_home(tmp_path),
         registry=registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
     )
     try:
         await runtime.web_search_providers[0].search("query")
@@ -279,7 +305,7 @@ async def test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent(tmp_pa
                 "q", request_id="11111111", provider="tavily"
             )
             assert Path(result).is_file()
-        gate = runtime.quotas.get_rate("web", "tavily")
+        gate = only_member(runtime.web_search_providers[0]).rate
         assert gate is not None and gate.next_available_in_seconds() > 0
     finally:
         await runtime.aclose()
@@ -328,13 +354,13 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     resolved = resolve_config(_config(), registry, environment)
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
     _logger, stream = structured_test_logger("agent_search_gateway.runtime")
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
@@ -353,14 +379,11 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     assert id(runtime.web_search_providers[0]) == id(runtime.web_fetch_providers[0])
     parallel_search = runtime.web_search_providers[-1]
     parallel_fetch = runtime.web_fetch_providers[-1]
-    assert isinstance(parallel_search, ParallelAdapter)
+    assert isinstance(only_member(parallel_search).adapter, ParallelAdapter)
     assert id(parallel_search) == id(parallel_fetch)
     assert set(runtime.llm_clients) == {"primary", "secondary"}
-    assert runtime.quotas.get_web("tavily").limit == 3
-    assert runtime.quotas.get_web("tinyfish").limit == 4
-    assert runtime.quotas.get_web("parallel").limit == 6
-    assert runtime.quotas.get_llm("primary").limit == 2
-    assert runtime.quotas.get_llm("secondary").limit == 5
+    assert [only_member(p).capacity.limit for p in runtime.web_fetch_providers] == [3, 4, 6]
+    assert [only_member(p).capacity.limit for p in runtime.llm_clients.values()] == [2, 5]
     assert "RUNTIME_CREDENTIAL_SENTINEL" not in repr(runtime)
     assert "PARALLEL_CREDENTIAL_SENTINEL" not in repr(runtime)
 
@@ -370,8 +393,6 @@ async def test_runtime_assembly_builds_enabled_adapters_with_shared_quotas_and_c
     assert "web_providers=tavily,brave,tinyfish,parallel" in logged
     assert "llm_provider_count=2" in logged
     assert "llm_providers=primary,secondary" in logged
-    assert "web_limits=tavily:3,brave:3,tinyfish:4,parallel:6" in logged
-    assert "llm_limits=primary:2,secondary:5" in logged
     assert "RUNTIME_CREDENTIAL_SENTINEL" not in logged
     assert "PARALLEL_CREDENTIAL_SENTINEL" not in logged
     assert "ENV_A" not in logged
@@ -408,26 +429,26 @@ async def test_runtime_assembles_service_key_search_provider_with_owned_resource
 ) -> None:
     registry = build_default_registry()
     raw = _config()
+    credential: dict[str, object] = {"api_key_env": "SERVICE_KEY", "max_concurrency": 7}
     provider_data: dict[str, object] = {
         "enable_search": True,
         "enable_fetch": False,
-        "api_key_env": "SERVICE_KEY",
-        "max_concurrency": 7,
+        "credentials": [credential],
     }
     if api_url is not None:
-        provider_data["api_url"] = api_url
+        credential["api_url"] = api_url
     raw["web_providers"] = {provider_name: provider_data}
     environment = _environment()
     environment["SERVICE_KEY"] = "synthetic-service-value"
     resolved = resolve_config(raw, registry, environment)
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
@@ -435,18 +456,13 @@ async def test_runtime_assembles_service_key_search_provider_with_owned_resource
     )
     try:
         [provider] = runtime.web_search_providers
-        assert isinstance(provider, adapter_type)
+        member = only_member(provider)
+        assert isinstance(member.adapter, adapter_type)
         assert provider.name == provider_name
-        assert provider._api_url == (default_api_url if api_url is None else api_url)
+        assert member.adapter._api_url == (default_api_url if api_url is None else api_url)
         assert runtime.web_fetch_providers == ()
-        [executor] = runtime._web_http_executors
-        assert isinstance(executor, HttpJsonExecutor)
-        assert provider._http is executor
-        assert executor._client is clients[0]
-        assert set(runtime.quotas._web) == {provider_name}
-        quota = runtime.quotas.get_web(provider_name)
-        assert quota.limit == 7
-        assert runtime.search_orchestrator.quotas is runtime.quotas
+        assert member.adapter._http._client is clients[0]
+        assert member.capacity.limit == 7
         assert set(runtime.llm_clients) == {"primary", "secondary"}
         assert len(clients) == 1 + len(runtime.llm_clients)
         assert len({id(client) for client in clients}) == len(clients)
@@ -464,25 +480,23 @@ async def test_runtime_assembles_credentialless_jina_fetch_provider(
     registry = build_default_registry()
     raw = _config()
     raw["web_providers"] = {
-        "default_max_concurrency": 3,
         "jina": {
             "enable_search": False,
             "enable_fetch": True,
-            "api_url": "https://reader.example.test/",
-            "max_concurrency": 5,
+            "credentials": [{"api_url": "https://reader.example.test/", "max_concurrency": 5}],
         },
     }
     resolved = resolve_config(raw, registry, _environment())
     [jina_config] = resolved.web.providers
-    assert jina_config.secret is None
+    assert jina_config.credentials[0].api_key is None
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
@@ -491,13 +505,12 @@ async def test_runtime_assembles_credentialless_jina_fetch_provider(
 
     assert runtime.web_search_providers == ()
     [provider] = runtime.web_fetch_providers
-    assert isinstance(provider, JinaReaderAdapter)
+    member = only_member(provider)
+    assert isinstance(member.adapter, JinaReaderAdapter)
     assert provider.name == "jina"
-    assert provider._api_url == "https://reader.example.test"
-    assert runtime.quotas.get_web("jina").limit == 5
-    [executor] = runtime._web_http_executors
-    assert isinstance(executor, HttpJsonExecutor)
-    assert executor._client is clients[0]
+    assert member.adapter._api_url == "https://reader.example.test"
+    assert member.capacity.limit == 5
+    assert member.adapter._http._client is clients[0]
 
     await runtime.aclose()
     assert len(clients) == 3
@@ -510,15 +523,18 @@ async def test_runtime_assembles_brightdata_with_one_shared_dual_adapter(
     registry = build_default_registry()
     raw = _config()
     raw["web_providers"] = {
-        "default_max_concurrency": 3,
         "brightdata": {
             "enable_search": True,
             "enable_fetch": True,
-            "api_key_env": "ENV_BRIGHT",
-            "api_url": "https://bright.example.test",
+            "credentials": [
+                {
+                    "api_key_env": "ENV_BRIGHT",
+                    "api_url": "https://bright.example.test",
+                    "max_concurrency": 7,
+                }
+            ],
             "search_zone": "search-zone",
             "fetch_zone": "fetch-zone",
-            "max_concurrency": 7,
         },
     }
     environment = _environment()
@@ -526,13 +542,13 @@ async def test_runtime_assembles_brightdata_with_one_shared_dual_adapter(
     resolved = resolve_config(raw, registry, environment)
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
     _logger, stream = structured_test_logger("agent_search_gateway.runtime")
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
@@ -541,22 +557,18 @@ async def test_runtime_assembles_brightdata_with_one_shared_dual_adapter(
 
     [search_provider] = runtime.web_search_providers
     [fetch_provider] = runtime.web_fetch_providers
-    assert isinstance(search_provider, BrightDataAdapter)
+    member = only_member(search_provider)
+    assert isinstance(member.adapter, BrightDataAdapter)
     assert search_provider is fetch_provider
-    assert runtime.quotas.get_web("brightdata").limit == 7
-    assert search_provider._api_url == "https://bright.example.test"
-    assert search_provider._search_zone == "search-zone"
-    assert search_provider._fetch_zone == "fetch-zone"
-
-    [executor] = runtime._web_http_executors
-    assert callable(executor.request_json)
-    assert callable(executor.request_text)
-    assert executor._client is clients[0]
+    assert member.capacity.limit == 7
+    assert member.adapter._api_url == "https://bright.example.test"
+    assert member.adapter._search_zone == "search-zone"
+    assert member.adapter._fetch_zone == "fetch-zone"
+    assert member.adapter._http._client is clients[0]
     assert "BRIGHT_CREDENTIAL_SENTINEL" not in repr(runtime)
 
     logged = stream.getvalue()
     assert "web_providers=brightdata" in logged
-    assert "web_limits=brightdata:7" in logged
     assert "BRIGHT_CREDENTIAL_SENTINEL" not in logged
     assert "ENV_BRIGHT" not in logged
 
@@ -574,35 +586,21 @@ async def test_runtime_maps_invalid_brightdata_zone_to_config_failure(
         "brightdata": {
             "enable_search": True,
             "enable_fetch": True,
-            "api_key_env": "ENV_BRIGHT",
-            "api_url": "https://bright.example.test",
+            "credentials": [
+                {
+                    "api_key_env": "ENV_BRIGHT",
+                    "api_url": "https://bright.example.test",
+                    "max_concurrency": 7,
+                }
+            ],
             "search_zone": "   ",
             "fetch_zone": "fetch-zone",
         }
     }
     environment = _environment()
     environment["ENV_BRIGHT"] = "x"
-    resolved = resolve_config(raw, registry, environment)
-    clients: list[_CountingAsyncClient] = []
-
-    def client_factory() -> httpx.AsyncClient:
-        client = _CountingAsyncClient()
-        clients.append(client)
-        return client
-
-    with pytest.raises(
-        ConfigFailure,
-        match="Invalid configuration for web provider brightdata",
-    ):
-        Runtime.build(
-            resolved,
-            RuntimePaths.from_home(tmp_path),
-            registry=registry,
-            http_client_factory=client_factory,
-        )
-
-    for client in clients:
-        await client.aclose()
+    with pytest.raises(ConfigFailure, match="search_zone must be a non-empty string"):
+        resolve_config(raw, registry, environment)
 
 
 async def test_runtime_maps_invalid_parallel_adapter_config_to_config_failure(
@@ -618,7 +616,7 @@ async def test_runtime_maps_invalid_parallel_adapter_config_to_config_failure(
     resolved = resolve_config(raw, registry, _environment())
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
@@ -627,19 +625,18 @@ async def test_runtime_maps_invalid_parallel_adapter_config_to_config_failure(
         ConfigFailure,
         match="Invalid configuration for web provider parallel",
     ):
-        Runtime.build(
+        await Runtime.build(
             resolved,
             RuntimePaths.from_home(tmp_path),
             registry=registry,
             http_client_factory=client_factory,
         )
 
-    for client in clients:
-        await client.aclose()
+    assert clients and all(client.close_calls == 1 for client in clients)
 
 
 @pytest.mark.parametrize("reserved_key", ["name", "http_executor", "secret"])
-def test_runtime_rejects_reserved_web_adapter_kwargs(
+async def test_runtime_rejects_reserved_web_adapter_kwargs(
     tmp_path: Path,
     reserved_key: str,
 ) -> None:
@@ -654,10 +651,9 @@ def test_runtime_rejects_reserved_web_adapter_kwargs(
     )
     raw = _config()
     raw["web_providers"] = {
-        "default_max_concurrency": 3,
         "custom": {
             "enable_search": True,
-            "api_key_env": "ENV_CUSTOM",
+            "credentials": [{"api_key_env": "ENV_CUSTOM"}],
             reserved_key: "override",
         },
     }
@@ -668,7 +664,7 @@ def test_runtime_rejects_reserved_web_adapter_kwargs(
     )
 
     with pytest.raises(ConfigFailure, match="Reserved config key"):
-        Runtime.build(resolved, RuntimePaths.from_home(tmp_path), registry=registry)
+        await Runtime.build(resolved, RuntimePaths.from_home(tmp_path), registry=registry)
 
 
 async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once(
@@ -679,19 +675,19 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
     resolver_registry = build_default_oa_resolver_registry()
     raw = _config()
     raw["academic_providers"] = {
-        "default_max_concurrency": 2,
-        "arxiv": {"enabled": True},
-        "semantic_scholar": {"enabled": True},
-        "openalex": {"enabled": True, "api_key_env": "ENV_A"},
-        "dblp": {"enabled": True},
-        "crossref": {"enabled": True},
+        "arxiv": {"enabled": True, "credentials": [{}]},
+        "semantic_scholar": {"enabled": True, "credentials": [{}]},
+        "openalex": {"enabled": True, "credentials": [{"api_key_env": "ENV_A"}]},
+        "dblp": {"enabled": True, "credentials": [{}]},
+        "crossref": {"enabled": True, "credentials": [{}]},
         "core": {
             "enabled": True,
-            "api_key_env": "CORE_API_KEY",
-            "max_concurrency": 4,
+            "credentials": [{"api_key_env": "ENV_CORE", "max_concurrency": 4}],
         },
     }
-    raw["oa_resolvers"] = {"unpaywall": {"enabled": True, "contact_email_env": "OA_CONTACT"}}
+    raw["oa_resolvers"] = {
+        "unpaywall": {"enabled": True, "credentials": [{"contact_email_env": "OA_CONTACT"}]}
+    }
     environment = {
         "ENV_A": "x",
         "ENV_B": "x",
@@ -699,8 +695,8 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
         "ENV_D": "x",
         "ENV_E": "x",
         "ENV_F": "x",
-        "CORE_API_KEY": "x",
-        "OA_CONTACT": "[REDACTED_SECRET]",
+        "ENV_CORE": "x",
+        "OA_CONTACT": "tester@example.test",
     }
     resolved = resolve_config(
         raw,
@@ -711,12 +707,12 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
     )
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=web_registry,
@@ -737,20 +733,86 @@ async def test_runtime_assembles_all_academic_providers_resolver_and_closes_once
     assert runtime.paper_search_orchestrator.providers == runtime.academic_search_providers
     assert runtime.paper_search_orchestrator.resolver is runtime.oa_resolver
     assert runtime.paper_search_orchestrator.store is runtime.store
-    for provider, executor in zip(
-        runtime.academic_search_providers, runtime._academic_http_executors[:-1], strict=True
-    ):
-        gate = runtime.quotas.get_rate("academic", provider.name)
-        assert gate is not None
-        assert executor._rate_gate is gate
-    resolver_gate = runtime.quotas.get_rate("oa", "unpaywall")
-    assert resolver_gate is not None
-    assert runtime._academic_http_executors[-1]._rate_gate is resolver_gate
-    assert runtime.quotas.get_academic("arxiv").limit == 2
-    assert runtime.quotas.get_academic("core").limit == 4
-    assert "[REDACTED_SECRET]" not in repr(runtime)
+    for provider in (*runtime.academic_search_providers, runtime.oa_resolver):
+        member = only_member(provider)
+        assert member.rate is None
+        assert member.adapter._executor._rate_gate is member.rate
+    assert only_member(runtime.academic_search_providers[0]).capacity is None
+    assert only_member(runtime.academic_search_providers[-1]).capacity.limit == 4
+    assert "tester@example.test" not in repr(runtime)
 
     await runtime.aclose()
     await runtime.aclose()
     assert len(clients) == 13
     assert all(client.close_calls == 1 for client in clients)
+
+
+async def test_runtime_builds_one_pool_per_logical_provider(tmp_path: Path) -> None:
+    raw = _config()
+    web = raw["web_providers"]
+    llm = raw["llm_providers"]
+    assert isinstance(web, dict) and isinstance(llm, dict)
+    web["tavily"]["credentials"].append({"api_key_env": "SECOND", "api_url": "https://second.test"})
+    llm["primary"]["credentials"].append(
+        {"api_key_env": "SECOND", "api_url": "https://second.test"}
+    )
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/extract":
+            return httpx.Response(
+                200, json={"results": [{"url": "https://target.test/", "raw_content": "body"}]}
+            )
+        if request.url.path == "/search":
+            return httpx.Response(200, json={"results": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    registry = build_default_registry()
+    env = {**_environment(), "SECOND": "example"}
+    resolved = resolve_config(raw, registry, env)
+    runtime = await Runtime.build(
+        resolved,
+        RuntimePaths.from_home(tmp_path),
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        ),
+    )
+    try:
+        await runtime.web_search_providers[0].search("query")
+        await runtime.web_fetch_providers[0].fetch(normalize_url("https://target.test/"))
+        client = runtime.llm_clients["primary"]
+        await client.complete_text(LLMInvocation("primary", "model-a"), [])
+        await client.complete_json(LLMInvocation("primary", "model-b"), [])
+        assert [request.url.host for request in requests] == [
+            "tavily.example.test",
+            "second.test",
+            "llm-primary.example.test",
+            "second.test",
+        ]
+        assert [request.headers["authorization"] for request in requests] == [
+            "Bearer " + _environment()["ENV_A"],
+            "Bearer " + env["SECOND"],
+            "Bearer " + _environment()["ENV_D"],
+            "Bearer " + env["SECOND"],
+        ]
+    finally:
+        await runtime.aclose()
+
+
+async def test_runtime_sorts_fetch_only_without_changing_search_order(tmp_path: Path) -> None:
+    raw = _config()
+    web = raw["web_providers"]
+    assert isinstance(web, dict)
+    web["fetch_order"] = ["firecrawl", "parallel"]
+    registry = build_default_registry()
+    runtime = await Runtime.build(
+        resolve_config(raw, registry, _environment()),
+        RuntimePaths.from_home(tmp_path),
+        http_client_factory=lambda **_: _CountingAsyncClient(),
+    )
+    try:
+        assert [p.name for p in runtime.web_fetch_providers] == ["parallel", "tavily", "tinyfish"]
+        assert [p.name for p in runtime.web_search_providers] == ["tavily", "brave", "parallel"]
+    finally:
+        await runtime.aclose()

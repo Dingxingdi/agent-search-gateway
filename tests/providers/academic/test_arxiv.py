@@ -250,7 +250,7 @@ async def test_runtime_arxiv_options_reach_real_http_request(
     raw["academic_providers"] = {
         "arxiv": {
             "enabled": True,
-            "api_url": "https://arxiv.example.test/query",
+            "credentials": [{"api_url": "https://arxiv.example.test/query"}],
             **options,
         }
     }
@@ -268,17 +268,17 @@ async def test_runtime_arxiv_options_reach_real_http_request(
         requests.append(request)
         return httpx.Response(200, text=body)
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=web_registry,
         academic_registry=academic_registry,
         oa_resolver_registry=resolver_registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     try:
         [provider] = runtime.academic_search_providers
-        assert isinstance(provider, ArxivProvider)
+        assert provider.name == "arxiv"
         hits = await provider.search('图谱 "neural networks" 50% %22')
     finally:
         await runtime.aclose()

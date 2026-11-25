@@ -24,7 +24,7 @@ from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import agent_orchestrator, paper_markdown, web_markdown
 
 
-def build_agent_acceptance(
+async def build_agent_acceptance(
     directory: Path,
     entries: list[tuple[str, str | None]],
     *,
@@ -82,11 +82,13 @@ def build_agent_acceptance(
 [web_providers.jina]
 enable_search = false
 enable_fetch = true
+[[web_providers.jina.credentials]]
 api_url = "https://fetch.example.test"
 
 [llm_providers.fetch]
 protocol = "openai"
 api_endpoint = "chat_completions"
+[[llm_providers.fetch.credentials]]
 api_url = "https://llm.example.test"
 api_key_env = "ENV_D"
 
@@ -136,12 +138,12 @@ max_attempts = 1
         )
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(
-            load_toml(paths.config_file), build_default_registry(), {"ENV_D": "[REDACTED_SECRET]"}
+            load_toml(paths.config_file), build_default_registry(), {"ENV_D": "example"}
         ),
         paths,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     return paths, runtime, evidence, calls
 
@@ -215,7 +217,7 @@ async def test_agent_cli_receives_response_after_old_socket_deadline(
 
 @pytest.mark.parametrize("scope", ["web", "paper", "all"])
 async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, scope: str) -> None:
-    paths, runtime, evidence, http_calls = build_agent_acceptance(
+    paths, runtime, evidence, http_calls = await build_agent_acceptance(
         tmp_path, [("a", None)], allow_pin=False
     )
     daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime)
@@ -271,7 +273,7 @@ async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, s
 async def test_large_search_preserves_selected_schema_and_empty_success(
     tmp_path: Path, kind: str, scope: str, empty: bool
 ) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path, [("a", "selected"), ("b", "unused")]
     )
     cap, provider, model = (
@@ -334,7 +336,7 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
 
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     paths = RuntimePaths.from_home(tmp_path)
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
         paths,
         http_client_factory=_CountingAsyncClient,
@@ -360,7 +362,7 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
 
 
 async def test_agent_default_only_model_selector_starts_no_process(tmp_path: Path) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path, [("a", None)], allow_pin=False
     )
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
@@ -375,7 +377,7 @@ async def test_agent_default_only_model_selector_starts_no_process(tmp_path: Pat
 async def test_agent_pinned_selection_duplicate_entries_and_followup_are_independent(
     tmp_path: Path,
 ) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path,
         [("a", None), ("a", None), ("a", "m1"), ("b", "m2")],
     )
@@ -402,7 +404,7 @@ async def test_agent_pinned_selection_duplicate_entries_and_followup_are_indepen
 async def test_agent_partial_success_and_all_failure_write_only_valid_results(
     tmp_path: Path,
 ) -> None:
-    paths, runtime, _, _ = build_agent_acceptance(tmp_path, [("a", None)])
+    paths, runtime, _, _ = await build_agent_acceptance(tmp_path, [("a", None)])
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
         code, out, err = await invoke(paths, ["agent-search", "partial", "--scope", "all"])
         assert code == 0 and err == ""
