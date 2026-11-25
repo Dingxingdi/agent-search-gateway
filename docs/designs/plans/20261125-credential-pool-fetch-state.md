@@ -1181,7 +1181,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/t
 - Modify: `tests/support/agent_search.py`
 - Regression: `tests/cli/test_cli.py`、`tests/daemon/test_daemon_dispatch.py`、`tests/daemon/test_daemon_request_ids.py`、`tests/daemon/test_daemon_shutdown.py`、`tests/daemon/test_agent_shutdown.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 使用生产 resolve_config/Runtime、实际 adapter/executor、MockTransport、临时 socket 和既有 CLI harness；只 mock 最底层外部服务，不把整个 Runtime 替换成“总是成功”。
 
@@ -1196,7 +1196,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/t
 7. retry/选择等待/正文阶段取消与 daemon stop：lease/waiter/client/子进程回收，后续独立调用能执行。
 8. 旧配置迁移错误、合成的新 schema 配置可解析/Doctor、安全输出，保持 stdout/stderr、JSONL、错误 envelope 和 unavailable 文本。仓库真实示例文件的解析/Doctor 验收在 Task 22 迁移完成后执行。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential_pool_fetch_state.py -v
@@ -1204,7 +1204,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential
 
 每次先加入一个验收场景，确认其缺少的集成行为失败；已有正确路径作为回归。不能只检查 fixture 预设结果。
 
-- [ ] **Step 3: 最小实现或集成修正**
+- [x] **Step 3: 最小实现或集成修正**
 
 ~~~text
 新 schema + 合成 environ -> await Runtime.build
@@ -1225,7 +1225,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler te
 
 预期：基于合成配置的八类验收及旧协议、过滤、Agent 生命周期通过；明确记录通过/失败/跳过数量。依赖仓库真实 config.example.toml 的 test_debug_and_doctor.py 门槛随 Task 22 执行，Task 23 再运行全部 acceptance。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 复用现有 _running_daemon/CLI harness，只为新场景添加局部 fixture。避免 mock 高层组件掩盖真实构造/关闭问题，重跑上列命令。
 
@@ -1418,7 +1418,8 @@ uv run python scripts/build_docs.py
 | 18 | 完成 | 状态/交错/singleflight 五文件集合 140 通过；4 个改动测试文件 Ruff lint/format 与 mypy 通过；新用例直接 GREEN，未改生产代码。 |
 | 19 | 完成，覆盖移交 Task 20 | Doctor 107 通过；9 文件 Ruff lint/format、5 文件 mypy 通过。追加独立认证渲染哨兵被 LocalHost 内容防护拦截，既有安全渲染与健康检查通过，补充覆盖移交 Task 20。 |
 | 20 | 部分完成，BLOCKED | URLStore/daemon 82 通过，取消与提交/日志故障精确节点 9 通过；核心凭证上下文编辑被 LocalHost 内容防护拒绝，尚有 3 项身份/池事件和 1 项固定 gate 身份 RED。保留未勾选。 |
-| 21–23 | 待实施 | 独立的真实 Runtime 验收及文档迁移继续；最终完整检查须如实包含 Task 20 阻塞，不能宣称全绿。 |
+| 21 | 验收实现完成，整组门槛受 Task 20 阻塞 | 新增 12 项真实 Runtime/CLI 验收覆盖八类场景；CLI/daemon 组 205 通过；Runtime 等组 651 通过、1 个 Task 20 gate 身份失败；4 文件 Ruff lint/format/mypy 通过。Step 4 保留未勾选。 |
+| 22–23 | 待实施 | 当前文档/实际示例迁移及全量检查；最终门槛必须如实包含 Task 20 阻塞。 |
 
 配置检查点实际命令：
 
@@ -1428,7 +1429,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。第二个真实 Runtime 集成门槛、文档及全部仓库检查仍待 Tasks 21–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。Task 21 八类真实 Runtime 验收实现通过，但第二个整组门槛仍有 Task 20 固定 gate 身份失败；文档及全部仓库检查仍待 Tasks 22–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
@@ -1509,6 +1510,22 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/t
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_new_web_runtime_assembly.py -k gate_identity -q --tb=short
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/daemon/test_daemon_debug.py -q
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest 'tests/observability/test_provider_event_logging.py::test_search_cancellation_closes_started_owner_once[fetch_judge]' -q --tb=short
+~~~
+
+### Task 21 真实 Runtime 端到端验收记录
+
+- 新增 test_credential_pool_fetch_state.py 的 10 个函数、参数化后 12 项，用生产 resolve_config / Runtime / adapter / executor，配合临时 Unix socket、CLI 和最外层 MockTransport 验证八类合同。只修改四个 acceptance 文件，无生产代码或共享 support 改动。
+- 观察显式顺序中 A1 两次 503 后 A2 成功、后续逻辑 provider 零请求；未设 limits 时 12 个独立 Search 同时进入上游。四类池、LLM alias 跨 Search/Judge/Clean/Safety 的共享游标、Agent CLI 与原过滤继续验证。
+- 首轮旧 acceptance 基线 24 failed / 68 passed，迁移旧 available、同步正文 admit、Search cheap_check/Judge 和客户端参数夹具。首次 Fetch 阶段、READY 复用、Focus 仅请求级摘要、缓存拒绝、纯执行失败、unavailable 与错误协议通过。
+- stop 在真实 daemon 中同时取消退避中的 Fetch 和等待 pool 的 Fetch，lease/waiter/client 收束，重启后可独立执行；Safety 中断保留 NEED_SAFETY，下一次仅重做 Safety。合成 Doctor 新 schema、逐成员标签及旧 schema 拒绝通过。
+- 整组门槛实测：第一组 205 passed / 0 failed / 0 skipped；第二组 651 passed / 1 failed / 0 skipped。唯一失败是 tests/runtime/test_new_web_runtime_assembly.py::test_gate_identity_is_known_before_selection_and_after_release，属于 Task 20；没有 deselect、skip 或弱化该节点，Task 21 Step 4 保持未完成。
+- 控制者复核后，窗口场景改用既有 ManualClock 参数注入真实 RateGate/Pool/Executor，Event 等待后推进虚拟时间；避免假定四次 CLI 调用在真实一秒内结束。缓存拒绝场景改用 Exa 自然 raw+content，抓取前证实两个旧字段非空，实际出站时证实全空。两个参数化节点复验 4 passed in 0.37s；未重复不受影响的大集合。四个改动文件 Ruff lint/format 和 mypy 最终均通过。
+
+实际整组命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential_pool_fetch_state.py tests/acceptance/test_gateway_workflows.py tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/cli tests/daemon -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler tests/orchestrators tests/academic -q --tb=short
 ~~~
 
 ## 计划编写与自检记录

@@ -28,6 +28,7 @@ from agent_search_gateway.models import (
     ShutdownRequest,
     SuccessResponse,
     URLFetchRequest,
+    URLStatus,
 )
 from agent_search_gateway.observability import SecretValue, configure_debug_logging
 from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
@@ -498,7 +499,8 @@ async def test_fetch_singleflight_cancellation_stops_pending_attempt(
     assert sends == 1 and cancelled.is_set()
     assert capacity.in_use == 0 and runtime.close_calls == 1
     snapshot = store.get(url)
-    assert snapshot is not None and snapshot.available and snapshot.raw_content == ""
+    assert snapshot is not None and snapshot.status is URLStatus.NEED_FETCH
+    assert (snapshot.raw_content, snapshot.content) == ("", "")
 
 
 async def test_cli_waits_for_example_http_retry_budget(
@@ -873,7 +875,7 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
     store = URLStore()
     url = normalize_url(target)
     if existing_body:
-        store.admit(
+        await store.admit_candidate(
             url, "Existing abstract", raw_content="Existing raw", content="Existing content"
         )
     invocation = LLMInvocation("judge", "model", {})
@@ -1518,7 +1520,7 @@ async def test_new_provider_search_admits_url_for_fetch_fallback(tmp_path: Path,
         assert (snapshot.raw_content, snapshot.content) == ("", "")
         assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == _NEW_WEB_BODY
         after = workflow.store.get(normalize_url(records[0]["url"]))
-        assert after is not None and after.available
+        assert after is not None and after.status is URLStatus.READY
         assert (after.url, after.abstract, after.raw_content, after.content) == (
             records[0]["url"],
             records[0]["abstract"],
@@ -1571,14 +1573,14 @@ async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -
     async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
         workflow = _NewWebWorkflow(tmp_path, client, name)
         normalized = normalize_url(_NEW_WEB_TARGET)
-        workflow.store.admit(
+        await workflow.store.admit_candidate(
             normalized, "Existing abstract", raw_content="Existing raw", content="Existing content"
         )
         records = await workflow.search(provider=name)
         assert records == [{"url": _NEW_WEB_TARGET, "abstract": "Existing abstract"}]
         assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == "Existing content"
         snapshot = workflow.store.get(normalized)
-        assert snapshot is not None and snapshot.available
+        assert snapshot is not None and snapshot.status is URLStatus.READY
         assert (snapshot.url, snapshot.abstract, snapshot.raw_content, snapshot.content) == (
             _NEW_WEB_TARGET,
             "Existing abstract",
@@ -1586,7 +1588,7 @@ async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -
             "Existing content",
         )
         assert http.calls == [(name, "search")]
-        assert [call[0].model for call in workflow.llm.json_calls] == ["safety"]
+        assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
         assert not workflow.llm.text_calls
         assert workflow.capacities["tavily"].max_observed_in_use == 0
 
@@ -1761,7 +1763,7 @@ async def test_youcom_mcp_search_admission_and_fetch_priority(
         calls.append(("tavily", "fetch"))
     assert http.calls == calls
     after = workflow.store.get(url)
-    assert after is not None and after.available
+    assert after is not None and after.status is URLStatus.READY
     assert (after.abstract, after.raw_content, after.content) == ("New abstract", raw, expected)
     assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
     assert raw in workflow.llm.json_calls[0][1][-1]["content"]

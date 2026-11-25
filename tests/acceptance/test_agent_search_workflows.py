@@ -143,7 +143,9 @@ max_attempts = 1
             load_toml(paths.config_file), build_default_registry(), {"ENV_D": "example"}
         ),
         paths,
-        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
     )
     return paths, runtime, evidence, calls
 
@@ -262,7 +264,8 @@ async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, s
                 "URL was not admitted by search\n",
             )
             assert len(http_calls) == before
-        assert runtime.quotas.get_agent("a").in_use == 0
+        gate = runtime.quotas.get_agent("a")
+        assert gate is not None and gate.in_use == 0
     assert not paths.socket_file.exists()
 
 
@@ -329,17 +332,28 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agent_search_gateway.providers.agent import antigravity_cli
+    from tests.doctor._support import environment_name, write_valid_config
     from tests.providers.agent.test_antigravity_lifecycle import assert_clean, hanging_cli
-    from tests.runtime.test_agent_runtime_assembly import agent_config
-    from tests.runtime.test_runtime_assembly import _CountingAsyncClient, _environment
     from tests.support.agent_cli import force_cleanup, wait_for_json
 
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    raw = load_toml(paths.config_file)
+    raw["agent_providers"] = {
+        "primary": {"harness": "antigravity", "command": str(command), "max_concurrency": 1}
+    }
+    raw["search_agent"] = {"providers": [{"provider": "primary"}]}
+
+    def unexpected_http(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Agent search must use its CLI")
+
     runtime = await Runtime.build(
-        resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
+        resolve_config(raw, build_default_registry(), {environment_name(): "offline"}),
         paths,
-        http_client_factory=_CountingAsyncClient,
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(unexpected_http), **kwargs
+        ),
     )
     monkeypatch.setattr(antigravity_cli, "_TERMINATE_GRACE_SECONDS", 0.05)
     state: dict[str, object] = {}
@@ -351,7 +365,9 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
-        assert_clean(state, runtime.quotas.get_agent("primary"))
+        gate = runtime.quotas.get_agent("primary")
+        assert gate is not None
+        assert_clean(state, gate)
         assert not list(paths.results_dir.glob("*.jsonl"))
     finally:
         task.cancel()
