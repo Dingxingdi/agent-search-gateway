@@ -178,21 +178,41 @@ async def test_singleflight_role_callback_failures_do_not_alter_shared_execution
     assert await group.do("key", lambda: _return_value("after")) == "after"
 
 
-async def test_singleflight_cleans_up_after_cancellation() -> None:
+@pytest.mark.parametrize("cancel_leader", [False, True], ids=["follower", "leader"])
+async def test_singleflight_cancellation_propagation(cancel_leader: bool) -> None:
     group: SingleflightGroup[str, str] = SingleflightGroup()
     entered = asyncio.Event()
+    release = asyncio.Event()
+    joined = [asyncio.Event(), asyncio.Event()]
+    calls = 0
 
-    async def cancelled_factory() -> str:
+    async def factory() -> str:
+        nonlocal calls
+        calls += 1
         entered.set()
-        await asyncio.Event().wait()
-        return "never"
+        await release.wait()
+        return "shared"
 
-    task = asyncio.create_task(group.do("key", cancelled_factory))
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        leader = tasks.create_task(group.do("key", factory))
+        await entered.wait()
+        followers = [
+            tasks.create_task(group.do("key", factory, on_follower=event.set)) for event in joined
+        ]
+        await asyncio.gather(*(event.wait() for event in joined))
+        if cancel_leader:
+            leader.cancel()
+            for caller in [leader, *followers]:
+                with pytest.raises(asyncio.CancelledError):
+                    await caller
+        else:
+            followers[0].cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await followers[0]
+            release.set()
+            assert (await leader, await followers[1]) == ("shared", "shared")
 
+    assert calls == 1
     assert await group.do("key", lambda: _return_value("after")) == "after"
 
 

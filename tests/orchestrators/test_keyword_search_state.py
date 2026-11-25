@@ -1,24 +1,31 @@
 import asyncio
 import json
-from collections.abc import Mapping, Sequence
+from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
+from agent_search_gateway.llm import stages as stage_module
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.models import URLRecord, URLStatus
 from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.orchestrators import search as search_module
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
-from agent_search_gateway.providers.contracts import ChatMessage, KeywordSearchHit
+from agent_search_gateway.providers.contracts import KeywordSearchHit, URLFetchCandidate
 from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.result_writer import ResultWriter
-from agent_search_gateway.url_normalization import normalize_url
+from agent_search_gateway.url_normalization import NormalizedURL, normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.orchestrators.test_keyword_provider_filtering import _build as _build_keyword
-from tests.support.fakes import FakeKeywordSearchProvider
+from tests.orchestrators.test_keyword_search_pipeline import _orchestrator, _stages
+from tests.orchestrators.test_url_fetch_flow import _build as _build_fetch
+from tests.orchestrators.test_url_fetch_flow import _FlowClient
+from tests.support.fakes import FakeKeywordSearchProvider, FakeURLFetchProvider
 from tests.support.http import RecordingJsonExecutor
 from tests.support.logging import structured_test_logger
 
@@ -77,17 +84,12 @@ async def test_baiduqianfan_results_use_existing_url_normalization_and_dedup(
 
 
 @pytest.mark.parametrize(
-    ("raw_content", "reason", "judge_calls"),
-    [("  \t ", "cheap_check", 0), ("Rejected original text.", "judge_rejected", 1)],
+    ("raw_content", "status"),
+    [("  \t ", URLStatus.NEED_FETCH), ("Original article.", URLStatus.NEED_JUDGE)],
 )
-async def test_baiduqianfan_rejected_body_preserves_admitted_url_and_abstract(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-    raw_content: str,
-    reason: str,
-    judge_calls: int,
+async def test_baiduqianfan_admits_natural_body_and_abstract(
+    tmp_path: Path, raw_content: str, status: URLStatus
 ) -> None:
-    caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
     http = RecordingJsonExecutor(
         [
             {"references": []},
@@ -117,18 +119,10 @@ async def test_baiduqianfan_rejected_body_preserves_admitted_url_and_abstract(
         "abstract": "Retained abstract",
     }
     snapshot = store.get(normalize_url("https://example.com/rejected"))
-    assert snapshot is not None and snapshot.available
+    assert snapshot is not None and snapshot.status is status
     assert snapshot.abstract == "Retained abstract"
-    assert (snapshot.raw_content, snapshot.content) == ("", "")
-    assert len(client.json_calls) == judge_calls
-    if judge_calls:
-        assert raw_content in client.json_calls[0][1][-1]["content"]
-    assert any(
-        getattr(record, "gateway_event", None) == "body_rejected"
-        and vars(record)["gateway_fields"]["provider"] == "baiduqianfan"
-        and vars(record)["gateway_fields"]["reason"] == reason
-        for record in caplog.records
-    )
+    assert (snapshot.raw_content, snapshot.content) == (raw_content.strip(), "")
+    assert client.json_calls == client.text_calls == []
 
 
 @pytest.mark.parametrize("with_title", [False, True], ids=["url-only", "title-only"])
@@ -236,39 +230,58 @@ async def test_baiduqianfan_emits_one_logical_provider_terminal_event(
     assert len(http.requests) == 2
 
 
-class _JudgeClient:
-    name = "judge"
+@pytest.fixture
+def no_body_stages(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    cheap = Mock(return_value=False)
+    monkeypatch.setattr(stage_module, "cheap_check", cheap)
+    monkeypatch.setattr(search_module, "cheap_check", cheap, raising=False)
+    stages = {name: AsyncMock() for name in ("judge", "content_clean", "safety", "focus_summary")}
+    for name, stage in stages.items():
+        monkeypatch.setattr(LLMStages, name, stage)
+    yield
+    cheap.assert_not_called()
+    for stage in stages.values():
+        stage.assert_not_called()
 
-    def __init__(self) -> None:
-        self.candidates: list[str] = []
 
-    async def complete_json(
-        self,
-        invocation: LLMInvocation,
-        messages: Sequence[ChatMessage],
-    ) -> Mapping[str, object]:
-        candidate = messages[-1]["content"]
-        self.candidates.append(candidate)
-        if "explode-body" in candidate:
-            raise ExecutionFailure(
-                ErrorCode.ALL_PROVIDERS_FAILED,
-                "judge exploded",
-                reason="REASON_SENTINEL",
-                diagnostics={"upstream_code": "judge_busy", "http_status": 503},
-            )
-        if "reject-body" in candidate:
-            return {"ok": False, "reason": "not usable"}
-        return {"ok": True}
+@pytest.mark.parametrize(
+    ("raw", "content"),
+    [(" r ", ""), ("", " c "), (" raw ", " clean "), (" \t ", "content")],
+)
+async def test_keyword_search_caches_natural_body_without_body_stages(
+    tmp_path: Path, no_body_stages: None, raw: str, content: str
+) -> None:
+    url = normalize_url("https://example.org/hit")
+    provider = FakeKeywordSearchProvider(
+        "web", [KeywordSearchHit(url, title=" Title ", raw_content=raw, content=content)]
+    )
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [provider])
 
-    async def complete_text(
-        self,
-        invocation: LLMInvocation,
-        messages: Sequence[ChatMessage],
-    ) -> str:
-        return "unused"
+    path = Path(await orchestrator.keyword_search("query", request_id="ac000001"))
 
-    async def aclose(self) -> None:
-        return None
+    assert json.loads(path.read_text()) == {"url": url, "abstract": "Title"}
+    record = store.get(url)
+    assert record is not None and record.status is URLStatus.NEED_JUDGE
+    assert (record.raw_content, record.content) == (raw if raw.strip() else "", content)
+
+
+@pytest.mark.parametrize(("raw", "content"), [("", ""), ("  ", "\n")])
+async def test_keyword_search_admits_metadata_without_a_candidate(
+    tmp_path: Path, no_body_stages: None, raw: str, content: str
+) -> None:
+    url = normalize_url("https://example.org/metadata")
+    provider = FakeKeywordSearchProvider(
+        "web", [KeywordSearchHit(url, snippet="Summary", raw_content=raw, content=content)]
+    )
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [provider])
+    # Metadata admission must complete even when Fetch owns this URL's body lock.
+    async with store.serialization(url), asyncio.timeout(1):
+        path = Path(await orchestrator.keyword_search("query", request_id="ac000002"))
+
+    assert json.loads(path.read_text()) == {"url": url, "abstract": "Summary"}
+    record = store.get(url)
+    assert record is not None and record.status is URLStatus.NEED_FETCH
+    assert (record.raw_content, record.content) == ("", "")
 
 
 class _OrderedProvider:
@@ -295,238 +308,192 @@ class _OrderedProvider:
         return list(self.hits)
 
 
-async def test_keyword_search_validates_body_then_commits_deterministic_first_write_state(
-    tmp_path: Path,
-) -> None:
-    store = URLStore()
-    unavailable_url = normalize_url("https://example.com/unavailable")
-    store.admit(unavailable_url, "Stored unavailable", raw_content="old raw")
-    store.mark_unavailable(unavailable_url)
-
-    judge_client = _JudgeClient()
-    invocation = LLMInvocation("judge", "model", {})
-    stages = LLMStages(
-        {"judge": judge_client},
-        judge=invocation,
-        safety=invocation,
-        content_clean=invocation,
-        focus_summary=invocation,
-    )
-
+async def test_keyword_admission_uses_declared_provider_order(tmp_path: Path) -> None:
+    url = normalize_url("https://example.org/shared")
     release_first = asyncio.Event()
-    first_provider = _OrderedProvider(
+    first = _OrderedProvider(
         "first",
         [
-            KeywordSearchHit(
-                "https://EXAMPLE.com/a",
-                title="Title A",
-                snippet="First abstract",
-                raw_content="raw-a",
-                content="content-a",
-            ),
-            KeywordSearchHit("https://example.com/skip", title=" ", snippet=""),
-            KeywordSearchHit(
-                "https://example.com/raw",
-                title="Raw title",
-                raw_content="raw-only",
-            ),
-            KeywordSearchHit(
-                "https://example.com/reject",
-                snippet="Rejected body still admitted",
-                raw_content="reject-body",
-            ),
-            KeywordSearchHit(
-                "https://example.com/unavailable",
-                snippet="New unavailable abstract",
-                content="explode-body-unavailable-must-be-skipped",
-            ),
-            KeywordSearchHit(
-                "https://example.com/a",
-                snippet="Duplicate later abstract",
-                raw_content="raw-later",
-                content="content-later",
-            ),
+            KeywordSearchHit(url, snippet="First abstract"),
+            KeywordSearchHit(url, snippet="First body", raw_content="first raw"),
+            KeywordSearchHit(url, snippet="Later hit", content="later clean"),
         ],
         wait_for=release_first,
     )
-    second_provider = _OrderedProvider(
+    second = _OrderedProvider(
         "second",
-        [
-            KeywordSearchHit(
-                "https://example.com/a",
-                snippet="Second provider abstract",
-                raw_content="raw-b",
-                content="content-b",
-            ),
-            KeywordSearchHit("https://example.com/b", snippet="B abstract"),
-        ],
+        [KeywordSearchHit(url, snippet="Second abstract", content="second clean")],
         signal=release_first,
     )
-    failed_provider = _OrderedProvider(
-        "failed",
-        [
-            KeywordSearchHit("https://example.com/c", snippet="C would be staged"),
-            KeywordSearchHit(
-                "https://example.com/explode",
-                snippet="Explodes judge",
-                raw_content="explode-body",
-            ),
-            KeywordSearchHit(
-                "https://example.com/d",
-                snippet="D survives judge failure",
-            ),
-        ],
-    )
-    providers = [first_provider, second_provider, failed_provider]
-    orchestrator = SearchOrchestrator(
-        keyword_providers=providers,
-        llm_invocations=(),
-        stages=stages,
-        store=store,
-        result_writer=ResultWriter(tmp_path / "results"),
-    )
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [first, second])
 
-    first_path = Path(await orchestrator.keyword_search("query", request_id="11111111"))
-    output = [json.loads(line) for line in first_path.read_text(encoding="utf-8").splitlines()]
-    assert output == [
-        {"url": "https://example.com/a", "abstract": "First abstract"},
-        {"url": "https://example.com/raw", "abstract": "Raw title"},
-        {"url": "https://example.com/reject", "abstract": "Rejected body still admitted"},
-        {"url": "https://example.com/unavailable", "abstract": "Stored unavailable"},
-        {"url": "https://example.com/b", "abstract": "B abstract"},
-        {"url": "https://example.com/c", "abstract": "C would be staged"},
-        {"url": "https://example.com/d", "abstract": "D survives judge failure"},
-    ]
+    async with asyncio.timeout(1):
+        path = Path(await orchestrator.keyword_search("query", request_id="11111111"))
 
-    a = store.get(normalize_url("https://example.com/a"))
-    assert a is not None
-    assert (a.raw_content, a.content, a.abstract) == ("raw-a", "content-a", "First abstract")
-    raw = store.get(normalize_url("https://example.com/raw"))
-    assert raw is not None and raw.raw_content == "raw-only" and raw.content == ""
-    rejected = store.get(normalize_url("https://example.com/reject"))
-    assert rejected is not None and rejected.raw_content == "" and rejected.available is True
-    assert store.get(normalize_url("https://example.com/skip")) is None
-    staged_before_failure = store.get(normalize_url("https://example.com/c"))
-    assert staged_before_failure is not None
-    assert staged_before_failure.abstract == "C would be staged"
-    staged_after_failure = store.get(normalize_url("https://example.com/d"))
-    assert staged_after_failure is not None
-    assert staged_after_failure.abstract == "D survives judge failure"
-    assert "explode-body-unavailable-must-be-skipped" not in "\n".join(judge_client.candidates)
-
-    second_path = Path(await orchestrator.keyword_search("query", request_id="22222222"))
-    assert second_path != first_path
-    assert [provider.calls for provider in providers] == [2, 2, 2]
+    assert [first.calls, second.calls] == [1, 1]
+    assert json.loads(path.read_text()) == {"url": url, "abstract": "First abstract"}
+    record = store.get(url)
+    assert record is not None and record.status is URLStatus.NEED_JUDGE
+    assert (record.raw_content, record.content) == ("first raw", "")
 
 
-async def test_keyword_search_attributes_hit_staging_failures_without_duplicate_terminal_events(
-    tmp_path: Path,
+class _ObservedAdmissions(URLStore):
+    """Signal when Search enters and returns from the real candidate admission."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started: defaultdict[str, asyncio.Event] = defaultdict(asyncio.Event)
+        self.finished: set[str] = set()
+
+    async def admit_candidate(
+        self, url: NormalizedURL, abstract: str, *, raw_content: str = "", content: str = ""
+    ) -> URLRecord:
+        self.started[abstract].set()
+        record = await super().admit_candidate(
+            url, abstract, raw_content=raw_content, content=content
+        )
+        self.finished.add(abstract)
+        return record
+
+
+@pytest.mark.parametrize(
+    ("paused_model", "replace_cached", "pending"),
+    [
+        ("judge-model", False, URLStatus.NEED_JUDGE),
+        ("clean-model", False, URLStatus.NEED_CLEAN),
+        ("safety-model", False, URLStatus.NEED_SAFETY),
+        ("judge-model", True, URLStatus.NEED_FETCH),
+    ],
+)
+async def test_search_body_waits_then_rereads_committed_fetch_state(
+    tmp_path: Path, paused_model: str, replace_cached: bool, pending: URLStatus
 ) -> None:
-    logger, stream = structured_test_logger("tests.search.keyword-hit-staging-failures")
-    judge_client = _JudgeClient()
-    invocation = LLMInvocation("judge", "judge-model", {})
-    stages = LLMStages(
-        {"judge": judge_client},
-        judge=invocation,
-        safety=invocation,
-        content_clean=invocation,
-        focus_summary=invocation,
-        logger=logger,
+    url = normalize_url("https://example.org/shared")
+    store = _ObservedAdmissions()
+    await store.admit_candidate(
+        url,
+        "Original",
+        raw_content="cached raw",
+        content="semantic-reject" if replace_cached else "",
     )
-    partial = FakeKeywordSearchProvider(
-        "partial",
-        [
-            KeywordSearchHit("https://example.com/kept", snippet="Kept result"),
-            KeywordSearchHit(
-                "https://example.com/partial-failure",
-                snippet="Judge fails",
-                raw_content="explode-body-partial",
-            ),
-        ],
+    search_provider = FakeKeywordSearchProvider(
+        "web",
+        [KeywordSearchHit(url, title="Later", raw_content="search raw", content="search clean")],
     )
-    all_judge_failed = FakeKeywordSearchProvider(
-        "all-judge-failed",
-        [
-            KeywordSearchHit(
-                "https://example.com/all-failed",
-                snippet="Judge fails",
-                raw_content="explode-body-all",
-            )
-        ],
+    search = _orchestrator(tmp_path, [search_provider], store)
+    client = _FlowClient()
+    fetch_provider = FakeURLFetchProvider(
+        "fetch", URLFetchCandidate(raw_content="fetch raw", content="fetch clean")
     )
-    invalid_hit = FakeKeywordSearchProvider(
-        "invalid-hit",
-        [KeywordSearchHit(cast(str, 1), snippet="Invalid hit")],
+    fetch = _build_fetch(store, client, [fetch_provider])
+    entered, release = client.pause(paused_model)
+
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        fetching = tasks.create_task(fetch.url_fetch(str(url)))
+        await entered.wait()
+        if replace_cached:
+            # Let Judge reject the cached pair, then pause Judge on the replacement.
+            next_entered, next_release = client.pause(paused_model)
+            release.set()
+            await next_entered.wait()
+            release = next_release
+        before = store.get(url)
+        assert before is not None and before.status is pending
+        if replace_cached:
+            assert (before.raw_content, before.content) == ("", "")
+        searching = tasks.create_task(search.keyword_search("query", request_id="ac001801"))
+        await store.started["Later"].wait()
+        assert "Later" not in store.finished
+        assert store.get(url) is before
+        release.set()
+
+    expected_raw, expected_body = (
+        ("fetch raw", "fetch clean") if replace_cached else ("cached raw", "cleaned body")
     )
-    orchestrator = SearchOrchestrator(
-        keyword_providers=[partial, all_judge_failed, invalid_hit],
-        llm_invocations=(),
-        stages=stages,
-        store=URLStore(),
-        result_writer=ResultWriter(tmp_path / "judge-failure-results"),
-        logger=logger,
+    assert fetching.result() == expected_body
+    assert json.loads(Path(searching.result()).read_text()) == {"url": url, "abstract": "Original"}
+    assert "Later" in store.finished
+    final = store.get(url)
+    assert final is not None
+    assert (final.status, final.raw_content, final.content) == (
+        URLStatus.READY,
+        expected_raw,
+        expected_body,
+    )
+    assert fetch_provider.calls == ([url] if replace_cached else [])
+    assert [model for model, _ in client.calls] == (
+        ["judge-model", "judge-model", "safety-model"]
+        if replace_cached
+        else ["judge-model", "clean-model", "safety-model"]
     )
 
-    await orchestrator.keyword_search("query", request_id="1234abcd")
 
-    lines = stream.getvalue().splitlines()
-    partial_lines = [line for line in lines if "provider=partial" in line]
-    assert sum("event=provider_partial_failure" in line for line in partial_lines) == 1
-    assert any(
-        "event=provider_partial_failure" in line
-        and "stage=judge" in line
-        and "error_type=ExecutionFailure" in line
-        and "failed_hits=1" in line
-        and "upstream_code=judge_busy" in line
-        and "reason=execution_failure" in line
-        for line in partial_lines
-    )
-    assert sum("event=provider_completed" in line for line in partial_lines) == 1
-    assert not any("event=provider_failed" in line for line in partial_lines)
+async def test_two_searches_wait_for_same_url_while_other_url_completes(tmp_path: Path) -> None:
+    url = normalize_url("https://example.org/contended")
+    other = normalize_url("https://example.org/independent")
+    store = _ObservedAdmissions()
+    providers = [
+        FakeKeywordSearchProvider("first", [KeywordSearchHit(url, title="A", raw_content="A raw")]),
+        FakeKeywordSearchProvider("second", [KeywordSearchHit(url, title="B", content="B clean")]),
+        FakeKeywordSearchProvider(
+            "other", [KeywordSearchHit(other, title="C", raw_content="C raw")]
+        ),
+    ]
+    search = _orchestrator(tmp_path, providers, store)
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks, store.serialization(url):
+        first = tasks.create_task(
+            search.keyword_search("a", request_id="ac001802", provider="first")
+        )
+        await store.started["A"].wait()
+        second = tasks.create_task(
+            search.keyword_search("b", request_id="ac001803", provider="second")
+        )
+        await store.started["B"].wait()
+        await search.keyword_search("c", request_id="ac001804", provider="other")
+        independent = store.get(other)
+        assert independent is not None
+        assert (independent.status, independent.raw_content) == (URLStatus.NEED_JUDGE, "C raw")
+        assert store.finished == {"C"}
+        assert store.get(url) is None
 
-    failed_lines = [line for line in lines if "provider=all-judge-failed" in line]
-    assert sum("event=provider_failed" in line for line in failed_lines) == 1
-    assert any(
-        "event=provider_failed" in line
-        and "stage=judge" in line
-        and "error_type=ExecutionFailure" in line
-        for line in failed_lines
+    for result in (first.result(), second.result()):
+        assert json.loads(Path(result).read_text()) == {"url": url, "abstract": "A"}
+    record = store.get(url)
+    assert record is not None
+    assert (record.status, record.raw_content, record.content) == (
+        URLStatus.NEED_JUDGE,
+        "A raw",
+        "",
     )
-    assert not any(
-        "event=provider_failed" in line and "stage=search" in line for line in failed_lines
-    )
-    assert not any("event=provider_completed" in line for line in failed_lines)
-    assert any("upstream_code=judge_busy" in line for line in failed_lines)
-    assert "REASON_SENTINEL" not in stream.getvalue()
 
-    invalid_lines = [line for line in lines if "provider=invalid-hit" in line]
-    assert sum("event=provider_failed" in line for line in invalid_lines) == 1
-    assert any(
-        "event=provider_failed" in line
-        and "stage=hit_staging" in line
-        and "error_type=TypeError" in line
-        for line in invalid_lines
+
+@pytest.mark.parametrize("status", [URLStatus.READY, URLStatus.UNAVAILABLE])
+async def test_keyword_search_preserves_terminal_snapshot(
+    tmp_path: Path, no_body_stages: None, status: URLStatus
+) -> None:
+    url = normalize_url("https://example.org/terminal")
+    provider = FakeKeywordSearchProvider(
+        "web", [KeywordSearchHit(url, snippet="New abstract", raw_content="new body")]
     )
-    assert not any(
-        "event=provider_failed" in line and "stage=search" in line for line in invalid_lines
-    )
-    assert not any("event=provider_completed" in line for line in invalid_lines)
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [provider])
+    store.admit(url, "Stored abstract")
+    async with store.serialization(url):
+        store.accept_candidate(url, content="stored content")
+        if status is URLStatus.READY:
+            original = store.mark_ready(url)
+        else:
+            original = store.mark_unavailable(url)
+
+    path = Path(await orchestrator.keyword_search("query", request_id="11111112"))
+
+    assert json.loads(path.read_text()) == {"url": url, "abstract": "Stored abstract"}
+    assert store.get(url) == original
 
 
 async def test_keyword_search_debug_events_cover_provider_candidate_body_and_persistence(
     tmp_path: Path,
 ) -> None:
     logger, stream = structured_test_logger("tests.search.keyword-events")
-    judge_client = _JudgeClient()
-    invocation = LLMInvocation("judge", "judge-model", {})
-    stages = LLMStages(
-        {"judge": judge_client},
-        judge=invocation,
-        safety=invocation,
-        content_clean=invocation,
-        focus_summary=invocation,
-        logger=logger,
-    )
     failed = FakeKeywordSearchProvider(
         "failed",
         failure=ExecutionFailure(
@@ -566,7 +533,7 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
     orchestrator = SearchOrchestrator(
         keyword_providers=[failed, success],
         llm_invocations=(),
-        stages=stages,
+        stages=_stages(),
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "debug-results"),
         logger=logger,
@@ -605,15 +572,7 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
     )
     assert "url=https://example.com/no-body " in logged
     assert "LOG_PASSWORD_SENTINEL" not in logged
-    assert any("event=body_skipped" in line and "reason=no_body" in line for line in lines)
-    assert any("event=body_rejected" in line and "reason=cheap_check" in line for line in lines)
-    assert any("event=body_rejected" in line and "reason=judge_rejected" in line for line in lines)
-    assert "decision_reason=" not in logged
-    assert "not usable" not in logged
-    assert any(
-        "event=body_accepted" in line and "url=https://example.com/accepted " in line
-        for line in lines
-    )
+    assert all("event=body_" not in line for line in lines)
     assert any(
         "event=candidate_rejected" in line
         and "url=https://example.com/no-body " in line
@@ -633,139 +592,72 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
         assert sentinel not in logged
 
 
-@pytest.mark.parametrize("only_failure", [False, True])
-async def test_keyword_staging_counts_judge_failure_and_retained_abstract(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture, only_failure: bool
+async def test_keyword_search_unavailable_body_stage_does_not_drop_hits(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
-    invocation = LLMInvocation("judge", "model", {})
-    stages = LLMStages(
-        {"judge": _JudgeClient()},
-        judge=invocation,
-        safety=invocation,
-        content_clean=invocation,
-        focus_summary=invocation,
+    url = normalize_url("https://example.org/body")
+    valid = FakeKeywordSearchProvider(
+        "valid",
+        [
+            KeywordSearchHit("https://example.org/meta", snippet="Metadata"),
+            KeywordSearchHit(url, snippet="Body hit", raw_content="natural text"),
+        ],
     )
-    hits = [
-        KeywordSearchHit(
-            "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Ffails",
-            snippet="Judge fails",
-            raw_content="explode-body",
-        )
+    invalid = FakeKeywordSearchProvider("invalid", [KeywordSearchHit(cast(str, 1), title="Bad")])
+    orchestrator, store, client, _ = _build_keyword(tmp_path, [valid, invalid])
+    client.failure = ExecutionFailure(ErrorCode.LLM_STAGE_FAILED, "stage unavailable")
+
+    path = Path(await orchestrator.keyword_search("query", request_id="aa000001"))
+
+    assert [json.loads(line)["abstract"] for line in path.read_text().splitlines()] == [
+        "Metadata",
+        "Body hit",
     ]
-    if not only_failure:
-        hits.append(
-            KeywordSearchHit(
-                "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Frejected-body",
-                snippet="Retained abstract",
-                raw_content="reject-body",
-            )
+    assert client.json_calls == client.text_calls == []
+    record = store.get(url)
+    assert record is not None and record.status is URLStatus.NEED_JUDGE
+    terminals = [
+        (
+            vars(event)["gateway_event"],
+            vars(event)["gateway_fields"]["provider"],
+            vars(event)["gateway_fields"]["stage"],
         )
-    orchestrator = SearchOrchestrator(
-        keyword_providers=[FakeKeywordSearchProvider("web", hits)],
-        llm_invocations=(),
-        stages=stages,
-        store=URLStore(),
-        result_writer=ResultWriter(tmp_path / "results"),
-    )
-    if only_failure:
-        with pytest.raises(ExecutionFailure):
-            await orchestrator.keyword_search("query", request_id="aa000001")
-    else:
-        path = Path(await orchestrator.keyword_search("query", request_id="aa000001"))
-        assert json.loads(path.read_text()) == {
-            "url": "https://example.org/rejected-body",
-            "abstract": "Retained abstract",
-        }
-    summaries = [
-        vars(record)["gateway_fields"]
-        for record in caplog.records
-        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+        for event in caplog.records
+        if getattr(event, "gateway_event", None)
+        in {"provider_failed", "provider_completed", "provider_partial_failure"}
     ]
-    assert summaries == [
-        {
-            "provider": "web",
-            "phase": "staging",
-            "received": len(hits),
-            "accepted": int(not only_failure),
-            "rejected": 1,
-            "rejection_counts": {"judge_execution_failed": 1},
-            "rewritten": len(hits),
-            "processed": len(hits),
-            "unprocessed": 0,
-        }
+    assert sorted(terminals) == [
+        ("provider_completed", "valid", "search"),
+        ("provider_failed", "invalid", "hit_staging"),
     ]
 
 
-async def test_keyword_staging_cancellation_leaves_inflight_and_tail_unprocessed(
+async def test_keyword_cancellation_during_provider_search_skips_admission(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level("DEBUG", logger="agent_search_gateway.orchestrators.search")
     entered = asyncio.Event()
-
-    class WaitingJudge(_JudgeClient):
-        async def complete_json(
-            self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
-        ) -> Mapping[str, object]:
-            entered.set()
-            await asyncio.Future[None]()
-            return {"ok": True}
-
-    invocation = LLMInvocation("judge", "model", {})
-    stages = LLMStages(
-        {"judge": WaitingJudge()},
-        judge=invocation,
-        safety=invocation,
-        content_clean=invocation,
-        focus_summary=invocation,
+    url = normalize_url("https://example.org/pending")
+    waiting = _OrderedProvider(
+        "waiting",
+        [KeywordSearchHit(url, title="Pending")],
+        wait_for=asyncio.Event(),
+        signal=entered,
     )
-    orchestrator = SearchOrchestrator(
-        keyword_providers=[
-            FakeKeywordSearchProvider(
-                "web",
-                [
-                    KeywordSearchHit("https://example.org/kept", snippet="Staged"),
-                    KeywordSearchHit(
-                        "https://google.com/goto?url=https%3A%2F%2Fexample.org%2Fwaiting",
-                        snippet="Waiting",
-                        raw_content="Waiting body",
-                    ),
-                    KeywordSearchHit("https://example.org/tail", snippet="Unprocessed"),
-                ],
-            )
-        ],
-        llm_invocations=(),
-        stages=stages,
-        store=URLStore(),
-        result_writer=ResultWriter(tmp_path / "results"),
-    )
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [waiting])
     task = asyncio.create_task(orchestrator.keyword_search("query", request_id="aa000002"))
     await asyncio.wait_for(entered.wait(), timeout=1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    summaries = [
-        vars(record)["gateway_fields"]
-        for record in caplog.records
-        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
-    ]
-    assert summaries == [
-        {
-            "provider": "web",
-            "phase": "staging",
-            "received": 3,
-            "accepted": 1,
-            "rejected": 0,
-            "rejection_counts": {},
-            "rewritten": 1,
-            "processed": 1,
-            "unprocessed": 2,
-        }
-    ]
+    assert store.get(url) is None
+    assert not list((tmp_path / "results").glob("*.jsonl"))
     terminals = [
         vars(record)["gateway_fields"]
         for record in caplog.records
         if getattr(record, "gateway_event", None) in {"provider_failed", "provider_completed"}
     ]
     assert len(terminals) == 1
+    assert terminals[0]["stage"] == "search"
     assert terminals[0]["reason"] == "cancelled"

@@ -17,6 +17,38 @@ def _fixture(name: str) -> object:
     return json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize(
+    ("summary_fields", "snippet"),
+    [
+        (
+            {"highlights": [" First highlight ", "Later highlight"], "summary": "Summary"},
+            " First highlight ",
+        ),
+        ({"highlights": [" ", "Later highlight"], "summary": " Summary "}, "Summary"),
+        ({"highlights": [], "summary": " "}, "Exa result"),
+        ({}, "Exa result"),
+    ],
+)
+async def test_exa_search_requests_highlights_without_full_text(
+    summary_fields: dict[str, object], snippet: str
+) -> None:
+    executor = RecordingJsonExecutor(
+        [{"results": [{"url": "https://example.com/exa", "title": "Exa result", **summary_fields}]}]
+    )
+    adapter = ExaAdapter(
+        name="exa",
+        api_url="https://exa.example.test",
+        secret=SecretValue("x"),
+        http_executor=executor,
+    )
+
+    hits = await adapter.search("query")
+
+    assert hits == [KeywordSearchHit("https://example.com/exa", "Exa result", snippet, "", "")]
+    [request] = executor.requests
+    assert request.json_body == {"query": "query", "contents": {"highlights": True}}
+
+
 async def test_exa_adapter_maps_search_and_contents_without_deprecated_fields() -> None:
     executor = RecordingJsonExecutor([_fixture("search.json"), _fixture("contents.json")])
     adapter = ExaAdapter(
@@ -43,7 +75,7 @@ async def test_exa_adapter_maps_search_and_contents_without_deprecated_fields() 
     assert search_request.headers == {"x-api-key": "x"}
     assert search_request.json_body == {
         "query": "query",
-        "contents": {"text": True, "highlights": True},
+        "contents": {"highlights": True},
     }
     assert fetch_request.url == "https://exa.example.test/contents"
     assert fetch_request.json_body == {"urls": ["https://example.com/exa"], "text": True}

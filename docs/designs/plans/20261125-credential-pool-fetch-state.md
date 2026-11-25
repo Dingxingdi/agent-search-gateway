@@ -801,13 +801,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler tests/runtime te
 - Test: `tests/unit/test_url_store.py`
 - Read: `src/agent_search_gateway/concurrency.py`（PerKeyLockPool）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_candidate_pair_is_atomic_and_first_abstract_wins`：A 先给 raw、B 后给 content，不能形成 A.raw+B.content。`test_metadata_admission_preserves_every_existing_status` 参数化六状态。`test_store_rejects_invalid_body_status_combinations` 验证 READY 无正文、NEED_CLEAN 有 content、NEED_JUDGE 两字段皆空和错误阶段调用不提交。
 
 保留恰好五字段、frozen snapshot、URL/摘要输入校验。NEED_FETCH 收自然候选变 NEED_JUDGE；已有候选、READY、UNAVAILABLE 不被 Search 覆盖。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py -v
@@ -815,7 +815,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py -v
 
 预期：旧 available 字段及独立合并 raw/content 的断言与新状态/同源要求不同。把旧“混拼应成功”测试换成明确反例，不只删断言。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 URLStatus 六个固定字符串；URLRecord 第五字段 available -> status
@@ -833,7 +833,7 @@ mark_unavailable：仅实际 Fetch 终止或 Safety 拒绝路径进入终态
 
 转换方法是持锁 Fetch 内的同步原子提交，不再次获取锁。返回新的 immutable snapshot，不能允许 adapter 或 Search 直接写 records；不留 available 兼容 property。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/unit/test_url_normalization.py tests/runtime/test_singleflight.py -v
@@ -841,7 +841,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tes
 
 预期：合法转移、正文同源、摘要和 metadata-only 不降级全部通过。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 用小型私有 commit/invariant helper 消除重复，不引入 FSM 框架或任意 status setter。调用者在 Tasks 16–18 迁移，重跑上列组件命令。
 
@@ -859,13 +859,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tes
 - Read: `src/agent_search_gateway/providers/defaults.py` 和本文“Web Search 审计矩阵”
 - Fixtures: `tests/fixtures/providers/tavily/search.json`、`tests/fixtures/providers/exa/search.json`（现有搜索响应 fixture；按需要增加无正文/自然正文变体）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_tavily_search_does_not_request_raw_body` 捕获出站 JSON；`test_exa_search_requests_highlights_without_full_text` 保留 highlights 且无 text=true。各测一次没有正文的有效响应和一次自然带正文的响应：摘要/标题/URL 保留，自然 raw/text 仍映射进 KeywordSearchHit。
 
 Firecrawl 继续无 scrapeOptions/隐式 Scrape。BaiduQianfan Agentic 网页和 ScrapeGraphAI 的自然正文不删除；媒体、正常 partial success、摘要 fallback 不变。Fetch 的 /extract、/contents 和相关正文参数保持原断言。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web/test_tavily.py tests/providers/web/test_exa.py -k "does_not_request_raw_body or without_full_text" -v
@@ -873,7 +873,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web/test_tavily.
 
 预期：旧 Tavily include_raw_content=markdown、Exa contents.text=true 与断言不符。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 Tavily.search 删除主动 include_raw_content 请求项
@@ -885,7 +885,7 @@ Exa 摘要继续 highlights -> summary -> title；无 text 仍有合法搜索结
 
 不要机械删除叫 content 的摘要字段，也不修改只属于 Fetch 的 includeRawContent/full_content。遇到本地契约无法确定的选项再查厂商一手文档；不得凭名称发明关闭参数或计费结论。
 
-- [ ] **Step 4: 验证 GREEN 与 Web 回归**
+- [x] **Step 4: 验证 GREEN 与 Web 回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web/test_tavily.py tests/providers/web/test_exa.py tests/providers/web/test_firecrawl.py tests/providers/web/test_baiduqianfan.py tests/providers/web/test_scrapegraphai.py -v
@@ -894,7 +894,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web -q
 
 预期：22 个 Search adapter 的既有契约不退化，两项主动正文请求已关闭。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 审计记录注明不需改的 provider，保留真实 response fixture 结构。不把“没有主动正文请求”写成“没有供应商费用”。重跑 Web 回归。
 
@@ -909,13 +909,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web -q
 - Test support: `tests/support/fakes.py`
 - Regression: `tests/orchestrators/test_paper_search_pipeline.py`、`tests/orchestrators/test_llm_search.py`、`tests/orchestrators/test_agent_search.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_keyword_search_caches_natural_body_without_body_stages` 参数化 raw-only/content-only/raw+content；四个 LLM stage 均为 0，cheap_check 也不预跑。`test_keyword_admission_uses_declared_provider_order` 控制 provider 完成逆序，gather 后仍按原 provider/hit 顺序选择第一份候选。metadata-only/空白正文进入 NEED_FETCH，JSONL 仍只有 url/abstract。
 
 覆盖 redirect、无效结构/URL/摘要、重复 URL、部分 provider 失败/合法空结果成功、全失败错误、writer 失败保留已提交 admission、READY/UNAVAILABLE 不被覆盖。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_search_state.py -k "without_body_stages or declared_provider_order" -v
@@ -923,7 +923,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 
 预期：旧 Search 调用了 Judge，或旧分字段写入改变了正文对。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 保留 provider fan-out 和 gather 的输入顺序
@@ -937,7 +937,7 @@ _stage_keyword_hit 只做结构、URL/redirect、摘要校验，保留自然候�
 
 不持全局锁或多个 URL 锁。LLM/Agent 本身的搜索调用、学术聚合及 OA enrichment 不是正文 stage，继续原流程；其 metadata-only admission 不改为不必要的异步锁路径。
 
-- [ ] **Step 4: 验证 GREEN 与搜索回归**
+- [x] **Step 4: 验证 GREEN 与搜索回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_search_pipeline.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_keyword_provider_filtering.py -v
@@ -946,7 +946,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_paper_s
 
 预期：Search 完全没有正文 stage，所有合法结果/JSONL/过滤和 OA best effort 通过。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 旧“Search Judge 失败/部分失败”的测试改为实际新行为断言；取消测试改在 provider/正文 admission 锁/writer 等仍存在的边界，不保留假 Judge 等待。重跑上列命令。
 
@@ -960,7 +960,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_paper_s
 - Test: `tests/orchestrators/test_url_fetch_admission.py`
 - Read: `src/agent_search_gateway/llm/stages.py`（cheap_check、judge、content_clean、safety、focus_summary）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 按状态逐项增加 `test_fetch_resumes_from_url_status`；每个例子断言精确调用顺序/次数与正文对。
 
@@ -978,7 +978,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_paper_s
 
 重点独立测试 `test_cached_rejection_then_fetch_execution_failure_is_recoverable` 和 `test_ready_focus_failure_does_not_fallback_to_full_content`。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_admission.py -k "url_status or cached_rejection or ready_focus" -v
@@ -986,7 +986,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fet
 
 预期：旧实现按字段跳过 Judge、每次重做 Safety 或无法在中间状态恢复。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 保持 normalize URL/focus 与原 singleflight
@@ -1002,7 +1002,7 @@ READY 才返回全文或在原 per-URL 锁内做请求级 focus_summary
 
 不重复 Judge scheduler accepted 候选。缓存拒绝后无 provider 的错误仍为 NO_URL_FETCH_PROVIDERS；纯执行失败为原执行错误。空 Clean 输出沿 LLMStages 既有校验失败，不强行写 READY。
 
-- [ ] **Step 4: 验证 GREEN 与 Fetch 回归**
+- [x] **Step 4: 验证 GREEN 与 Fetch 回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_admission.py tests/scheduler/test_fetch_outcomes.py tests/unit/test_llm_stages.py tests/unit/test_llm_judge_stage.py -v
@@ -1010,7 +1010,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fet
 
 预期：六状态、原输入错误、FetchOutcome 与 LLM stage 错误边界通过。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 删除私有重复 URL 锁与按 raw/content 猜状态的旧分支；不增加刷新、TTL、Focus 缓存或无 admission 抓取。重跑上列命令。
 
@@ -1026,13 +1026,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fet
 - Modify only if a failing test requires: `src/agent_search_gateway/url_store.py`、`orchestrators/fetch.py`、`orchestrators/search.py`
 - Read: `src/agent_search_gateway/concurrency.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_search_body_waits_then_rereads_committed_fetch_state` 在 Judge/Clean/Safety 各 await 阻塞期间让 Search 返回同 URL 的另一份正文，释放后既不倒退 READY，也不混拼。再测缓存拒绝后换正文的交错，以及两个 Search 同时 admission。不同 URL 可并发。
 
 `test_stage_failure_preserves_last_committed_status` 在各 stage 的提交前/后注入 execution failure 或取消；下一次仅做未完成 stage。包括 Safety 失败留 NEED_SAFETY、Focus 失败留 READY。保留 follower/leader 不同取消语义、同 URL 不同 focus 串行、不同 URL 同时 focus、同 focus 后续独立请求重新 summary。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py -k "waits_then_rereads or last_committed_status" -v
@@ -1040,7 +1040,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 
 预期：若仍用等待前 snapshot、不同锁或非原子提交，会出现旧正文覆盖/阶段重跑；原本正确的 singleflight 用例直接作为绿色回归。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 所有正文 admission 与 Fetch 状态推进共用 URLStore.serialization
@@ -1051,7 +1051,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 
 按 Testing §6.2 保留 leader cancel→共享结果取消，follower cancel→不影响 leader；不以此任务重构 singleflight 所有权。
 
-- [ ] **Step 4: 验证 GREEN 与并发回归**
+- [x] **Step 4: 验证 GREEN 与并发回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/runtime/test_singleflight.py -v
@@ -1059,7 +1059,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tes
 
 预期：所有交错都由 Event/Barrier 确定，不依赖真实 sleep；取消后无残留 waiter，后续请求可正常完成。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 只为实际发现的共享锁或状态 bug 修生产代码；不把回归任务扩为新并发架构。复用受控 fakes，重跑上列命令。
 
@@ -1344,7 +1344,7 @@ uv run python scripts/build_docs.py
 | exa | highlights→summary→title 为摘要；text 映射 raw+content | 删除 Search contents.text，保留 highlights/自然 text；Fetch /contents 不动。`tests/providers/web/test_exa.py`。 |
 | baiduqianfan | 普通搜索摘要；Agentic 网页 content 为 raw；媒体不是网页正文 | 保留双分支、partial success、网页正文与媒体摘要。`tests/providers/web/test_baiduqianfan.py`。 |
 | scrapegraphai | query-only；原生 content 为 raw+content，摘要可回退 title | 保留自然正文。`tests/providers/web/test_scrapegraphai.py`。 |
-| firecrawl | description/highlights；既有 metadata-only | 继续无 scrapeOptions/隐式 Scrape。`tests/providers/web/test_firecrawl.py`。 |
+| firecrawl | description；既有 metadata-only（请求保留 highlights 选项） | 继续无 scrapeOptions/隐式 Scrape。`tests/providers/web/test_firecrawl.py`。 |
 | brave | description | 请求/映射保持。`tests/providers/web/test_brave.py`。 |
 | brightdata | 搜索引擎结果 description；format=raw 不是目标网页全文开关 | 保留请求语义；zone 只由 credential effective config 绑定。`tests/providers/web/test_brightdata.py`。 |
 | open_websearch | description | 保留 engines 与 metadata。`tests/providers/web/test_open_websearch.py`。 |
@@ -1411,7 +1411,12 @@ uv run python scripts/build_docs.py
 | 11 | 完成 | HTTP 装配目标 16 通过、76 deselected；资源及相关启动/Academic/optional 26 通过（含资源 15）；扩大回归 291 通过、7 个明确 Task 12/13 依赖 deselected。19 文件 Ruff lint/format 通过；三个生产模块 mypy 仅余 Task 12 的 quota=None 参数类型问题。 |
 | 12 | 完成 | Agent 111 通过；Task 11 两项移交用例 2 通过；quota/pool 51 通过；5 文件 Ruff lint/format 和 3 生产模块 mypy 通过，消除 Task 11 的类型依赖。 |
 | 13 | 完成 | 首个完整集成检查点 4,008 通过、0 失败；Scheduler 37 通过；迁移的 URL Fetch 编排器及 gateway workflow 71 通过；22 文件 Ruff lint/format、6 生产模块 mypy 通过。 |
-| 14–23 | 待实施 | URL 状态机、Search 延迟处理、诊断、文档和全量验收尚未完成。 |
+| 14 | 完成 | URLStore/URL normalization/singleflight 92 通过；3 文件 Ruff lint 和 scoped mypy 通过；恰好五字段、正文同源与受控转换。 |
+| 15 | 完成 | 6 个出站 JSON 行为 RED→GREEN；定向 Web 228、全 Web 1,487 通过；4 文件 Ruff lint/format 与 mypy 通过。 |
+| 16 | 完成 | 关键词 Search 51、Paper/LLM/Agent/academic 65 通过；4 文件 Ruff lint/format 与 mypy 通过；Search 零正文 stage。 |
+| 17 | 完成 | Fetch/admission/scheduler/LLM 48、原 singleflight 2 通过；4 文件 Ruff lint/format 与 mypy 通过；六状态恢复与 READY 复用。 |
+| 18 | 完成 | 状态/交错/singleflight 五文件集合 140 通过；4 个改动测试文件 Ruff lint/format 与 mypy 通过；新用例直接 GREEN，未改生产代码。 |
+| 19–23 | 待实施 | Doctor、凭证/状态安全日志、真实 Runtime 端到端验收、文档及最终全量检查尚未完成。 |
 
 配置检查点实际命令：
 
@@ -1421,7 +1426,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前为 Task 1–13 的第一个完整集成检查点，覆盖 Scheduler、Runtime、providers、daemon 和四类配置，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URL 状态机和 Doctor 尚待后续任务。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前已完成 Tasks 1–18：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复组件通过。第二个真实 Runtime 集成门槛、Doctor、日志与全部仓库检查仍在 Tasks 19–23，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
@@ -1459,6 +1464,27 @@ Task 13 集成检查点实际命令，4,008 passed in 16.33s：
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler tests/runtime tests/providers tests/daemon tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py -q --tb=short
+~~~
+
+Tasks 14–18 的正文处理实现记录：
+
+- URLRecord 使用五个 frozen/slots 字段，URLStatus 六个小写字符串；Store 统一锁和原子转换，NEED_JUDGE 接受时核对缓存整对正文。已复现并消除跨来源 raw/content 拼接。
+- Web 审计覆盖 22 个 Search adapter，仅删去 Tavily include_raw_content 与 Exa contents.text 两行主动全文请求；原生正文、Fetch 参数及 Exa 只检查 highlights[0] 的既有摘要回退保持。Firecrawl 矩阵修正为仅 description 响应映射，未添加映射。
+- Keyword Search 在 gather 完成后按声明 provider/hit 顺序收录，零 cheap_check/Judge/Clean/Safety/Focus。正文为 NEED_JUDGE，空白/metadata 为 NEED_FETCH。
+- Fetch 先持 Store 锁再重读准入；已复现并修复旧的提前 URL_NOT_ADMITTED。按状态恢复缺失阶段，缓存拒绝后清空整对并继续实际抓取，执行失败不错误 terminal，READY 可复用 Safety。另已复现非字符串 Clean 输出错误进入 Safety，并在提交前校验。
+- Task 18 用 Event 固定真实 Search/Fetch 交错、缓存拒绝换正文、双 Search、阶段中及提交后取消。新用例首次直接 GREEN，无故意回退制造失败、无新增生产架构；leader/follower 取消区别及后续恢复保持。
+
+正文处理检查点实际命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/unit/test_url_normalization.py tests/runtime/test_singleflight.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web/test_tavily.py tests/providers/web/test_exa.py tests/providers/web/test_firecrawl.py tests/providers/web/test_baiduqianfan.py tests/providers/web/test_scrapegraphai.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/web -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_search_pipeline.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_keyword_provider_filtering.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_paper_search_pipeline.py tests/orchestrators/test_llm_search.py tests/orchestrators/test_agent_search.py tests/academic -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_admission.py tests/scheduler/test_fetch_outcomes.py tests/unit/test_llm_stages.py tests/unit/test_llm_judge_stage.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fetch_singleflight.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/runtime/test_singleflight.py -q
 ~~~
 
 ## 计划编写与自检记录

@@ -8,7 +8,7 @@ from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.models import LLMInvocation, URLStatus
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import KeywordSearchHit, KeywordSearchProvider
@@ -138,7 +138,7 @@ async def test_keyword_next_request_without_filter_runs_all_providers(tmp_path: 
     assert orchestrator._keyword_providers is original
 
 
-async def test_keyword_filter_does_not_disable_other_alias_judge(tmp_path: Path) -> None:
+async def test_keyword_filter_defers_selected_provider_body_to_fetch(tmp_path: Path) -> None:
     providers = _providers()
     body = "Useful page content with substantive information. " * 100
     providers[1].result = [
@@ -147,10 +147,10 @@ async def test_keyword_filter_does_not_disable_other_alias_judge(tmp_path: Path)
     orchestrator, store, client, _ = _build(tmp_path, providers)
     await orchestrator.keyword_search("query", request_id="11111111", provider="exa")
     assert [p.calls for p in providers] == [[], ["query"], []]
-    assert len(client.json_calls) == 1
-    assert client.json_calls[0][0].provider == "judge_only"
+    assert client.json_calls == client.text_calls == []
     record = store.get(normalize_url("https://example.com/exa"))
-    assert record is not None and record.raw_content == body
+    assert record is not None and record.status is URLStatus.NEED_JUDGE
+    assert record.raw_content == body
 
 
 async def test_baiduqianfan_selection_calls_only_one_logical_provider(tmp_path: Path) -> None:

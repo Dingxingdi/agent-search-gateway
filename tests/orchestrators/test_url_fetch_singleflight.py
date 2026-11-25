@@ -2,6 +2,8 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 
+import pytest
+
 from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -15,6 +17,18 @@ from tests.support.fakes import pooled_web
 from tests.support.logging import structured_test_logger
 
 _WAIT_TIMEOUT_SECONDS = 5.0
+
+
+def _event_signal(logger: logging.Logger, name: str) -> asyncio.Event:
+    signal = asyncio.Event()
+
+    def observe(record: logging.LogRecord) -> bool:
+        if getattr(record, "gateway_event", None) == name:
+            signal.set()
+        return True
+
+    logger.handlers[0].addFilter(observe)
+    return signal
 
 
 class _ControlledFetch:
@@ -127,12 +141,14 @@ async def test_url_fetch_singleflight_shares_exact_request_and_serializes_differ
     store.admit(url, "known")
     client = _SingleflightClient()
     provider = _ControlledFetch()
-    orchestrator = _build(store, client, provider)
+    logger, _ = structured_test_logger("tests.fetch.singleflight-overlap")
+    joined = _event_signal(logger, "singleflight_joined")
+    orchestrator = _build(store, client, provider, logger=logger)
 
     first = asyncio.create_task(orchestrator.url_fetch(str(url)))
     await provider.entered.wait()
     second = asyncio.create_task(orchestrator.url_fetch(str(url)))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(joined.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
     provider.release.set()
     assert tuple(await asyncio.gather(first, second)) == (f"content:{url}", f"content:{url}")
     assert provider.calls == [url]
@@ -141,8 +157,9 @@ async def test_url_fetch_singleflight_shares_exact_request_and_serializes_differ
     client.release_event("pricing")
     same_focus_first = asyncio.create_task(orchestrator.url_fetch(str(url), "pricing"))
     await _await_focus(client, "pricing")
+    joined.clear()
     same_focus_second = asyncio.create_task(orchestrator.url_fetch(str(url), " pricing "))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(joined.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
     client.release_event("pricing").set()
     assert tuple(await asyncio.gather(same_focus_first, same_focus_second)) == (
         "summary:pricing",
@@ -154,8 +171,9 @@ async def test_url_fetch_singleflight_shares_exact_request_and_serializes_differ
     alpha = asyncio.create_task(orchestrator.url_fetch(str(url), "alpha"))
     await _await_focus(client, "alpha")
     client.release_event("beta")
+    next_leader = _event_signal(logger, "singleflight_leader")
     beta = asyncio.create_task(orchestrator.url_fetch(str(url), "beta"))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(next_leader.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
     assert "beta" not in client.focus_entered
     client.release_event("alpha").set()
     await _await_focus(client, "beta")
@@ -164,7 +182,7 @@ async def test_url_fetch_singleflight_shares_exact_request_and_serializes_differ
     assert client.max_active == 1
 
     other = normalize_url("https://example.com/other")
-    store.admit(other, "known", content="content-other")
+    await store.admit_candidate(other, "known", content="content-other")
     client.release_event("one")
     one = asyncio.create_task(orchestrator.url_fetch(str(url), "one"))
     await _await_focus(client, "one")
@@ -175,6 +193,43 @@ async def test_url_fetch_singleflight_shares_exact_request_and_serializes_differ
     client.release_event("one").set()
     client.release_event("two").set()
     assert tuple(await asyncio.gather(one, two)) == ("summary:one", "summary:two")
+
+
+async def test_cancelled_focus_leader_releases_url_for_waiting_focus_and_retry() -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/cancel-focus")
+    await store.admit_candidate(url, "known", content="verified by first fetch")
+    logger, _ = structured_test_logger("tests.fetch.singleflight-cancel")
+    joined = _event_signal(logger, "singleflight_joined")
+    client = _SingleflightClient()
+    provider = _ControlledFetch()
+    fetch = _build(store, client, provider, logger=logger)
+
+    async with asyncio.timeout(_WAIT_TIMEOUT_SECONDS), asyncio.TaskGroup() as tasks:
+        leader = tasks.create_task(fetch.url_fetch(str(url), "alpha"))
+        await _await_focus(client, "alpha")
+        follower = tasks.create_task(fetch.url_fetch(str(url), " alpha "))
+        await joined.wait()
+        next_leader = _event_signal(logger, "singleflight_leader")
+        independent = tasks.create_task(fetch.url_fetch(str(url), "beta"))
+        await next_leader.wait()
+        assert client.focus_calls == ["alpha"]
+
+        leader.cancel()
+        for caller in (leader, follower):
+            with pytest.raises(asyncio.CancelledError):
+                await caller
+        await _await_focus(client, "beta")
+        client.release_event("beta").set()
+        assert await independent == "summary:beta"
+
+        client.release_event("alpha").set()
+        assert await fetch.url_fetch(str(url), "alpha") == "summary:alpha"
+
+    assert client.focus_calls == ["alpha", "beta", "alpha"]
+    assert client.safety_calls == 1
+    assert client.max_active == 1 and client.active == 0
+    assert provider.calls == []
 
 
 async def test_url_fetch_singleflight_preserves_leader_provider_correlation() -> None:
@@ -192,8 +247,9 @@ async def test_url_fetch_singleflight_preserves_leader_provider_correlation() ->
 
     leader = asyncio.create_task(invoke("11111111"))
     await provider.entered.wait()
+    joined = _event_signal(logger, "singleflight_joined")
     follower = asyncio.create_task(invoke("22222222"))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(joined.wait(), timeout=_WAIT_TIMEOUT_SECONDS)
     provider.release.set()
 
     expected = f"content:{url}"

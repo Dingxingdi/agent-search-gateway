@@ -1,15 +1,17 @@
 from pathlib import Path
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pytest
 
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.models import LLMInvocation, URLStatus
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import KeywordSearchHit
 from agent_search_gateway.providers.http import ProviderResponseFailure
 from agent_search_gateway.result_writer import ResultWriter
+from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
 from tests.support.fakes import FakeKeywordSearchProvider, FakeLLMClient
 
@@ -212,7 +214,7 @@ async def test_keyword_search_uses_pipeline_completion_rules(
 
     empty_provider = FakeKeywordSearchProvider("empty", [])
     empty_path = Path(
-        await _orchestrator(tmp_path, [empty_provider]).keyword_search(
+        await _orchestrator(tmp_path, [failed, empty_provider]).keyword_search(
             "query", request_id="00000004"
         )
     )
@@ -249,7 +251,7 @@ async def test_keyword_search_uses_pipeline_completion_rules(
     assert selected_error.value.message == "All keyword search provider pipelines failed"
     assert set((tmp_path / "results").glob("keyword-*.jsonl")) == before
     assert success.calls == ["query"]
-    assert failed.calls == ["query", "query"]
+    assert failed.calls == ["query", "query", "query"]
 
 
 @pytest.mark.parametrize(
@@ -343,3 +345,35 @@ async def test_keyword_staging_reports_empty_and_all_rejected_lists(
     assert len(summaries) == 1
     assert summaries[0]["received"] == summaries[0]["rejected"] == int(not empty_list)
     assert summaries[0]["accepted"] == summaries[0]["unprocessed"] == 0
+
+
+async def test_keyword_non_list_provider_response_fails_its_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = FakeKeywordSearchProvider("invalid")
+    monkeypatch.setattr(provider, "search", AsyncMock(return_value=()))
+    with pytest.raises(ExecutionFailure) as error:
+        await _orchestrator(tmp_path, [provider]).keyword_search("query", request_id="00000014")
+    assert error.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert not list((tmp_path / "results").glob("*.jsonl"))
+
+
+async def test_keyword_writer_failure_preserves_candidate_admission(tmp_path: Path) -> None:
+    url = normalize_url("https://example.org/already-admitted")
+    provider = FakeKeywordSearchProvider(
+        "web", [KeywordSearchHit(url, title="Title", raw_content="natural body")]
+    )
+    store = URLStore()
+    target = tmp_path / "results" / "keyword-00000015.jsonl"
+    target.parent.mkdir()
+    target.write_text("existing result")
+
+    with pytest.raises(FileExistsError):
+        await _orchestrator(tmp_path, [provider], store).keyword_search(
+            "query", request_id="00000015"
+        )
+
+    record = store.get(url)
+    assert record is not None and record.status is URLStatus.NEED_JUDGE
+    assert (record.abstract, record.raw_content, record.content) == ("Title", "natural body", "")
+    assert target.read_text() == "existing result"

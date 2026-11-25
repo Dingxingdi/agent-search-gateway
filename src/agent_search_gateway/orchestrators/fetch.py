@@ -4,10 +4,10 @@ import logging
 import time
 from collections.abc import Callable
 
-from ..concurrency import PerKeyLockPool, SingleflightGroup
+from ..concurrency import SingleflightGroup
 from ..errors import UNAVAILABLE_MESSAGE, ErrorCode, ExecutionFailure, InputFailure
-from ..llm.stages import LLMStages
-from ..models import URLRecord
+from ..llm.stages import LLMStages, cheap_check
+from ..models import URLRecord, URLStatus
 from ..observability import elapsed_ms, log_event, target_url_for_log
 from ..scheduler.fetch import FetchScheduler
 from ..url_normalization import NormalizedURL, normalize_url
@@ -29,7 +29,6 @@ class FetchOrchestrator:
         self._stages = stages
         self._logger = logger or logging.getLogger(__name__)
         self._monotonic = monotonic
-        self._url_locks: PerKeyLockPool[NormalizedURL] = PerKeyLockPool()
         self._request_singleflight: SingleflightGroup[tuple[NormalizedURL, str | None], str] = (
             SingleflightGroup()
         )
@@ -67,7 +66,7 @@ class FetchOrchestrator:
         normalized_focus: str | None,
     ) -> str:
         lock_started = self._monotonic()
-        async with self._url_locks.acquire(normalized_url):
+        async with self._store.serialization(normalized_url):
             log_event(
                 self._logger,
                 logging.DEBUG,
@@ -79,103 +78,117 @@ class FetchOrchestrator:
             if snapshot is None:
                 self._log_state(normalized_url, "url_not_admitted")
                 raise InputFailure(ErrorCode.URL_NOT_ADMITTED, "URL was not admitted by search")
-            if not snapshot.available:
+            final = await self._prepare_content(snapshot)
+            if final.status is URLStatus.UNAVAILABLE:
                 self._log_state(normalized_url, "stored_unavailable")
                 return UNAVAILABLE_MESSAGE
-
-            prepared = await self._prepare_content(normalized_url)
-            if not prepared:
-                return UNAVAILABLE_MESSAGE
-
-            refreshed = self._require_snapshot(normalized_url)
-            if not await self._safety_check(normalized_url, refreshed.content):
-                return UNAVAILABLE_MESSAGE
             if normalized_focus is None:
-                self._log_final(normalized_url, refreshed.content, "content")
-                return refreshed.content
-            summary = await self._focus_summary(refreshed.content, normalized_focus)
+                self._log_final(normalized_url, final.content, "content")
+                return final.content
+            summary = await self._focus_summary(final.content, normalized_focus)
             self._log_final(normalized_url, summary, "focus_summary")
             return summary
 
-    async def _prepare_content(self, url: NormalizedURL) -> bool:
-        snapshot = self._require_snapshot(url)
-        if snapshot.content:
-            self._log_state(url, "cached_content")
-            return True
+    async def _prepare_content(self, snapshot: URLRecord) -> URLRecord:
+        url = snapshot.url
+        while True:
+            match snapshot.status:
+                case URLStatus.NEED_JUDGE:
+                    snapshot = await self._judge_cached_candidate(snapshot)
+                case URLStatus.NEED_FETCH:
+                    snapshot = await self._fetch_candidate(url)
+                case URLStatus.NEED_CLEAN:
+                    cleaned = await self._content_clean(snapshot.raw_content)
+                    snapshot = self._store.set_clean_content(url, cleaned)
+                    log_event(
+                        self._logger,
+                        logging.DEBUG,
+                        "body_accepted",
+                        url=target_url_for_log(str(url)),
+                        reason="content_cleaned",
+                        content_chars=len(cleaned),
+                    )
+                case URLStatus.NEED_SAFETY:
+                    snapshot = await self._check_safety(snapshot)
+                case URLStatus.READY | URLStatus.UNAVAILABLE:
+                    return snapshot
 
-        if not snapshot.raw_content:
-            self._log_state(url, "provider_fetch_required")
-            if not self._scheduler.provider_names:
-                raise ExecutionFailure(
-                    ErrorCode.NO_URL_FETCH_PROVIDERS,
-                    "No URL fetch providers are enabled",
-                )
-            outcome = await self._scheduler.fetch_until_accepted(url)
-            if outcome.kind == "execution_failure":
-                raise ExecutionFailure(
-                    ErrorCode.ALL_PROVIDERS_FAILED,
-                    "All URL fetch provider pipelines failed",
-                )
-            if outcome.kind == "semantic_failure":
-                self._store.mark_unavailable(url)
-                self._log_rejected(url, "fetch_semantic_failure")
-                return False
-            candidate = outcome.candidate
-            if candidate is None:
-                raise RuntimeError("accepted fetch outcome did not contain a candidate")
-            self._store.merge_body(
-                url,
-                raw_content=candidate.raw_content,
-                content=candidate.content,
-            )
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "body_accepted",
-                url=target_url_for_log(str(url)),
-                reason="provider_fetch",
-                raw_chars=len(candidate.raw_content),
-                content_chars=len(candidate.content),
-            )
-            snapshot = self._require_snapshot(url)
+    async def _judge_cached_candidate(self, snapshot: URLRecord) -> URLRecord:
+        candidate = snapshot.content or snapshot.raw_content
+        if not cheap_check(candidate):
+            reason = "cheap_check"
+        elif not (await self._stages.judge(candidate)).ok:
+            reason = "judge_rejected"
         else:
-            self._log_state(url, "raw_content_available")
-
-        if not snapshot.content:
-            cleaned = await self._content_clean(snapshot.raw_content)
-            self._store.merge_body(url, content=cleaned)
-            log_event(
-                self._logger,
-                logging.DEBUG,
-                "body_accepted",
-                url=target_url_for_log(str(url)),
-                reason="content_cleaned",
-                content_chars=len(cleaned),
+            return self._store.accept_candidate(
+                snapshot.url, raw_content=snapshot.raw_content, content=snapshot.content
             )
-        return True
+        rejected = self._store.reject_candidate(snapshot.url)
+        self._log_rejected(snapshot.url, reason)
+        return rejected
+
+    async def _fetch_candidate(self, url: NormalizedURL) -> URLRecord:
+        self._log_state(url, "provider_fetch_required")
+        if not self._scheduler.provider_names:
+            raise ExecutionFailure(
+                ErrorCode.NO_URL_FETCH_PROVIDERS,
+                "No URL fetch providers are enabled",
+            )
+        outcome = await self._scheduler.fetch_until_accepted(url)
+        if outcome.kind == "execution_failure":
+            cause = outcome.failures[-1] if outcome.failures else None
+            raise ExecutionFailure(
+                ErrorCode.ALL_PROVIDERS_FAILED,
+                "All URL fetch provider pipelines failed",
+            ) from cause
+        if outcome.kind == "semantic_failure":
+            rejected = self._store.mark_unavailable(url)
+            self._log_rejected(url, "fetch_semantic_failure")
+            return rejected
+        candidate = outcome.candidate
+        if candidate is None:
+            raise RuntimeError("accepted fetch outcome did not contain a candidate")
+        accepted = self._store.accept_candidate(
+            url, raw_content=candidate.raw_content, content=candidate.content
+        )
+        log_event(
+            self._logger,
+            logging.DEBUG,
+            "body_accepted",
+            url=target_url_for_log(str(url)),
+            reason="provider_fetch",
+            raw_chars=len(candidate.raw_content),
+            content_chars=len(candidate.content),
+        )
+        return accepted
 
     async def _content_clean(self, raw_content: str) -> str:
         try:
-            return await self._stages.content_clean(raw_content)
-        except ExecutionFailure as exc:
+            cleaned = await self._stages.content_clean(raw_content)
+        except Exception as exc:
             raise ExecutionFailure(
                 ErrorCode.LLM_STAGE_FAILED,
                 "Content-clean LLM stage failed",
             ) from exc
+        if not isinstance(cleaned, str) or not cleaned.strip():
+            raise ExecutionFailure(
+                ErrorCode.LLM_STAGE_FAILED, "Content-clean returned invalid text"
+            )
+        return cleaned
 
-    async def _safety_check(self, url: NormalizedURL, content: str) -> bool:
+    async def _check_safety(self, snapshot: URLRecord) -> URLRecord:
         try:
-            decision = await self._stages.safety(content)
+            decision = await self._stages.safety(snapshot.content)
         except ExecutionFailure as exc:
             raise ExecutionFailure(
                 ErrorCode.LLM_STAGE_FAILED,
                 "Safety LLM stage failed",
             ) from exc
         if decision.ok:
-            return True
-        self._store.mark_unavailable(url)
-        self._log_rejected(url, "safety_rejected")
-        return False
+            return self._store.mark_ready(snapshot.url)
+        rejected = self._store.mark_unavailable(snapshot.url)
+        self._log_rejected(snapshot.url, "safety_rejected")
+        return rejected
 
     async def _focus_summary(self, content: str, focus: str) -> str:
         try:
@@ -213,9 +226,3 @@ class FetchOrchestrator:
             reason=reason,
             output_chars=len(text),
         )
-
-    def _require_snapshot(self, url: NormalizedURL) -> URLRecord:
-        snapshot = self._store.get(url)
-        if snapshot is None:
-            raise RuntimeError("admitted URL disappeared from store")
-        return snapshot
