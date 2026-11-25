@@ -905,6 +905,47 @@ async def test_recording_requesters_accept_options_with_predecoded_results(kind:
     )
 
 
+async def test_parallel_http_branches_take_separate_permits_without_spending_owner_budget() -> None:
+    from agent_search_gateway.rate_limit import SelectionBudget
+    from tests.support.controlled import ManualClock
+
+    clock = ManualClock()
+    gate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=1), monotonic=clock.monotonic, sleep=clock.sleep
+    )
+    sends: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        return httpx.Response(200, stream=RecordingStream(b"1"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 2), provider_name="example", rate_gate=gate
+        )
+
+        async def branch() -> object:
+            return await executor.request_json(
+                "GET", "https://example.test", stage="search", max_response_bytes=1
+            )
+
+        with initial_rate_budget(gate, SelectionBudget(0)):
+            async with asyncio.timeout(2), asyncio.TaskGroup() as group:
+                first = group.create_task(branch())
+                second = group.create_task(branch())
+                while not clock.sleepers:
+                    await asyncio.sleep(0)
+                assert sends == [0]
+                await clock.advance_to(1)
+            assert (first.result(), second.result()) == (1, 1)
+            async with asyncio.timeout(2):
+                with pytest.raises(ExecutionFailure) as caught:
+                    await branch()
+    assert caught.value.reason == "rate_limit_wait_timeout"
+    assert sends == [0, 1]
+    assert gate.next_available_in_seconds() == 1
+
+
 async def test_bounded_attempt_deadline_starts_after_rate_permit() -> None:
     gate = RateGate(ResolvedRatePolicy(windows=(ResolvedRateWindow(1, 0.06),)))
     await gate.permit(timeout_seconds=1)

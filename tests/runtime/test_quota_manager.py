@@ -7,6 +7,15 @@ from agent_search_gateway.request_ids import bind_request_id
 from tests.support.logging import structured_test_logger
 
 
+def test_omitted_capacity_creates_no_waiting_gate() -> None:
+    quotas = ProviderQuotaManager(
+        web_limits={}, llm_limits={}, agent_limits={"unlimited": None, "limited": 2}
+    )
+    assert quotas.get_agent("unlimited") is None
+    limited = quotas.get_agent("limited")
+    assert limited is not None and limited.limit == 2
+
+
 async def test_rate_namespaces_isolate_same_named_providers_and_capacity() -> None:
     quotas = ProviderQuotaManager(
         web_limits={"shared": 1}, llm_limits={"shared": 1}, agent_limits={"shared": 1}

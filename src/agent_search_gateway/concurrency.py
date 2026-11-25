@@ -124,6 +124,21 @@ class CapacityGate:
         )
 
 
+def make_capacity_gate(
+    limit: int | None,
+    *,
+    provider: str | None = None,
+    quota_kind: str | None = None,
+    logger: logging.Logger | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> CapacityGate | None:
+    if limit is None:
+        return None
+    return CapacityGate(
+        limit, provider=provider, quota_kind=quota_kind, logger=logger, monotonic=monotonic
+    )
+
+
 class ProviderQuotaManager:
     def __init__(
         self,
@@ -131,7 +146,7 @@ class ProviderQuotaManager:
         web_limits: Mapping[str, int],
         llm_limits: Mapping[str, int],
         academic_limits: Mapping[str, int] | None = None,
-        agent_limits: Mapping[str, int] | None = None,
+        agent_limits: Mapping[str, int | None] | None = None,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -169,7 +184,7 @@ class ProviderQuotaManager:
         }
 
         self._agent = {
-            name: CapacityGate(
+            name: make_capacity_gate(
                 limit,
                 provider=name,
                 quota_kind="agent",
@@ -185,7 +200,7 @@ class ProviderQuotaManager:
     def get_rate(self, namespace: RateNamespace, name: str) -> RateGate | None:
         return self._rates.get((namespace, name))
 
-    def get_agent(self, name: str) -> CapacityGate:
+    def get_agent(self, name: str) -> CapacityGate | None:
         return self._agent[name]
 
     def get_web(self, name: str) -> CapacityGate:

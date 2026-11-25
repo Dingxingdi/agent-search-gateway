@@ -905,7 +905,6 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
             search = SearchOrchestrator(
                 keyword_providers=[brightdata, scraperapi],
                 llm_invocations=(),
-                quotas=quotas,
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(tmp_path / "results"),
@@ -1025,7 +1024,6 @@ async def test_zhihu_cli_selection_deduplicates_both_branch_urls(
             runtime.search_orchestrator = SearchOrchestrator(
                 keyword_providers=providers,
                 llm_invocations=(),
-                quotas=ProviderQuotaManager(web_limits={"zhihu": 1, "other": 1}, llm_limits={}),
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(paths.results_dir),
@@ -1123,7 +1121,6 @@ async def test_zhihu_terminal_event_matches_branch_outcomes(
             runtime.search_orchestrator = SearchOrchestrator(
                 keyword_providers=[zhihu],
                 llm_invocations=(),
-                quotas=ProviderQuotaManager(web_limits={"zhihu": 1}, llm_limits={}),
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(paths.results_dir),
@@ -1244,7 +1241,6 @@ async def test_yuanbao_summary_does_not_skip_url_fetch(tmp_path: Path) -> None:
         search = SearchOrchestrator(
             keyword_providers=[yuanbao],
             llm_invocations=(),
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=ResultWriter(tmp_path / "results"),
@@ -1296,7 +1292,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
         focus_summary=invocation,
         agent_runners={"agent": RecordingRunner(markdown)},
     )
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, academic_limits={"openalex": 1})
     writer = ResultWriter(tmp_path / "results")
     if kind == "paper":
         academic = PaperSearchOrchestrator(
@@ -1314,7 +1309,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
                     ],
                 )
             ],
-            quotas=quotas,
             aggregator=PaperAggregator(("openalex",)),
             resolver=None,
             store=store,
@@ -1326,7 +1320,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
             keyword_providers=(),
             llm_invocations=[invocation],
             agent_invocations=[AgentInvocation("agent")],
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=writer,
@@ -1402,7 +1395,6 @@ class _NewWebWorkflow:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=[provider, tavily],
             llm_invocations=(),
-            quotas=self.quotas,
             stages=self.stages,
             store=self.store,
             result_writer=ResultWriter(tmp_path / "results"),
@@ -1686,7 +1678,7 @@ async def test_new_provider_open_websearch_multi_engine_results_use_existing_sta
         assert len(calls) == 1
         assert workflow.provider.name == "open_websearch"
         assert workflow.scheduler.provider_names == ("open_websearch", "tavily")
-        assert workflow.quotas.get_web("open_websearch").max_observed_in_use == 1
+        assert workflow.quotas.get_web("open_websearch").max_observed_in_use == 0
         assert workflow.quotas.get_web("tavily").max_observed_in_use == 0
         fields = [getattr(record, "gateway_fields", {}) for record in caplog.records]
         assert any(item.get("reason") == "duplicate" for item in fields)

@@ -278,7 +278,6 @@ async def test_live_llm_large_input() -> None:
                 api_url=base.rstrip("/").removesuffix("/v1"),
                 secret=key,
                 executor=executor,
-                quota=CapacityGate(1),
                 retry_policy=_POLICY,
             )
             result = await llm.complete_json(

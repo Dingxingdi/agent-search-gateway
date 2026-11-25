@@ -3,7 +3,6 @@ import os
 import httpx
 import pytest
 
-from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
@@ -62,7 +61,6 @@ async def test_live_openai_chat_response_shape() -> None:
         api_url="https://api.openai.com",
         secret=SecretValue(private_value),
         executor=executor,
-        quota=CapacityGate(1),
         retry_policy=_POLICY,
     )
     try:

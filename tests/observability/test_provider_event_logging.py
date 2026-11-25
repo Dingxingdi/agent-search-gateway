@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
+from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
 from agent_search_gateway.daemon import ForegroundDaemon
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
@@ -26,6 +27,7 @@ from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.protocol import send_request
 from agent_search_gateway.providers.contracts import ChatMessage, KeywordSearchHit, PaperSearchHit
 from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.pooled import PooledAcademicProvider, PooledWebProvider
 from agent_search_gateway.providers.web.tavily import TavilyAdapter
 from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.url_store import URLStore
@@ -75,11 +77,6 @@ async def test_paper_workflow_logs_lifecycle_rejection_and_enrichment_without_pa
     try:
         orchestrator = PaperSearchOrchestrator(
             providers=(good, failed),
-            quotas=ProviderQuotaManager(
-                web_limits={},
-                llm_limits={},
-                academic_limits={"openalex": 1, "core": 1},
-            ),
             aggregator=PaperAggregator(("openalex", "core")),
             resolver=resolver,
             store=URLStore(),
@@ -210,7 +207,6 @@ async def test_provider_terminal_event_preserves_upstream_code_after_retries(
         runtime.search_orchestrator = SearchOrchestrator(
             keyword_providers=providers,
             llm_invocations=(),
-            quotas=ProviderQuotaManager(web_limits={"a": 1, "b": 1, "c": 1}, llm_limits={}),
             stages=LLMStages(
                 {"judge": FakeLLMClient("judge")},
                 judge=invocation,
@@ -319,11 +315,6 @@ async def test_paper_terminal_preserves_safe_diagnostics_and_restricts_reason(
     try:
         orchestrator = PaperSearchOrchestrator(
             providers=[provider],
-            quotas=ProviderQuotaManager(
-                web_limits={},
-                llm_limits={},
-                academic_limits={"academic": 1},
-            ),
             aggregator=PaperAggregator(("academic",)),
             resolver=None,
             store=URLStore(),
@@ -390,7 +381,6 @@ async def test_repeated_text_invocations_own_each_scope_terminal(
         keyword_providers=(),
         llm_invocations=(invocation, invocation),
         agent_invocations=(AgentInvocation("same", "model"), AgentInvocation("same", "model")),
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={"same": 2}),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "results"),
@@ -468,11 +458,7 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         return ""
 
     invocation = LLMInvocation("owner", "model")
-    quotas = ProviderQuotaManager(
-        web_limits={"owner": 1},
-        llm_limits={},
-        academic_limits={"owner": 1},
-    )
+    web_gate, academic_gate = CapacityGate(1), CapacityGate(1)
     stages = LLMStages(
         {"owner": Client("owner")},
         judge=invocation,
@@ -482,17 +468,25 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
         agent_runners={"owner": runner},
     )
     search = SearchOrchestrator(
-        keyword_providers=[Keyword("owner")],
+        keyword_providers=[
+            PooledWebProvider(
+                CredentialPool("web", "owner", [CredentialMember(Keyword("owner"), web_gate)])
+            )
+        ],
         llm_invocations=[invocation],
         agent_invocations=[AgentInvocation("owner", "model")],
-        quotas=quotas,
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path),
     )
     paper = PaperSearchOrchestrator(
-        providers=[Academic("owner")],
-        quotas=quotas,
+        providers=[
+            PooledAcademicProvider(
+                CredentialPool(
+                    "academic", "owner", [CredentialMember(Academic("owner"), academic_gate)]
+                )
+            )
+        ],
         aggregator=PaperAggregator(("owner",)),
         resolver=None,
         store=URLStore(),
@@ -525,8 +519,7 @@ async def test_search_cancellation_closes_started_owner_once(tmp_path: Path, pha
                 await task
     finally:
         session.close()
-    assert quotas.get_web("owner").in_use == 0
-    assert quotas.get_academic("owner").in_use == 0
+    assert web_gate.in_use == academic_gate.in_use == 0
     for logged in (stderr.getvalue(), (tmp_path / "cancel.log").read_text()):
         assert logged.count("event=provider_started") == 1
         terminal = [line for line in logged.splitlines() if "event=provider_failed " in line]

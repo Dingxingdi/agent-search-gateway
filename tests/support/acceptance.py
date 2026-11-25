@@ -171,7 +171,6 @@ class AcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=[keyword_provider],
             llm_invocations=[search],
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=result_writer,
@@ -180,7 +179,6 @@ class AcceptanceRuntime:
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=self.academic_providers,
-            quotas=quotas,
             aggregator=paper_aggregator,
             resolver=self.oa_resolver,
             store=store,
@@ -265,14 +263,12 @@ class DebugAcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=[self.keyword_provider],
             llm_invocations=(),
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=result_writer,
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=(),
-            quotas=quotas,
             aggregator=PaperAggregator(()),
             resolver=None,
             store=store,
@@ -364,7 +360,6 @@ class FilteringAcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=self.keyword_providers,
             llm_invocations=self.llm_invocations,
-            quotas=self.quotas,
             stages=stages,
             store=self.store,
             result_writer=result_writer,
@@ -373,7 +368,6 @@ class FilteringAcceptanceRuntime:
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=self.academic_providers,
-            quotas=self.quotas,
             aggregator=aggregator,
             resolver=self.oa_resolver,
             store=self.store,

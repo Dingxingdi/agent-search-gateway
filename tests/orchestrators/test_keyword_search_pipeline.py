@@ -3,7 +3,6 @@ from typing import cast
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -35,10 +34,6 @@ def _orchestrator(
     return SearchOrchestrator(
         keyword_providers=providers,
         llm_invocations=(),
-        quotas=ProviderQuotaManager(
-            web_limits={provider.name: 1 for provider in providers},
-            llm_limits={},
-        ),
         stages=_stages(),
         store=store or URLStore(),
         result_writer=ResultWriter(tmp_path / "results"),
@@ -214,8 +209,6 @@ async def test_keyword_search_uses_pipeline_completion_rules(
     assert path.read_text(encoding="utf-8") == '{"url":"https://example.com/a","abstract":"A"}\n'
     assert failed.calls == ["query"]
     assert success.calls == ["query"]
-    assert orchestrator.quotas.get_web("failed").max_observed_in_use == 1
-    assert orchestrator.quotas.get_web("success").max_observed_in_use == 1
 
     empty_provider = FakeKeywordSearchProvider("empty", [])
     empty_path = Path(

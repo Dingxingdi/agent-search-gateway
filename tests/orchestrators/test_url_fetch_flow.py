@@ -130,7 +130,6 @@ async def test_baiduqianfan_agentic_raw_content_uses_existing_clean_and_safety_p
     search = SearchOrchestrator(
         keyword_providers=[adapter],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(web_limits={"baiduqianfan": 1}, llm_limits={}),
         stages=_flow_stages(client),
         store=store,
         result_writer=ResultWriter(tmp_path / "results"),

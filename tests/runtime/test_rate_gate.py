@@ -5,17 +5,20 @@ from itertools import count
 import httpx
 import pytest
 
+from agent_search_gateway.concurrency import CapacityGate, make_capacity_gate
 from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
+from agent_search_gateway.errors import ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.rate_limit import (
-    InitialRateBudget,
     RateGate,
     RateLimitWaitTimeout,
+    SelectionBudget,
     consume_initial_rate_budget,
     initial_rate_budget,
+    make_rate_gate,
 )
 from tests.support.controlled import ManualClock
 
@@ -23,6 +26,37 @@ from tests.support.controlled import ManualClock
 def window_gate(clock: ManualClock, requests: int, period: float) -> RateGate:
     policy = ResolvedRatePolicy((ResolvedRateWindow(requests, period),))
     return RateGate(policy, monotonic=clock.monotonic, sleep=clock.sleep)
+
+
+@pytest.mark.parametrize("limit", [None, 1])
+@pytest.mark.parametrize(
+    ("policy", "delay"),
+    [
+        (ResolvedRatePolicy(), None),
+        (ResolvedRatePolicy((ResolvedRateWindow(1, 8),)), 8),
+        (ResolvedRatePolicy(min_interval_seconds=2), 2),
+        (ResolvedRatePolicy((ResolvedRateWindow(1, 8),), min_interval_seconds=2), 8),
+    ],
+)
+async def test_capacity_and_rate_gates_are_independently_optional(
+    limit: int | None, policy: ResolvedRatePolicy, delay: float | None
+) -> None:
+    clock = ManualClock()
+    capacity = make_capacity_gate(limit)
+    rate = make_rate_gate(policy, monotonic=clock.monotonic, sleep=clock.sleep)
+    assert (capacity is None) == (limit is None)
+    assert (rate is None) == (delay is None)
+    lease = await capacity.try_lease() if capacity else None
+    if capacity is not None:
+        assert lease is not None and await capacity.try_lease() is None
+    if rate is not None:
+        assert rate.next_available_in_seconds() == 0
+        assert await rate.permit(timeout_seconds=0) == 0
+    if lease is not None:
+        await lease.release()
+        assert capacity.in_use == 0
+    if rate is not None:
+        assert rate.next_available_in_seconds() == delay
 
 
 async def test_rate_gate_waits_for_oldest_request_in_sliding_window() -> None:
@@ -252,11 +286,134 @@ async def test_fractional_window_opens_at_the_representable_expiry() -> None:
     assert await gate.permit(timeout_seconds=0) == 0
 
 
+async def test_selection_budget_is_not_reset_by_notifications() -> None:
+    clock = ManualClock()
+    budget = SelectionBudget(1)
+    independent = SelectionBudget(1)
+    gate = CapacityGate(1)
+
+    async def wait_for_notifications(started: asyncio.Event) -> None:
+        with budget.waiting(clock.monotonic):
+            started.set()
+            await asyncio.gather(gate.wait_until_available(), gate.wait_until_available())
+
+    for wake_at, expected_wait in [(0.25, 0.25), (10.5, 0.5)]:
+        started = asyncio.Event()
+        async with gate.lease():
+            waiter = asyncio.create_task(wait_for_notifications(started))
+            await asyncio.wait_for(started.wait(), 1)
+            await clock.advance_to(wake_at)
+        await asyncio.wait_for(waiter, 1)
+        assert budget.waited_seconds == expected_wait
+        assert budget.remaining_seconds == 1 - expected_wait
+        # Time spent executing between selection waits is outside this budget.
+        await clock.advance_to(wake_at + 10)
+    assert independent.waited_seconds == 0 and independent.remaining_seconds == 1
+
+
+async def test_selection_budget_rejects_late_notification_before_rechecking() -> None:
+    clock = ManualClock()
+    budget = SelectionBudget(0.5)
+    resumed = False
+
+    async def coordinate() -> None:
+        nonlocal resumed
+        with budget.waiting(clock.monotonic):
+            await clock.sleep(budget.remaining_seconds)
+        resumed = True
+
+    waiter = asyncio.create_task(coordinate())
+    await asyncio.sleep(0)
+    await clock.advance_to(1)
+    with pytest.raises(RateLimitWaitTimeout) as caught:
+        await asyncio.wait_for(waiter, 1)
+    assert not resumed
+    assert caught.value.waited_seconds == budget.waited_seconds == 1
+    assert budget.remaining_seconds == 0
+
+
+async def test_first_permit_charges_shared_budget_once() -> None:
+    clock = ManualClock()
+    gate = window_gate(clock, 1, 2)
+    await gate.permit(timeout_seconds=0)
+    budget = SelectionBudget(2)
+    with budget.waiting(clock.monotonic):
+        await clock.advance_to(0.5)
+    sends: list[float] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        clock.now += 0.25
+        if len(sends) == 1:
+            return httpx.Response(503, headers={"Retry-After": "1"})
+        return httpx.Response(200, text="done")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 5), provider_name="test", rate_gate=gate, sleep=clock.sleep
+        )
+
+        async def fetch() -> str:
+            with initial_rate_budget(gate, budget):
+                return await executor.request_text("GET", "https://example.test", stage="fetch")
+
+        async with asyncio.timeout(1), asyncio.TaskGroup() as tasks:
+            request = tasks.create_task(fetch())
+            await clock.advance_to(0.5)
+            await clock.advance_to(1, wake_early=True)
+            await clock.advance_to(2)
+            assert sends == [2]
+            await clock.advance_to(3.25)
+            await clock.advance_to(4)
+        assert request.result() == "done"
+    assert sends == [2, 4]
+    assert budget.waited_seconds == 2
+    assert budget.remaining_seconds == 0
+
+
+@pytest.mark.parametrize(("cancel", "elapsed"), [(False, 1.25), (True, 0.125)])
+async def test_unsent_first_permit_accounts_for_wait_on_timeout_or_cancel(
+    cancel: bool, elapsed: float
+) -> None:
+    clock = ManualClock()
+    gate = window_gate(clock, 1, 1)
+    await gate.permit(timeout_seconds=0)
+    budget = SelectionBudget(0.5, waited_seconds=0.25)
+
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        pytest.fail("a blocked first permit must not dispatch an HTTP request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(2, 0, 0, 5), provider_name="test", rate_gate=gate
+        )
+
+        async def fetch() -> str:
+            with initial_rate_budget(gate, budget):
+                return await executor.request_text("GET", "https://example.test", stage="fetch")
+
+        request = asyncio.create_task(fetch())
+        await asyncio.sleep(0)
+        assert list(clock.sleepers.values()) == [0.5]
+        await clock.advance_to(elapsed)
+        if cancel:
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(request, 1)
+        else:
+            with pytest.raises(ExecutionFailure) as caught:
+                await asyncio.wait_for(request, 1)
+            assert caught.value.reason == "rate_limit_wait_timeout"
+    assert budget.waited_seconds == 0.25 + elapsed
+    assert budget.remaining_seconds == max(0, 0.5 - elapsed)
+    assert not clock.sleepers
+
+
 async def test_initial_rate_budget_is_one_shot_and_bound_to_gate_and_current_task() -> None:
     first = RateGate(ResolvedRatePolicy())
     other = RateGate(ResolvedRatePolicy())
 
-    async def in_child() -> InitialRateBudget | None:
+    async def in_child() -> SelectionBudget | None:
         return consume_initial_rate_budget(first)
 
     with initial_rate_budget(first, remaining_seconds=0, waited_seconds=0.5):
@@ -264,9 +421,9 @@ async def test_initial_rate_budget_is_one_shot_and_bound_to_gate_and_current_tas
         assert consume_initial_rate_budget(other) is None
         with initial_rate_budget(other, remaining_seconds=0.25, waited_seconds=0.25):
             assert consume_initial_rate_budget(first) is None
-            assert consume_initial_rate_budget(other) == InitialRateBudget(0.25, 0.25)
+            assert consume_initial_rate_budget(other) == SelectionBudget(0.25, 0.25)
             assert consume_initial_rate_budget(other) is None
-        assert consume_initial_rate_budget(first) == InitialRateBudget(0, 0.5)
+        assert consume_initial_rate_budget(first) == SelectionBudget(0, 0.5)
         assert consume_initial_rate_budget(first) is None
     with initial_rate_budget(first, remaining_seconds=0.5, waited_seconds=0):
         pass
@@ -275,7 +432,7 @@ async def test_initial_rate_budget_is_one_shot_and_bound_to_gate_and_current_tas
 
 async def test_initial_budget_requires_an_owning_task_even_for_a_loop_callback() -> None:
     gate = RateGate(ResolvedRatePolicy())
-    observed: asyncio.Future[InitialRateBudget | None] = asyncio.get_running_loop().create_future()
+    observed: asyncio.Future[SelectionBudget | None] = asyncio.get_running_loop().create_future()
 
     def callback() -> None:
         try:

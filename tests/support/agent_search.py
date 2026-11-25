@@ -5,7 +5,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import AgentInvocation, LLMInvocation
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
@@ -70,7 +69,6 @@ def agent_orchestrator(
         keyword_providers=(),
         llm_invocations=(),
         agent_invocations=invocations,
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
         stages=stages,
         store=store if store is not None else URLStore(),
         result_writer=ResultWriter(directory),

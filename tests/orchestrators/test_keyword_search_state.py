@@ -6,7 +6,6 @@ from typing import cast
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -56,7 +55,7 @@ async def test_baiduqianfan_results_use_existing_url_normalization_and_dedup(
     adapter = BaiduQianfanAdapter(
         name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
     )
-    orchestrator, store, _ = _build_keyword(tmp_path, [adapter])
+    orchestrator, store, _, _ = _build_keyword(tmp_path, [adapter])
 
     path = Path(await orchestrator.keyword_search("query", request_id="13131313"))
 
@@ -108,7 +107,7 @@ async def test_baiduqianfan_rejected_body_preserves_admitted_url_and_abstract(
     adapter = BaiduQianfanAdapter(
         name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
     )
-    orchestrator, store, client = _build_keyword(tmp_path, [adapter])
+    orchestrator, store, client, _ = _build_keyword(tmp_path, [adapter])
     client.json_result = {"ok": False}
 
     path = Path(await orchestrator.keyword_search("query", request_id="14141414"))
@@ -163,7 +162,7 @@ async def test_baiduqianfan_media_preserves_abstract_without_body_processing(
     adapter = BaiduQianfanAdapter(
         name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
     )
-    orchestrator, store, client = _build_keyword(tmp_path, [adapter])
+    orchestrator, store, client, _ = _build_keyword(tmp_path, [adapter])
 
     path = Path(await orchestrator.keyword_search("query", request_id="15151515"))
 
@@ -214,7 +213,7 @@ async def test_baiduqianfan_emits_one_logical_provider_terminal_event(
     adapter = BaiduQianfanAdapter(
         name="baiduqianfan", secret=SecretValue("sample"), http_executor=http
     )
-    orchestrator, _, _ = _build_keyword(tmp_path, [adapter])
+    orchestrator, _, _, _ = _build_keyword(tmp_path, [adapter])
 
     if web_fails and agentic_fails:
         with pytest.raises(ExecutionFailure) as error:
@@ -382,10 +381,6 @@ async def test_keyword_search_validates_body_then_commits_deterministic_first_wr
     orchestrator = SearchOrchestrator(
         keyword_providers=providers,
         llm_invocations=(),
-        quotas=ProviderQuotaManager(
-            web_limits={provider.name: 1 for provider in providers},
-            llm_limits={},
-        ),
         stages=stages,
         store=store,
         result_writer=ResultWriter(tmp_path / "results"),
@@ -466,10 +461,6 @@ async def test_keyword_search_attributes_hit_staging_failures_without_duplicate_
     orchestrator = SearchOrchestrator(
         keyword_providers=[partial, all_judge_failed, invalid_hit],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(
-            web_limits={"partial": 1, "all-judge-failed": 1, "invalid-hit": 1},
-            llm_limits={},
-        ),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "judge-failure-results"),
@@ -575,10 +566,6 @@ async def test_keyword_search_debug_events_cover_provider_candidate_body_and_per
     orchestrator = SearchOrchestrator(
         keyword_providers=[failed, success],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(
-            web_limits={"failed": 1, "success": 1},
-            llm_limits={},
-        ),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "debug-results"),
@@ -677,7 +664,6 @@ async def test_keyword_staging_counts_judge_failure_and_retained_abstract(
     orchestrator = SearchOrchestrator(
         keyword_providers=[FakeKeywordSearchProvider("web", hits)],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "results"),
@@ -749,7 +735,6 @@ async def test_keyword_staging_cancellation_leaves_inflight_and_tail_unprocessed
             )
         ],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "results"),

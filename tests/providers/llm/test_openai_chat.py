@@ -5,7 +5,6 @@ import logging
 import httpx
 import pytest
 
-from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from agent_search_gateway.llm.prompts import focus_summary_messages, judge_messages
 from agent_search_gateway.llm.stages import LLMStages
@@ -35,7 +34,6 @@ async def test_llm_sends_serialized_json_within_configured_body_limit() -> None:
             api_url="https://llm.example.test",
             secret=SecretValue("key"),
             executor=HttpJsonExecutor(http_client, policy, provider_name="openai"),
-            quota=CapacityGate(1),
             retry_policy=policy,
         )
         await client.complete_text(LLMInvocation("openai", "model", {}), messages)
@@ -55,7 +53,6 @@ def _input_client(
     http_client: httpx.AsyncClient,
     *,
     request_body_bytes: int,
-    quota: CapacityGate | None = None,
     logger: logging.Logger | None = None,
 ) -> OpenAIChatCompletionsClient:
     policy = RetryPolicy(2, 0.01, 0.02, 1.0)
@@ -66,7 +63,6 @@ def _input_client(
         executor=HttpJsonExecutor(
             http_client, policy, provider_name="openai", logger=logger, sleep=_no_sleep
         ),
-        quota=quota if quota is not None else CapacityGate(1),
         retry_policy=policy,
         request_body_bytes=request_body_bytes,
         logger=logger,
@@ -75,7 +71,7 @@ def _input_client(
 
 
 @pytest.mark.parametrize("source", ["system", "focus", "model", "extra", "unencodable"])
-async def test_unfit_llm_input_is_rejected_before_quota_and_http(source: str) -> None:
+async def test_unfit_llm_input_is_rejected_before_http(source: str) -> None:
     private = "PRIVATE_INPUT" * 1000
     model = private if source == "model" else "model"
     extra = {"option": private} if source == "extra" else {}
@@ -84,21 +80,19 @@ async def test_unfit_llm_input_is_rejected_before_quota_and_http(source: str) ->
         messages = ({"role": "system", "content": private}, *messages[1:])
     if source == "unencodable":
         extra = {"option": private + "\ud800"}
-    quota = CapacityGate(1)
     logger, stream = structured_test_logger("tests.openai.input-rejected")
 
     def unexpected(request: httpx.Request) -> httpx.Response:
         pytest.fail("rejected input reached the transport")
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http_client:
-        client = _input_client(http_client, request_body_bytes=512, quota=quota, logger=logger)
+        client = _input_client(http_client, request_body_bytes=512, logger=logger)
         with pytest.raises(ExecutionFailure) as caught:
             await client.complete_json(LLMInvocation("openai", model, extra), messages)
 
     assert caught.value.code == ErrorCode.LLM_STAGE_FAILED
     assert caught.value.reason == "input_budget_unfit"
     assert caught.value.__context__ is None
-    assert quota.max_observed_in_use == 0
     logged = stream.getvalue()
     assert logged.count("event=input_rejected") == 1
     assert "reason=input_budget_unfit" in logged and "limit_bytes=512" in logged
@@ -135,6 +129,64 @@ async def test_small_llm_body_is_byte_identical_at_and_below_limit(slack: int) -
         await client.complete_json(LLMInvocation("openai", "model", extra), messages)
 
     assert bodies == [expected]
+
+
+@pytest.mark.parametrize("mode", ["text", "json"])
+async def test_llm_retry_reuses_prepared_body_with_selected_auth(mode: str) -> None:
+    from contextlib import AsyncExitStack
+
+    from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
+
+    requests: list[httpx.Request] = []
+    policy = RetryPolicy(2, 0, 0, 1)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(503)
+        if request.url.host == "a.example.test":
+            return httpx.Response(200, json={"choices": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok":true}'}}]})
+
+    async with AsyncExitStack() as stack:
+        clients = []
+        for label in ("a", "b"):
+            transport = await stack.enter_async_context(
+                httpx.AsyncClient(transport=httpx.MockTransport(respond))
+            )
+            clients.append(
+                OpenAIChatCompletionsClient(
+                    name="openai",
+                    api_url=f"https://{label}.example.test",
+                    secret=SecretValue(f"[REDACTED_SECRET]-{label}"),
+                    executor=HttpJsonExecutor(transport, policy, provider_name="openai"),
+                    retry_policy=policy,
+                    request_body_bytes=512,
+                )
+            )
+        pool = CredentialPool("llm", "openai", [CredentialMember(client) for client in clients])
+        extra = {"temperature": 0.25}
+        invocation = LLMInvocation("openai", "model-a", extra)
+        messages = judge_messages("正文" * 2000)
+        prepared = clients[0].prepare_request(invocation, messages)
+        extra["temperature"] = 1.0
+
+        async def complete(client: OpenAIChatCompletionsClient) -> object:
+            if mode == "text":
+                return await client.complete_text_prepared(invocation, messages, prepared)
+            return await client.complete_json_prepared(invocation, messages, prepared)
+
+        async with asyncio.timeout(2):
+            result = await pool.invoke(complete)
+    assert result == ('{"ok":true}' if mode == "text" else {"ok": True})
+    assert len(requests) == 4
+    for request, label in zip(requests, "aaab", strict=True):
+        assert str(request.url) == f"https://{label}.example.test/v1/chat/completions"
+        assert request.headers["authorization"] == f"Bearer [REDACTED_SECRET]-{label}"
+        assert request.content == requests[0].content
+    body = json.loads(requests[0].content)
+    assert body["temperature"] == 0.25 and body["model"] == "model-a"
+    assert b"[... truncated ...]" in requests[0].content and len(requests[0].content) <= 512
 
 
 async def test_http_and_protocol_retries_reuse_the_same_prepared_llm_body() -> None:
@@ -194,11 +246,16 @@ async def test_http_and_protocol_retries_reuse_the_same_prepared_llm_body() -> N
 async def test_preview_uses_the_transport_logger_for_credentials_crossing_input_cuts(
     http_level: int, protocol_level: int, late_debug: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agent_search_gateway import observability
     from agent_search_gateway.body_preview import BodyScrubber
     from agent_search_gateway.input_limits import TruncatableMessage
 
-    secret = "PRIVATE_LEFT" + "x" * 6000 + "PRIVATE_DROPPED_MIDDLE" + "x" * 6000 + "PRIVATE_RIGHT"
+    secret = (
+        "[REDACTED_SECRET]PRIVATE_START"
+        + "x" * 6000
+        + "PRIVATE_DROPPED_MIDDLE"
+        + "x" * 6000
+        + "PRIVATE_RIGHT"
+    )
     http_logger, stream = structured_test_logger(
         "tests.openai.transport-view", secrets=[SecretValue(secret)]
     )
@@ -227,18 +284,17 @@ async def test_preview_uses_the_transport_logger_for_credentials_crossing_input_
         client = OpenAIChatCompletionsClient(
             name="openai",
             api_url="https://llm.test",
-            secret=observability.SecretValue("sample"),
+            secret=SecretValue("[REDACTED_SECRET]"),
             executor=HttpJsonExecutor(
                 http_client, policy, provider_name="openai", logger=http_logger
             ),
-            quota=CapacityGate(1),
             retry_policy=policy,
             request_body_bytes=600,
             logger=protocol_logger,
         )
         assert await client.complete_text(LLMInvocation("openai", "model", {}), messages) == "ok"
     (wire,) = wires
-    assert b"PRIVATE_LEFT" in wire and b"PRIVATE_RIGHT" in wire
+    assert b"PRIVATE_START" in wire and b"PRIVATE_RIGHT" in wire
     assert b"PRIVATE_DROPPED_MIDDLE" not in wire
     logged = stream.getvalue()
     assert "PRIVATE_" not in logged + protocol_stream.getvalue()
@@ -317,9 +373,7 @@ async def test_concurrent_protocol_attempts_are_local_to_each_completion() -> No
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as transport:
-        client = _input_client(
-            transport, request_body_bytes=512, logger=logger, quota=CapacityGate(2)
-        )
+        client = _input_client(transport, request_body_bytes=512, logger=logger)
         with bind_request_id("aaaaaaaa"):
             text_task = asyncio.create_task(
                 client.complete_text(LLMInvocation("openai", "text", {}), ())
@@ -401,7 +455,6 @@ async def test_openai_chat_builds_request_retries_invalid_shape_and_parses_text_
             api_url="https://llm.example.test/base",
             secret=SecretValue("x"),
             executor=executor,
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
         )
@@ -459,7 +512,6 @@ async def test_openai_protocol_debug_events_exclude_messages_responses_and_crede
             api_url="https://llm.example.test",
             secret=secret,
             executor=executor,
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
             logger=logger,
@@ -501,19 +553,18 @@ async def test_openai_protocol_debug_events_exclude_messages_responses_and_crede
     assert "CREDENTIAL_SENTINEL" not in logged
 
 
-async def test_openai_chat_rejects_reserved_extra_body_and_respects_quota() -> None:
+async def test_physical_client_allows_overlapping_prepared_requests() -> None:
     policy = RetryPolicy(2, 0.01, 0.02, 1.0)
-    quota = CapacityGate(1)
-    entered = asyncio.Event()
+    both_entered = asyncio.Event()
     release = asyncio.Event()
     calls = 0
 
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        if calls == 1:
-            entered.set()
-            await release.wait()
+        if calls == 2:
+            both_entered.set()
+        await release.wait()
         return httpx.Response(
             200,
             json={"choices": [{"message": {"content": "ok"}}]},
@@ -532,27 +583,40 @@ async def test_openai_chat_rejects_reserved_extra_body_and_respects_quota() -> N
             api_url="https://llm.example.test",
             secret=SecretValue("x"),
             executor=executor,
-            quota=quota,
             retry_policy=policy,
             sleep=_no_sleep,
         )
         messages = ({"role": "user", "content": "question"},)
         invocation = LLMInvocation("openai-main", "model-a", {})
-        first = asyncio.create_task(client.complete_text(invocation, messages))
-        await entered.wait()
-        second = asyncio.create_task(client.complete_text(invocation, messages))
-        await asyncio.sleep(0)
-        assert calls == 1
-        release.set()
-        assert tuple(await asyncio.gather(first, second)) == ("ok", "ok")
-
-        with pytest.raises(ExecutionFailure):
-            await client.complete_text(
-                LLMInvocation("openai-main", "model-a", {"model": "override"}),
-                messages,
+        prepared = client.prepare_request(invocation, messages)
+        async with asyncio.timeout(2), asyncio.TaskGroup() as group:
+            first = group.create_task(client.complete_text_prepared(invocation, messages, prepared))
+            second = group.create_task(
+                client.complete_text_prepared(invocation, messages, prepared)
             )
+            await both_entered.wait()
+            release.set()
+        assert (first.result(), second.result()) == ("ok", "ok")
 
-    assert quota.max_observed_in_use == 1
+
+@pytest.mark.parametrize(
+    "invocation, reason",
+    [
+        (LLMInvocation("other", "model", {}), "does not match"),
+        (LLMInvocation("openai", "model", {"model": "override"}), "cannot override"),
+        (LLMInvocation("openai", "model", {"messages": []}), "cannot override"),
+        (LLMInvocation("openai", "m" * 1024, {}), "input_budget_unfit"),
+    ],
+)
+async def test_llm_prepare_failure_sends_no_http(invocation: LLMInvocation, reason: str) -> None:
+    def unexpected(request: httpx.Request) -> httpx.Response:
+        pytest.fail("local preparation reached the transport")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected)) as http_client:
+        client = _input_client(http_client, request_body_bytes=512)
+        with pytest.raises(ExecutionFailure, match=reason) as failure:
+            client.prepare_request(invocation, judge_messages("short"))
+    assert failure.value.code is ErrorCode.LLM_STAGE_FAILED
 
 
 async def test_openai_chat_exhausts_invalid_response_as_protocol_execution_failure() -> None:
@@ -572,7 +636,6 @@ async def test_openai_chat_exhausts_invalid_response_as_protocol_execution_failu
             api_url="https://llm.example.test",
             secret=SecretValue("x"),
             executor=executor,
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
         )
@@ -610,7 +673,6 @@ async def test_openai_root_api_error_diagnostics_survive_protocol_failure() -> N
             api_url="https://llm.example.test",
             secret=secret,
             executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
             logger=logger,
@@ -672,7 +734,6 @@ async def test_openai_stage_failures_keep_safe_stage_and_category(
             api_url="https://llm.example.test",
             secret=SecretValue("secret"),
             executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
             logger=logger,
@@ -734,7 +795,6 @@ async def test_openai_model_content_error_keys_are_never_api_diagnostics() -> No
             api_url="https://llm.example.test",
             secret=SecretValue("secret"),
             executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=_no_sleep,
             logger=logger,

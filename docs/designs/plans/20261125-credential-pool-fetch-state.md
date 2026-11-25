@@ -307,11 +307,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 - Test: `tests/runtime/test_rate_gate.py`
 - Read: `tests/support/controlled.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_omitted_capacity_creates_no_waiting_gate`、`test_selection_budget_is_not_reset_by_notifications`、`test_first_permit_charges_shared_budget_once`。用 ManualClock/Event 测 capacity-only、rate-only、二者同时、仅 interval、空窗口，确保 peek 不消费许可，真实发送失败不退回已消费许可。预算为 0 时允许当下已就绪的一次检查；超期迟唤醒不额外放行。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager.py tests/runtime/test_rate_gate.py -k "omitted or selection_budget or first_permit" -v
@@ -319,7 +319,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 
 预期：旧 quota 必须有 finite limit，或现有 immutable 初次预算尚无跨层一次记账。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 未配置 capacity -> None；未配置 windows/interval -> None
@@ -332,7 +332,7 @@ consume 只交接一次，executor 首次 permit 等待/超时回报该预算一
 
 仅保留 Agent 所需的 alias gate 管理；HTTP provider 旧聚合 gate 的调用者在 Tasks 9/13 全部移除。不修改 PerKeyLockPool 或 SingleflightGroup 算法。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager.py tests/runtime/test_rate_gate.py tests/runtime/test_singleflight.py -v
@@ -340,7 +340,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 
 预期：许可计数、可选语义、精确边界均通过，URL lock/singleflight 回归保持。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 不要创建“无限 semaphore”或对无规则成员发空轮询通知；避免 rate_limit 导入 credential_pool 造成循环依赖。重跑上列命令。
 
@@ -352,11 +352,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 - Create: `tests/runtime/test_credential_pool.py`
 - Test support: `tests/support/controlled.py`（仅需新受控行为时扩展）
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 分别写 `test_round_robin_advances_at_selection`、`test_round_robin_keeps_array_position_when_member_is_blocked`、`test_fill_first_returns_to_first_ready_member`、`test_unlimited_128_operations_enter_before_release`。A/B/C 用 Event 阻塞完成；断言 RR A/B/C/A，完成逆序不改变下一选择；FF A 常可用时连续 A，A 受限时选 B，恢复后再 A。128 个独立工作在任何一个释放前全部进入无 gate 成员。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_pool.py -k "round_robin or fill_first or unlimited_128" -v
@@ -364,7 +364,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_po
 
 预期：最小接口尚不能保证选择顺序、容量原子性或真正无限制；不是模块不存在的 collection error。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 pool 持固定成员 tuple、strategy、共享 RR cursor、短选择锁
@@ -378,7 +378,7 @@ reservation.release 幂等；短临界区不等待网络/permit
 
 Pool 不读 URLStore、认证格式或 vendor 响应；只接收类型化 operation。安全 identity 为 namespace/name/index，index 不变成逻辑 provider 名。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_pool.py -v
@@ -387,7 +387,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 
 预期：无隐藏 cap、各成员 capacity/rate 独立、游标不受完成顺序影响。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 仅保留实际需要的 member/reservation 泛型，避免动态修改共享 adapter 的 URL/header；重跑上列命令。
 
@@ -400,7 +400,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 - Test: `tests/runtime/test_credential_pool.py`
 - Read: `src/agent_search_gateway/retry.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 逐一验证：
 
@@ -413,7 +413,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager
 | `test_waits_for_unattempted_ready_member_without_spinning` | 全受限等待；rate 已耗尽但 capacity 空闲不能形成立即唤醒循环；反复通知仍超时。 |
 | `test_cancelled_selection_or_handoff_releases_every_lease` | 在等待、reserve 后/operation 前、HTTP 后返回前注入取消；不再启动 fallback，后续调用可用。 |
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_pool.py -k "terminal or no_match or non_provider or memory or waits or cancelled" -v
@@ -421,7 +421,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_po
 
 预期：缺少单轮 attempted、等待预算或交接清理时，观察多轮调用、错误切换或 lease 泄漏。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 invoke 创建一次 attempted 和 SelectionBudget，或接收 scheduler 提供的 first/budget
@@ -442,7 +442,7 @@ wait_available:
 
 保留最后的 typed failure/error code；无成员执行但选择超时时，用 façade/Runtime 提供的既有错误类别构造安全错误（LLM_STAGE_FAILED 或 ALL_PROVIDERS_FAILED），不新增公开 credential code。既有 RetryPolicy 继续在 adapter 内，pool 不调用 retry_async 再套一轮。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_pool.py tests/runtime/test_rate_gate.py tests/unit/test_retry.py -v
@@ -450,7 +450,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_po
 
 预期：有限遍历、虚假唤醒不重置、取消立即传播、所有 waiter/lease 回收。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 检查释放路径不因日志异常或正常 return 漏掉；等待不持选择锁，取消不记录为一次可恢复凭证故障。重跑上列命令。
 
@@ -465,13 +465,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_po
 - Test: `tests/providers/llm/test_openai_chat.py`
 - Test: `tests/runtime/test_credential_pool.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_http_retries_stay_on_member_before_fallback` 通过真实 executor + MockTransport 观察 A/A/A/B，而非 mock 自带的重试。401/402/403 保持原一次请求后失败；408/429/5xx、网络错误与 Retry-After 维持原次数/时序。内部并行请求各自计 rate。
 
 `test_llm_prepare_failure_sends_no_http` 覆盖 alias mismatch、reserved extra_body 和 input_budget_unfit，先在真实物理 client/prepare_request 验证原 LLM_STAGE_FAILED、零 send；真实 façade 的零 cursor 推进断言放 Task 9。`test_llm_retry_reuses_prepared_body_with_selected_auth` 验证 HTTP/protocol retry 同凭证、切换后的 body 字节/model 一致，而 endpoint/auth 独立。本任务验证 prepared 入口本身不再获取容量；cap=1 的真实 façade+pool 防死锁验收放 Task 9。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/llm/test_openai_chat.py -k "prepare_failure or prepared_body" -v
@@ -480,7 +480,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_execut
 
 预期：旧 LLM client 重复持容量/准备发生在成员内，或首次 rate 预算被重新赋满。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 _prepare_body -> prepare_request，仍用真实 HTTPX JSON 序列化和既有输入裁剪
@@ -494,7 +494,7 @@ prepared 入口不持 pool 的 capacity；_request_once 用当前实例 endpoint
 
 不将 Search markdown parser、LLMStages 的决策解析或 input error 包进凭证 fallback。输入正文 cap、UTF-8 截断和 DEBUG body preview 保持原路径。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_executor.py tests/providers/test_bounded_http_executor.py tests/providers/llm/test_openai_chat.py tests/runtime/test_credential_pool.py tests/unit/test_retry.py tests/unit/test_input_limits.py -v
@@ -502,7 +502,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_execut
 
 预期：发送顺序/速率可证明，所有原重试与输入上限断言通过。使用假时间，禁止真实长睡眠或真实额度故障。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 保留原 PreparedInput，避免新增请求 envelope 或第二种 JSON 序列化。初次预算保持 owner-task 隔离，不能为“修好”测试取消该保护；重跑上列命令。
 
@@ -519,11 +519,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_execut
 - Test: `tests/orchestrators/test_paper_provider_filtering.py`
 - Test: `tests/orchestrators/test_llm_provider_model_filtering.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_web_search_and_fetch_share_one_pool` 用同一成员 Search 占满 capacity/rate，Fetch 只能选其他可用成员；无 provider 聚合 gate。`test_typed_facades_preserve_success_and_failure_contracts` 参数化 Web/Academic/OA/LLM，正常空值不切换；逻辑 name 不含 index。验证 LLM Search 与 judge/clean/safety/focus 用同 alias pool，model/filter 不变。新增 `test_llm_prepare_failure_never_selects_credential`，把 Task 8 的本地准备失败接到真实 PooledLLMClient；失败后的下一次合法调用仍选 A，证明零游标推进。再以 cap=1 验证 client+pool 不双重获取容量。prepared 方法明确接收 invocation、messages、prepared 三个参数，保留原模型/消息统计日志。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_pooled_providers.py -v
@@ -531,7 +531,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_pooled_provid
 
 预期：缺少共享池、薄协议适配或操作层 lease 迁移时，观察独立计数/重复取容量等行为失败。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 Web.search/fetch -> 同一个 pool.invoke(对应已验证的 adapter 方法)
@@ -547,7 +547,7 @@ Web factory 返回 object 的现状在 Runtime 边界按 registry capability 检
 
 运行时消费的 LLMClient 协议只保留业务方法；物理 client 直接使用时仍可 aclose。运行时物理资源关闭归 Task 10，façade 不另拥有关闭路径。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_pooled_providers.py tests/runtime/test_credential_pool.py -v
@@ -556,7 +556,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword
 
 预期：默认每逻辑 provider 一次 Search，不按 credential fan-out；过滤/模型顺序不变。相关 fake/constructor 在此同步迁移。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 公共 pool 只保留一套算法，四类 façade 不各自实现 retry/轮询。去掉不再使用的 HTTP quota 依赖，保留 Agent 独立限制入口；重跑上列命令。
 
@@ -1402,7 +1402,12 @@ uv run python scripts/build_docs.py
 | 2 | 完成 | Web 配置 + registry 700 通过；相邻 Academic/LLM/Agent 配置 562 通过；相关 Ruff / mypy 通过。 |
 | 3 | 完成 | Academic/OA 565 通过；合并相邻配置/registry 1,405 通过；相关 Ruff / mypy 通过。 |
 | 4 | 完成 | 四类配置及请求筛选检查点 1,648 通过、0 失败、0 跳过；相关 Ruff 通过；四文件 `mypy --follow-imports=silent` 通过。 |
-| 5–23 | 待实施 | Runtime、gate/pool、调度、URL 状态机、诊断、文档与全量验收尚未完成。 |
+| 5 | 完成 | quota/rate/singleflight 46 通过；HTTP executor 236 通过；Ruff 通过。 |
+| 6 | 完成 | pool 10 通过；合并 pool/quota/rate 52 通过；相关 Ruff / 严格 mypy 通过。 |
+| 7 | 完成 | pool/rate/retry 92 通过（含 pool 35）；复现并修复成功交付前待生效取消；相关 Ruff / 严格 mypy 通过。 |
+| 8 | 完成 | executor/LLM/pool/retry/input 376 通过；LLM Search 及 gated live 文件 4 通过、8 个原有 live skip；7 文件 Ruff 通过。 |
+| 9 | 完成 | pool/façade 66 通过；过滤/调用选择 115 通过；20 文件 Ruff、4 生产文件 scoped mypy 通过。扩大诊断 329 通过、5 项后续配置/Doctor 迁移失败。 |
+| 10–23 | 待实施 | Runtime 装配与资源、Agent gates、Fetch 调度、URL 状态机、诊断、文档和全量验收尚未完成。 |
 
 配置检查点实际命令：
 
@@ -1412,7 +1417,18 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前为配置组件检查点，不能据此声称全仓库已通过。Task 2 抽查 Doctor 为 13 通过 / 6 失败，原因是旧 fixture 与已移除的 provider 字段；对应迁移归 Task 19。Runtime 消费旧结构的路径按计划归 Tasks 9–13。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前为 Task 1–9 组件检查点，不能据此声称全仓库已通过。Task 9 扩大诊断中的 5 项失败为两项 debug gateway 旧配置 fixture（Task 11）和三项 Doctor 旧配置/实现（Task 19），未删除或跳过这些断言。Runtime 消费旧结构及 Scheduler 的接线按 Tasks 10–13 完成。首次 rate budget 的旧标量参数仅为 Scheduler 迁移过渡，Task 13 收敛到统一 SelectionBudget。未修改用户实际配置、共享 daemon 或主仓库分支。
+
+Task 7 控制者复核发现：未限流的 operation 请求取消后同步成功返回，调用方仍可能接收结果。实现子代理先复现，再在同一 task 内交付结果前加入取消检查；回归证明无结果写入、无下一个成员调用且容量释放。Task 8/9 验证真实 executor/LLM 的内部重试保持所选凭证、准备字节复用以及池外准备失败时零发送/零游标推进。
+
+组件检查点实际命令：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_pool.py tests/runtime/test_rate_gate.py tests/unit/test_retry.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_executor.py tests/providers/test_bounded_http_executor.py tests/providers/llm/test_openai_chat.py tests/runtime/test_credential_pool.py tests/unit/test_retry.py tests/unit/test_input_limits.py -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_pooled_providers.py tests/runtime/test_credential_pool.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_provider_filtering.py tests/orchestrators/test_paper_provider_filtering.py tests/orchestrators/test_llm_provider_model_filtering.py tests/orchestrators/test_llm_invocation_selection.py -q
+~~~
 
 ## 计划编写与自检记录
 

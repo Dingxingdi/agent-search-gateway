@@ -785,7 +785,9 @@ class HttpJsonExecutor:
             start_attempt()
 
         try:
-            await gate.permit(timeout_seconds=timeout, before_reserve=before_reserve)
+            await gate.permit(
+                timeout_seconds=timeout, before_reserve=before_reserve, budget=initial
+            )
         except RateLimitWaitTimeout as exc:
             reason = "rate_limit_wait_timeout"
             log_event(

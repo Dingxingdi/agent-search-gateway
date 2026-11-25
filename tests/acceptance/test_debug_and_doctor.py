@@ -10,7 +10,6 @@ import httpx
 import pytest
 
 from agent_search_gateway.cli import build_parser, run_command
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.daemon import ForegroundDaemon
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
@@ -487,7 +486,6 @@ async def test_concurrent_workflows_isolate_terminal_counts_and_private_rotated_
         runtime.search_orchestrator = SearchOrchestrator(
             keyword_providers=providers,
             llm_invocations=(),
-            quotas=ProviderQuotaManager(web_limits={"good": 2, "bad": 2}, llm_limits={}),
             stages=stages,
             store=URLStore(),
             result_writer=ResultWriter(paths.results_dir),
@@ -644,7 +642,6 @@ async def test_preview_fault_preserves_keyword_workflow_result_and_error_code(
             search = SearchOrchestrator(
                 keyword_providers=[provider],
                 llm_invocations=(),
-                quotas=ProviderQuotaManager(web_limits={"tavily": 1}, llm_limits={}),
                 stages=stages,
                 store=URLStore(),
                 result_writer=ResultWriter(paths.results_dir),
@@ -697,7 +694,6 @@ async def test_keyword_redirect_body_rejection_logs_omit_signed_target_query(
         search = SearchOrchestrator(
             keyword_providers=[provider],
             llm_invocations=(),
-            quotas=ProviderQuotaManager(web_limits={"web": 1}, llm_limits={}),
             stages=stages,
             store=store,
             result_writer=ResultWriter(tmp_path / "results"),

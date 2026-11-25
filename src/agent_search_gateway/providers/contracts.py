@@ -1,12 +1,19 @@
 """Provider-facing contracts and candidate value objects."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from ..models import LLMInvocation, OAResolution
 from ..url_normalization import NormalizedURL
+
+if TYPE_CHECKING:
+    from ..credential_pool import CredentialReservation
+    from ..input_limits import PreparedInput
+    from ..rate_limit import SelectionBudget
 
 ChatMessage = Mapping[str, str]
 AgentTextRunner = Callable[[str | None, Sequence[ChatMessage]], Awaitable[str]]
@@ -68,6 +75,19 @@ class URLFetchProvider(Protocol):
     async def fetch(self, url: NormalizedURL) -> URLFetchCandidate: ...
 
 
+WebAdapter = KeywordSearchProvider | URLFetchProvider
+
+
+class ReservableFetchProvider(URLFetchProvider, Protocol):
+    async def try_reserve_fetch(self) -> CredentialReservation[WebAdapter] | None: ...
+
+    async def wait_fetch_available(self, budget: SelectionBudget) -> None: ...
+
+    async def fetch_reserved(
+        self, url: NormalizedURL, first: CredentialReservation[WebAdapter], budget: SelectionBudget
+    ) -> URLFetchCandidate: ...
+
+
 @runtime_checkable
 class AcademicSearchProvider(Protocol):
     name: str
@@ -98,4 +118,12 @@ class LLMClient(Protocol):
         messages: Sequence[ChatMessage],
     ) -> Mapping[str, object]: ...
 
-    async def aclose(self) -> None: ...
+
+class PreparedLLMClient(Protocol):
+    async def complete_text_prepared(
+        self, invocation: LLMInvocation, messages: Sequence[ChatMessage], prepared: PreparedInput
+    ) -> str: ...
+
+    async def complete_json_prepared(
+        self, invocation: LLMInvocation, messages: Sequence[ChatMessage], prepared: PreparedInput
+    ) -> Mapping[str, object]: ...

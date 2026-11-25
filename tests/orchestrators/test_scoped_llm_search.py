@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -101,7 +100,6 @@ def make_orchestrator(
     return SearchOrchestrator(
         keyword_providers=(),
         llm_invocations=invocations,
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={name: 2 for name in clients}),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path),

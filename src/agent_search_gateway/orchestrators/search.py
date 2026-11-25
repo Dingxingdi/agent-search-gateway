@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..academic.aggregator import PaperAggregator
-from ..concurrency import ProviderQuotaManager
 from ..errors import ErrorCode, ExecutionFailure, InputFailure, ParserFailure
 from ..llm.stages import LLMStages, cheap_check
 from ..llm_search_parser import parse_search_markdown
@@ -59,7 +58,6 @@ class SearchOrchestrator:
         *,
         keyword_providers: Sequence[KeywordSearchProvider],
         llm_invocations: Sequence[LLMInvocation],
-        quotas: ProviderQuotaManager,
         stages: LLMStages,
         store: URLStore,
         result_writer: ResultWriter,
@@ -72,7 +70,6 @@ class SearchOrchestrator:
         self._keyword_providers = tuple(keyword_providers)
         self._llm_invocations = tuple(llm_invocations)
         self._agent_invocations = tuple(agent_invocations)
-        self.quotas = quotas
         self._stages = stages
         self._store = store
         self._result_writer = result_writer
@@ -569,8 +566,7 @@ class SearchOrchestrator:
             stage="search",
         )
         try:
-            async with self.quotas.get_web(provider.name).lease():
-                hits = await provider.search(query)
+            hits = await provider.search(query)
             if not isinstance(hits, list):
                 raise TypeError("provider search result must be a list")
         except asyncio.CancelledError as exc:

@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 import httpx
 
-from ...concurrency import CapacityGate
 from ...config import ResolvedInputLimits
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ...input_limits import InputBudgetUnfit, PreparedInput, fit_messages_to_budget
@@ -60,7 +59,6 @@ class OpenAIChatCompletionsClient:
         api_url: str,
         secret: SecretValue,
         executor: HttpJsonExecutor,
-        quota: CapacityGate,
         retry_policy: RetryPolicy,
         request_body_bytes: int = ResolvedInputLimits().llm_request_body_bytes,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -70,7 +68,6 @@ class OpenAIChatCompletionsClient:
         self._endpoint = f"{api_url.rstrip('/')}/v1/chat/completions"
         self._secret = secret
         self._executor = executor
-        self._quota = quota
         self._retry_policy = retry_policy
         self._request_body_bytes = request_body_bytes
         self._sleep = sleep
@@ -81,7 +78,15 @@ class OpenAIChatCompletionsClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> str:
-        prepared_body = self._prepare_body(invocation, messages)
+        prepared = self.prepare_request(invocation, messages)
+        return await self.complete_text_prepared(invocation, messages, prepared)
+
+    async def complete_text_prepared(
+        self,
+        invocation: LLMInvocation,
+        messages: Sequence[ChatMessage],
+        prepared: PreparedInput,
+    ) -> str:
         protocol_attempt = 0
 
         def before_attempt(attempt: int) -> None:
@@ -90,24 +95,23 @@ class OpenAIChatCompletionsClient:
             self._log_protocol_attempt(invocation, messages, attempt)
 
         async def operation() -> str:
-            payload = await self._request_once(prepared_body, protocol_attempt)
+            payload = await self._request_once(prepared, protocol_attempt)
             return self._extract_content(payload)
 
-        async with self._quota.lease():
-            result = await retry_async(
-                self._retry_policy,
-                operation,
-                is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
-                sleep=self._sleep,
-                before_attempt=before_attempt,
-                on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
-                    invocation,
-                    messages,
-                    attempt,
-                    exc,
-                    delay,
-                ),
-            )
+        result = await retry_async(
+            self._retry_policy,
+            operation,
+            is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
+            sleep=self._sleep,
+            before_attempt=before_attempt,
+            on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
+                invocation,
+                messages,
+                attempt,
+                exc,
+                delay,
+            ),
+        )
         self._log_protocol_completed(invocation, messages, output_chars=len(result))
         return result
 
@@ -116,7 +120,15 @@ class OpenAIChatCompletionsClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> Mapping[str, object]:
-        prepared_body = self._prepare_body(invocation, messages)
+        prepared = self.prepare_request(invocation, messages)
+        return await self.complete_json_prepared(invocation, messages, prepared)
+
+    async def complete_json_prepared(
+        self,
+        invocation: LLMInvocation,
+        messages: Sequence[ChatMessage],
+        prepared: PreparedInput,
+    ) -> Mapping[str, object]:
         protocol_attempt = 0
 
         def before_attempt(attempt: int) -> None:
@@ -125,7 +137,7 @@ class OpenAIChatCompletionsClient:
             self._log_protocol_attempt(invocation, messages, attempt)
 
         async def operation() -> Mapping[str, object]:
-            payload = await self._request_once(prepared_body, protocol_attempt)
+            payload = await self._request_once(prepared, protocol_attempt)
             content = self._extract_content(payload)
             try:
                 decoded = json.loads(content)
@@ -149,21 +161,20 @@ class OpenAIChatCompletionsClient:
                 )
             return decoded
 
-        async with self._quota.lease():
-            result = await retry_async(
-                self._retry_policy,
-                operation,
-                is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
-                sleep=self._sleep,
-                before_attempt=before_attempt,
-                on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
-                    invocation,
-                    messages,
-                    attempt,
-                    exc,
-                    delay,
-                ),
-            )
+        result = await retry_async(
+            self._retry_policy,
+            operation,
+            is_retryable=lambda exc: isinstance(exc, ProtocolFailure),
+            sleep=self._sleep,
+            before_attempt=before_attempt,
+            on_retry=lambda attempt, exc, delay: self._log_protocol_retry(
+                invocation,
+                messages,
+                attempt,
+                exc,
+                delay,
+            ),
+        )
         output_chars = len(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
         self._log_protocol_completed(invocation, messages, output_chars=output_chars)
         return result
@@ -265,9 +276,10 @@ class OpenAIChatCompletionsClient:
                 f"LLM extra_body cannot override: {', '.join(sorted(collisions))}",
             )
 
-    def _prepare_body(
+    def prepare_request(
         self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
     ) -> PreparedInput:
+        """Validate and fit one request for all physical clients of this alias."""
         self._validate_invocation(invocation)
 
         original_bytes: int | None = None
