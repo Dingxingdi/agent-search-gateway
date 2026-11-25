@@ -3,6 +3,7 @@ import gzip
 import json
 from collections.abc import AsyncIterator
 from functools import partial
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -482,7 +483,7 @@ async def test_doctor_checks_each_open_websearch_endpoint(
         if request.url.host == "healthy.example.test":
             return httpx.Response(200, json={"status": "ok", "data": {"daemon": "running"}})
         return httpx.Response(
-            503, text="synthetic-private-body", headers={"X-Private": "synthetic-header"}
+            503, text="synthetic-private-body", headers={"Authorization": "Bearer synthetic-header"}
         )
 
     monkeypatch.setattr(
@@ -504,8 +505,10 @@ async def test_doctor_checks_each_open_websearch_endpoint(
             "web_providers.open_websearch.credentials[1]: open-webSearch daemon unhealthy (503)",
         ),
     )
+    rendered = StringIO()
+    doctor.render_doctor(report, rendered)
     assert all(
-        value not in repr(report)
+        value not in repr(report) and value not in rendered.getvalue()
         for value in (
             "synthetic-key",
             "synthetic-private-body",

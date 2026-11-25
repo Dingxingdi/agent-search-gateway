@@ -74,12 +74,17 @@ async def test_example_config_resolves_each_credential_with_stub_secrets(
     if enable_templates:
         assert config.oa_resolver is not None and config.oa_resolver.credentials
 
-    # Diagnose the actual on-disk example; all applicable network traffic is local mock.
+    # Diagnose the on-disk example and an opt-in open-webSearch variant.
+    # All applicable network traffic is local mock, with an explicit call count.
     paths = RuntimePaths.from_home(tmp_path)
     paths.config_file.parent.mkdir(parents=True)
-    paths.config_file.write_text(
-        (_ROOT / "config.example.toml").read_text(encoding="utf-8"), encoding="utf-8"
-    )
+    example = (_ROOT / "config.example.toml").read_text(encoding="utf-8")
+    if enable_templates:
+        disabled = "[web_providers.open_websearch]\nenable_search = false\nenable_fetch = false"
+        enabled_block = "[web_providers.open_websearch]\nenable_search = true\nenable_fetch = true"
+        assert example.count(disabled) == 1
+        example = example.replace(disabled, enabled_block)
+    paths.config_file.write_text(example, encoding="utf-8")
     observed: list[httpx.Request] = []
 
     def health(request: httpx.Request) -> httpx.Response:
@@ -94,6 +99,7 @@ async def test_example_config_resolves_each_credential_with_stub_secrets(
     )
     report = await run_doctor(paths, environ=_stub_environment(load_toml(paths.config_file)))
     assert report.exit_code == 0
+    assert len(observed) == int(enable_templates)
     assert all(request.url.path == "/health" for request in observed)
 
 

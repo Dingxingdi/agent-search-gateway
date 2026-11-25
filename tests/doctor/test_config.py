@@ -1,3 +1,4 @@
+from io import StringIO
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -5,7 +6,7 @@ import pytest
 
 from agent_search_gateway import doctor
 from agent_search_gateway.config import load_toml, resolve_config
-from agent_search_gateway.doctor import DoctorCheck, DoctorStatus, run_doctor
+from agent_search_gateway.doctor import DoctorCheck, DoctorStatus, render_doctor, run_doctor
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.socket_probe import SocketProbeResult, SocketState
 from tests.doctor._support import environment_name, write_valid_config
@@ -262,3 +263,53 @@ async def test_doctor_reports_members_without_merging_shared_environment_referen
         assert f"{identity}: configuration valid" in messages
     assert messages.count(f"environment variable {environment_name()} is set") == 1
     assert "[REDACTED_SECRET]" not in repr(report)
+
+
+@pytest.mark.parametrize("invalid_member", [False, True])
+async def test_doctor_renders_member_checks_without_authentication_values(
+    tmp_path: Path,
+    invalid_member: bool,
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    first = "SYNTHETIC_FIRST_MEMBER_VALUE"
+    second = "SYNTHETIC_SECOND_MEMBER_VALUE"
+    email = "synthetic-contact@example.test"
+    second_name = "TEST_SECOND_MEMBER"
+    email_name = "TEST_CONTACT_REFERENCE"
+    endpoint = "https://synthetic-user:synthetic-pass@llm.example.test?opaque=private-query"
+    invalid_limit = f'max_concurrency = "{second}"\n' if invalid_member else ""
+    with paths.config_file.open("a", encoding="utf-8") as target:
+        target.write(
+            f'\n[[llm_providers.primary.credentials]]\napi_url = "{endpoint}"\n'
+            f'api_key_env = "{second_name}"\n'
+            f"{invalid_limit}"
+            "[oa_resolvers.unpaywall]\nenabled = true\n"
+            "[[oa_resolvers.unpaywall.credentials]]\n"
+            f'contact_email_env = "{email_name}"\n'
+        )
+    report = await run_doctor(
+        paths,
+        environ={environment_name(): first, second_name: second, email_name: email},
+        socket_probe=_missing_socket,
+    )
+    output = StringIO()
+    render_doctor(report, output)
+    rendered = output.getvalue()
+    assert report.exit_code == int(invalid_member)
+    assert "llm_providers.primary.credentials[1]" in rendered
+    if not invalid_member:
+        assert "oa_resolvers.unpaywall.credentials[0]" in rendered
+        assert f"environment variable {second_name} is set" in rendered
+        assert f"environment variable {email_name} is set" in rendered
+    for marker in (
+        first,
+        second,
+        email,
+        endpoint,
+        "synthetic-user",
+        "synthetic-pass",
+        "private-query",
+    ):
+        assert marker not in rendered
+        assert marker not in repr(report)

@@ -26,7 +26,7 @@ from .credential_pool import CredentialMember, CredentialPool
 from .errors import ConfigFailure, ErrorCode
 from .llm.stages import LLMStages
 from .models import RetryPolicy
-from .observability import log_event
+from .observability import CredentialIdentity, log_event
 from .orchestrators.fetch import FetchOrchestrator
 from .orchestrators.paper import PaperSearchOrchestrator
 from .orchestrators.search import SearchOrchestrator
@@ -168,11 +168,16 @@ class _HTTPAssembly:
         create_adapter: Callable[[ResolvedCredential, HttpJsonExecutor], Adapter],
     ) -> tuple[CredentialPool[Adapter], Adapter]:
         members: list[CredentialMember[Adapter]] = []
-        for credential in provider.credentials:
+        for index, credential in enumerate(provider.credentials):
+            identity = CredentialIdentity(namespace, provider.name, index)
             capacity = make_capacity_gate(
-                credential.max_concurrency, provider=provider.name, quota_kind=namespace
+                credential.max_concurrency,
+                provider=provider.name,
+                quota_kind=namespace,
+                logger=logging.getLogger(__name__),
+                identity=identity,
             )
-            rate = make_rate_gate(credential.rate_policy)
+            rate = make_rate_gate(credential.rate_policy, identity=identity)
             client = self.resources.register(
                 _create_http_client(
                     self.factory,

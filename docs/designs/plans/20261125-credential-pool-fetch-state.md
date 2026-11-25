@@ -1129,13 +1129,13 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/doctor -v
 - Test: `tests/observability/test_agent_event_logging.py`
 - Test: `tests/unit/test_observability_logging.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_concurrent_credential_attempts_have_safe_independent_identity` 并发 A/B、内部并行分支与 retry，能够区分 namespace/provider/index，provider 字段仍是逻辑名。另写 `test_gate_identity_is_known_before_selection_and_after_release`：两个成员竞争时，尚未选出 operation 的 wait/acquire 和 operation 结束后的 release 也具有正确 index，不能依赖只在 operation 内设置的 ContextVar。`test_pool_fallback_and_exhaustion_are_sanitized` 覆盖 switch、wait、exhaustion、cleanup failure；`test_url_state_events_follow_atomic_commits` 只在真实提交后记录转换，取消不伪造成功。
 
 将各凭证 key/email、认证 URL/headers、上游错误/body 都放合成哨兵，覆盖配置、运行时错误、Doctor、清理和 DEBUG preview。日志失败不能改变业务结果。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability/test_provider_event_logging.py tests/observability/test_redaction.py -k "credential or pool_fallback or state_events" -v
@@ -1143,7 +1143,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability/test_provide
 
 预期：旧事件无法区分成员、只注册一组 secret，或 context 在并发/fallback 后串用。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 Runtime 为每个成员 gate 绑定固定 namespace/name/index，gate 的 peek/try/wait/acquire/release 日志使用该 identity
@@ -1157,7 +1157,7 @@ pool 进入成员 operation 前 set，finally reset；HTTP/LLM子任务自然继
 
 HTTP stage/重试编号继续原含义；不根据 index 新造 provider 名，不输出正文作为状态事件。日志 sink 故障及诊断异常不能遮蔽执行主错。
 
-- [ ] **Step 4: 验证 GREEN 与日志/输入回归**
+- [x] **Step 4: 验证 GREEN 与日志/输入回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/test_observability_logging.py tests/unit/test_input_limits.py tests/doctor -v
@@ -1165,7 +1165,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/t
 
 预期：成员关联、状态提交、所有脱敏/UTC/body cap 回归通过，普通结果格式无新字段。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 用固定 gate identity 加 scoped operation context 避免为 25 个 Web adapters 写相同日志 plumbing；检查选择前、释放后及 early return/异常/取消的标识都正确，context 始终 reset。重跑上列命令。
 
@@ -1216,7 +1216,7 @@ HTTP factory 接受并保留实际 kwargs，transport 记录 endpoint/auth/body/
 
 同步迁移旧 AcceptanceRuntime/fakes 的 quota、available、Safety 次数断言。Firecrawl/arXiv/proxy/CLI 超时的既有验收继续通过，不增加新的断线 watcher 或请求总 deadline。
 
-- [ ] **Step 4: 验证 GREEN 与第二个集成检查点**
+- [x] **Step 4: 验证 GREEN 与第二个集成检查点**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential_pool_fetch_state.py tests/acceptance/test_gateway_workflows.py tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/cli tests/daemon -v
@@ -1262,7 +1262,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs/test_documented_confi
 
 预期：旧 TOML 或 _stub_environment 仍使用顶层 endpoint/key/limits，明确报迁移错误。
 
-- [ ] **Step 3: 最小文档和 fixture 迁移**
+- [x] **Step 3: 最小文档和 fixture 迁移**
 
 ~~~text
 所有当前 HTTP 示例改为 [[namespace.provider.credentials]]
@@ -1279,7 +1279,7 @@ TOML 注意父子表归属：在首次显式声明的 provider 表中先写完�
 
 所有跨文件 fixture 迁移在其关联实现任务已做；这里做剩余审计，不能将旧配置自动转换 helper 用于生产或隐藏 legacy rejection。历史 docs/designs 文档不改成新 schema。
 
-- [ ] **Step 4: 验证 GREEN 与文档/辅助入口回归**
+- [x] **Step 4: 验证 GREEN 与文档/辅助入口回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs tests/acceptance/test_debug_and_doctor.py tests/unit/test_live_smoke_validation.py tests/unit/test_live_baiduqianfan_validation.py tests/unit/test_live_preview_budget_validation.py -v
@@ -1288,7 +1288,7 @@ uv run python scripts/build_docs.py
 
 预期：当前示例全部可解析且生成文档成功，live helper 的离线测试通过；不执行 live 测试。build_docs 产生的 site 文件按既有生成物规则处理，不混入无关改动。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 针对性搜索 default_max_concurrency、旧 available/merge_body、provider 顶层旧字段、Runtime.build 同步调用和无参 HTTP factory。历史 spec、明确拒绝旧字段的测试及迁移说明可保留；当前运行路径必须清除。重跑文档和相关 helper 测试。
 
@@ -1308,11 +1308,11 @@ uv run python scripts/build_docs.py
 
 运行任何新增缺口测试的确切 node，记录预期失败。缺环境/ImportError/错误 fixture 不是合格 RED；修正后再检查。已有回归全部绿色则直接进入最终检查，不故意制造失败。
 
-- [ ] **Step 3: 只完成必要修正**
+- [x] **Step 3: 只完成必要修正**
 
 补齐有证据的类型、fixture 或集成问题；不借最终整理添加默认 limiter、凭证冷却、Agent 账户、刷新缓存、额外 retry 或总 deadline。代码和文档的字段/方法名称全篇统一。
 
-- [ ] **Step 4: 执行项目要求的完整检查**
+- [x] **Step 4: 执行项目要求的完整检查**
 
 ~~~bash
 uv run ruff format --check src tests scripts
@@ -1392,7 +1392,7 @@ uv run python scripts/build_docs.py
 - 保留既有 singleflight leader/follower 区别；不把通用取消描述扩展成新所有权模型。
 - 所有新行为均有对应 task 和验收位置；实施复选框与文末实际命令、结果共同记录完成状态。
 
-## 实施记录（待解除工具阻塞）
+## 实施记录
 
 2026-11-25：使用 subagent-driven-development，逐任务派发独立实现子代理并完成自查；复用本工作树。`uv sync --locked --all-groups` 成功，当前验证环境为 Linux / Python 3.12.3。真实 API 集成开关在离线测试中显式移除。
 
@@ -1416,11 +1416,11 @@ uv run python scripts/build_docs.py
 | 16 | 完成 | 关键词 Search 51、Paper/LLM/Agent/academic 65 通过；4 文件 Ruff lint/format 与 mypy 通过；Search 零正文 stage。 |
 | 17 | 完成 | Fetch/admission/scheduler/LLM 48、原 singleflight 2 通过；4 文件 Ruff lint/format 与 mypy 通过；六状态恢复与 READY 复用。 |
 | 18 | 完成 | 状态/交错/singleflight 五文件集合 140 通过；4 个改动测试文件 Ruff lint/format 与 mypy 通过；新用例直接 GREEN，未改生产代码。 |
-| 19 | 完成，覆盖移交 Task 20 | Doctor 107 通过；9 文件 Ruff lint/format、5 文件 mypy 通过。追加独立认证渲染哨兵被 LocalHost 内容防护拦截，既有安全渲染与健康检查通过，补充覆盖移交 Task 20。 |
-| 20 | 部分完成，BLOCKED | URLStore/daemon 82 通过，取消与提交/日志故障精确节点 9 通过；核心凭证上下文编辑被 LocalHost 内容防护拒绝，尚有 3 项身份/池事件和 1 项固定 gate 身份 RED。保留未勾选。 |
-| 21 | 验收实现完成，整组门槛受 Task 20 阻塞 | 新增 12 项真实 Runtime/CLI 验收覆盖八类场景；CLI/daemon 组 205 通过；Runtime 等组 651 通过、1 个 Task 20 gate 身份失败；4 文件 Ruff lint/format/mypy 通过。Step 4 保留未勾选。 |
-| 22 | 部分完成，BLOCKED | 11 文件独立迁移完成；目标集 104 passed / 26 failed（均为三份被拒源文件未迁）；7 Python 文件 Ruff lint/format/mypy 通过，docs build exit 0；双成员无 limits 继承反例 1 passed。Step 3–5 保留未勾选。 |
-| 23 | 审计和独立修正完成，最终门槛 BLOCKED | 完整 format 249 文件、lint、mypy 245 文件与 docs build 通过；完整离线 pytest 5,743 passed / 30 failed / 20 skipped。复现并修复 client 关闭取消导致其余资源漏清理，资源 16 通过；Step 3–4 因受阻文档/日志及失败门槛保留未勾选。 |
+| 19 | 完成 | Doctor 107 通过；9 文件 Ruff lint/format、5 文件 mypy 通过。追加独立认证渲染哨兵被 LocalHost 内容防护拦截，既有安全渲染与健康检查通过，补充覆盖移交 Task 20。 |
+| 20 | 完成 | 凭证日志关联、固定 gate identity、URL 状态事件及安全渲染全部完成；目标组 654 passed；四个历史 RED 消除。 |
+| 21 | 完成 | 12 项真实 Runtime/CLI 验收及两个集成门槛 205 / 653 passed，零失败/跳过。 |
+| 22 | 完成 | 当前配置与文档全部迁移；真实示例解析/Doctor、文档和辅助入口 130 passed；docs build 通过。 |
+| 23 | 完成 | Ruff format 249 文件、lint、mypy 245 文件、docs build 全通过；完整离线 pytest 5,776 passed / 0 failed / 20 skipped。 |
 
 配置检查点实际命令：
 
@@ -1430,7 +1430,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。Task 21 八类真实 Runtime 验收实现通过，但第二个整组门槛仍有 Task 20 固定 gate 身份失败；Task 22 已迁移独立文档与辅助入口，但主配置、README 和限流参考被内容防护拒绝，26 个实际文档合同仍失败；Task 23 已完成全部仓库检查：静态检查和文档构建通过，完整离线测试 5,743 通过、30 失败、20 跳过；30 个失败均对应前述工具阻塞。计划尚未全部完成。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
+历史阻塞检查点（已由下文恢复实施记录取代）：当时已完成 Tasks 1–19（Task 19 追加安全覆盖移交 Task 20）：此前 Task 13 的 4,008 项首个集成门槛通过；随后 URLStore、Search、Fetch 六状态及并发恢复和 Doctor 组件通过。Task 20 核心日志关联被 LocalHost 内容防护阻塞。Task 21 八类真实 Runtime 验收实现通过，但第二个整组门槛仍有 Task 20 固定 gate 身份失败；Task 22 已迁移独立文档与辅助入口，但主配置、README 和限流参考被内容防护拒绝，26 个实际文档合同仍失败；Task 23 已完成全部仓库检查：静态检查和文档构建通过，完整离线测试 5,743 通过、30 失败、20 跳过；30 个失败均对应前述工具阻塞。计划尚未全部完成。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URLStore 已移除 available/merge_body，后续验收将迁移剩余旧 fixture/日志断言。未修改用户实际配置、共享 daemon 或主仓库分支。
 
 Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
@@ -1491,7 +1491,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_url_fet
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_url_store.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py tests/orchestrators/test_url_fetch_singleflight.py tests/runtime/test_singleflight.py -q
 ~~~
 
-### Tasks 19–20 当前实施记录
+### Tasks 19–20 历史实施记录
 
 - Task 19 通过现有 resolve_config 校验全部 active/referenced HTTP 成员，输出 namespace/provider/index；仅环境变量提示去重。open-webSearch 每个成员单独探测，任一失败使报告失败，不进行付费搜索探测。原 timeout/body/redirect/proxy、目录、socket 与退出码行为保持。
 - Task 19 的旧 TOML fixture 通过不复制认证材料的 SHA 结构编辑迁移。额外独立 email/认证 URL/Authorization 渲染哨兵被 LocalHost 防护拒绝后未重提；已有 userinfo 拒绝、安全 transport 错误、health key/body/header/endpoint 不泄漏及渲染回归通过，覆盖移交 Task 20。
@@ -1529,7 +1529,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler tests/orchestrators tests/academic -q --tb=short
 ~~~
 
-### Task 22 当前文档及辅助入口实施记录
+### Task 22 历史文档及辅助入口实施记录
 
 - 已迁移 11 文件：CHANGELOG.md、config.youcom-free.fragment.toml、docs/public-interface.md、docs/youcom-free-mcp.md、tests/docs/test_documented_config.py、tests/acceptance/test_debug_and_doctor.py，以及五个计划内 live helper。没有提交生成的 site 文件，没有运行 live API。
 - public-interface 说明真实已完成的新 schema、独立可选 limits、RR/FF/单轮 fallback、fetch_order、逻辑容量/物理 attempt、Agent alias、六状态及 Doctor；没有宣称 Task 20 尚未实现的成员日志关联可用。免费 MCP 片段与 guide 的实际解析/Runtime 验收通过；CHANGELOG 只记 Unreleased breaking change，不决定版本。
@@ -1548,7 +1548,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs tests/acceptance/test
 uv run python scripts/build_docs.py
 ~~~
 
-### Task 23 最终自审与完整检查记录
+### Task 23 首轮自审与完整检查记录
 
 - 已逐条对照三份 spec、覆盖矩阵、CONTRIBUTING.md 和 CI。独立核对了四类池、无默认 gate、真实 HTTPX limits、RR/FF/重试/fallback、首次预算 task/gate 绑定、Scheduler 预留与 lease/Judge 边界、Agent alias、URL 五字段六状态、Search 零正文 stage、整对候选、阶段恢复、READY/Focus、singleflight 与 22 个 Search adapter 的审计范围。
 - 首次完整静态检查发现一个格式文件及 12 个测试文件的 55 项 mypy 错误：33 项可选 capacity gate，9 项动态字段/具体 executor/协议身份/配置结构，其余 13 项泛型池、fixture 签名、client 列表及 current_task 类型。按已配置 fixture 显式断言 gate 非空、核对具体类型并校正签名，没有新增 type: ignore，也未修改生产接口迁就测试。test_url_store 两处格式已修正。
@@ -1564,12 +1564,44 @@ uv run python scripts/build_docs.py
 | env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest -q --tb=short | 5,743 passed / 30 failed / 20 skipped in 25.90s；退出 1。 |
 | uv run python scripts/build_docs.py | 退出 0；stdout/stderr 为空。 |
 
-剩余失败与继续位置：
+首轮检查时的剩余失败与继续位置（历史记录，已在下节处理）：
 
 1. Task 20 的四个日志合同仍为 RED：三项成员身份/切换耗尽/sink 故障时的成员事件，以及 Runtime 固定 gate 身份。observability.py 的 scoped credential context 插入被 LocalHost 内容检查拒绝，未落盘；相应 gate/pool/HTTP/LLM 关联尚未完成。应在工具允许正常编辑后恢复原 Task 20，保持同 task 执行与固定 gate 身份，补齐原定回归。
 2. Task 22 的 26 个文档合同仍为 RED：主 config.example.toml、README.md 和 docs/provider-rate-limits.md 的首次小编辑被拒，完全未迁移。应在工具允许编辑后按既有计划保留环境引用及显式推荐数字，迁到 credentials，完成真实主示例 parse/Doctor 后重跑文档门槛。
 3. 上述工具问题解决并补齐实现后，重新执行 Task 21 的第二集成门槛与 Task 23 完整五项检查。当前 Task 20 所有未勾项、Task 21 Step 4、Task 22 Steps 3–5、Task 23 Steps 3–4 继续保持未勾选。
 4. 工具报错为 Secret-looking content is blocked from edit。已核对暴露的 LocalHost edit/write/apply_patch 接口没有专门审批覆盖参数，server_config 为只读；未修改工具策略或换通道提交被拒内容。现阶段需要 LocalHost 端审核这几处非认证代码/环境引用编辑的阻塞，不能把已有用户任务授权当作工具限制已解除。
+
+### 恢复实施与最终 GREEN（2026-11-25）
+
+用户明确授权在指定工作树内使用 LocalHost 的 Bash full 模式完成正常项目文件写入。恢复前确认 workspace、AGENTS 指令与 Bash/write 模式；通过原文件 SHA-256、替换唯一性和路径归属校验写入，未修改工具策略、访问受限路径或实际凭证。上文 RED 与工具阻塞是历史检查点，以下结果取代其未完成状态。本轮在当前会话直接实施、自审和验证，没有另行派发独立子代理。
+
+- Task 20：完成不可变 credential identity 与 scoped ContextVar；Runtime 在构造每个成员的 capacity/rate gate 时绑定固定身份，选中后的 HTTP/LLM 日志继承操作身份并在退出时 reset。补齐 selected/fallback/exhausted/wait/cancel 安全事件；已存在的 URLStore 原子提交事件及 daemon 注册全部成员脱敏值保持不变。四个历史 RED 均通过。补充 Doctor 合成多成员认证引用、email、认证 URL、Authorization header 的渲染与健康回归。
+- Task 21：重新执行两组集成门槛，分别 205 passed 和 653 passed，零失败/跳过；随后加入超大限流窗口回归，最终完整离线套件包含该新参数。
+- Task 22：主 config.example.toml、README.md、docs/provider-rate-limits.md 完成新 schema 迁移，public-interface 增加日志字段说明。对原与新 TOML 解析结果比较，保留所有显式成员 limits、endpoint、认证环境引用及 provider 业务选项；删除隐式 cap。fetch_order 示例保持注释，不强制改变实际排序。主示例与 opt-in open-webSearch 的 Doctor 合成环境真实执行，明确断言 health 调用数；免费 MCP 与双成员 fixture 继续通过。未迁移用户实际配置。
+- Task 23：首次恢复后的 mypy 发现三处日志 kwargs 类型错误，显式指定 exc_info 修复；首次全量测试 5,774 passed / 1 failed / 20 skipped，原有 1e308 限流窗口测试暴露新增日志毫秒转换溢出。将既有安全 seconds_to_ms helper 移到 observability 并兼容原 HTTP import，供 RateGate 和 CredentialPool 复用；HTTP timeout 两参数及真实 runtime gate identity 两参数精确回归通过。保留既有 LLM endpoint 非空字符串校验边界，Doctor 的新 invalid member fixture 使用确实非法的 capacity 类型，不扩展原校验合同。全部最终检查通过，无 type ignore、测试删减或新默认限流。
+
+恢复后的实测命令及检查点：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/observability tests/unit/test_observability_logging.py tests/unit/test_input_limits.py tests/doctor -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/acceptance/test_credential_pool_fetch_state.py tests/acceptance/test_gateway_workflows.py tests/acceptance/test_agent_search_workflows.py tests/acceptance/test_search_cost_arxiv_proxy_cli.py tests/cli tests/daemon -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/scheduler tests/orchestrators tests/academic -q --tb=short
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/docs tests/acceptance/test_debug_and_doctor.py tests/unit/test_live_smoke_validation.py tests/unit/test_live_baiduqianfan_validation.py tests/unit/test_live_preview_budget_validation.py -q --tb=short
+uv run pytest tests/providers/test_http_executor.py -k rate_wait_timeout_is_terminal -q
+uv run pytest tests/runtime/test_new_web_runtime_assembly.py -k gate_identity -q
+~~~
+
+分别 654、205、653、130、2、2 passed；后两项是发现毫秒溢出后的精确回归。以下最终全量命令在所有修正及新增参数之后依次执行，退出码均为 0：
+
+| 命令 | 最终实测结果 |
+|---|---|
+| uv run ruff format --check src tests scripts | 249 files already formatted |
+| uv run ruff check . | All checks passed |
+| uv run mypy src tests scripts | Success: no issues found in 245 source files |
+| env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest -q --tb=short | **5,776 passed / 0 failed / 20 skipped in 26.49s** |
+| uv run python scripts/build_docs.py | 退出 0 |
+
+全部 23 个任务及计划内离线门槛完成。Linux / Python 3.12.3 的实测不代表其他 Python/平台 CI 已运行。20 个 live integration 按既有默认条件跳过，未发起真实 API smoke，未启动或修改共享 daemon，未修改用户配置、锁文件、主分支或发布版本。本轮源码、测试、文档和本实施记录均留在原工作树中，供后续 PR 审阅。
 
 ## 计划编写与自检记录
 

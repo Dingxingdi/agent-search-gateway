@@ -1,16 +1,23 @@
 # Match the example policy to your account. See docs/provider-rate-limits.md for sources.
-# rate_limits counts attempts across Search, Fetch and retries for the same provider.
+# rate_limits counts physical attempts across Search, Fetch and retries for each credential.
+# Every HTTP provider uses one or more credentials entries; limits are optional per entry.
+# No aggregate or default concurrency/rate limit is applied.
+# Add additional entries with the same array-table header and optional credential_strategy
+# (round_robin by default, or fill_first). A member exhausts its retries before fallback.
 # All HTTP Web, academic, OA and LLM provider tables accept use_proxy (boolean, default true).
 # true honors HTTPX environment proxies/NO_PROXY; false connects directly with TLS verification.
 # Both modes keep SSL_CERT_FILE (preferred) / SSL_CERT_DIR CA settings. Restart after edits.
 [web_providers]
-default_max_concurrency = 3
+# Optional fetch priority; unlisted enabled Fetch providers follow in declaration order.
+# fetch_order = ["jina", "firecrawl", "tavily"]
 
 [web_providers.tavily]
-# Development key.
-rate_limits = [{ requests = 100, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.tavily.credentials]]
+# Development key.
+rate_limits = [{ requests = 100, period_seconds = 60 }]
 api_url = "https://api.tavily.com"
 api_key_env = "TAVILY_API_KEY"
 
@@ -21,66 +28,80 @@ search_limit = 10
 search_highlights = true
 scrape_formats = ["markdown"]
 scrape_parsers = []
-# Authenticated Free Search and Scrape, each 10/min. Browser workers use a separate queue.
-rate_limits = [{ requests = 10, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.firecrawl.credentials]]
+# Authenticated Free Search and Scrape, each 10/min. Browser workers use a separate queue.
+rate_limits = [{ requests = 10, period_seconds = 60 }]
 api_url = "https://api.firecrawl.dev"
 api_key_env = "FIRECRAWL_API_KEY"
 
 [web_providers.exa]
-# Free ordinary Search is stricter than Contents. Both share this window.
-rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.exa.credentials]]
+# Free ordinary Search is stricter than Contents. Both share this window.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 api_url = "https://api.exa.ai"
 api_key_env = "EXA_API_KEY"
 
 [web_providers.linkup]
-# API-key Search and Fetch share an organization limit.
-rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.linkup.credentials]]
+# API-key Search and Fetch share an organization limit.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 api_url = "https://api.linkup.so"
 api_key_env = "LINKUP_API_KEY"
 
 [web_providers.brave]
-# Search Prepaid, including free credits. Other Search plans may differ.
-rate_limits = [{ requests = 50, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.brave.credentials]]
+# Search Prepaid, including free credits. Other Search plans may differ.
+rate_limits = [{ requests = 50, period_seconds = 1 }]
 api_url = "https://api.search.brave.com"
 api_key_env = "BRAVE_API_KEY"
 
 [web_providers.anysearch]
-# Registered Free with API key, up to 10 QPS. Check your plan.
-rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.anysearch.credentials]]
+# Registered Free with API key, up to 10 QPS. Check your plan.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 api_url = "https://api.anysearch.com"
 api_key_env = "ANYSEARCH_API_KEY"
 
 [web_providers.tinyfish]
+enable_search = true
+enable_fetch = true
+
+[[web_providers.tinyfish.credentials]]
 # Free Search and single-URL Fetch. The third window counts a rolling day locally.
 rate_limits = [
   { requests = 30, period_seconds = 60 },
   { requests = 500, period_seconds = 3600 },
   { requests = 1000, period_seconds = 86400 },
 ]
-enable_search = true
-enable_fetch = true
 search_api_url = "https://api.search.tinyfish.ai"
 fetch_api_url = "https://api.fetch.tinyfish.ai"
 api_key_env = "TINYFISH_API_KEY"
 
 [web_providers.parallel]
-# Keyed Build API Search and Extract. Launch MCP has a different policy.
-rate_limits = [{ requests = 600, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
+mode = "turbo"
+
+[[web_providers.parallel.credentials]]
+# Keyed Build API Search and Extract. Launch MCP has a different policy.
+rate_limits = [{ requests = 600, period_seconds = 60 }]
 api_url = "https://api.parallel.ai"
 api_key_env = "PARALLEL_API_KEY"
-mode = "turbo"
 
 [web_providers.parallel.search_fetch_policy]
 max_age_seconds = 3600
@@ -93,77 +114,96 @@ timeout_seconds = 30
 disable_cache_fallback = true
 
 [web_providers.brightdata]
-# Unfunded Free Tier sharing the SERP and Web Unlocker zones. Check your account.
-rate_limits = [{ requests = 1000, period_seconds = 60 }]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.brightdata.credentials]]
+# Unfunded Free Tier sharing the SERP and Web Unlocker zones. Check your account.
+rate_limits = [{ requests = 1000, period_seconds = 60 }]
 api_url = "https://api.brightdata.com"
 api_key_env = "BRIGHTDATA_API_KEY"
 search_zone = "example_serp_zone"
 fetch_zone = "example_unlocker_zone"
 
 [web_providers.scrape_do]
-# Free synchronous API.
-max_concurrency = 5
 # Search may return google.com/goto wrappers instead of destination URLs (issue #74).
 # See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
 enable_fetch = true
+
+[[web_providers.scrape_do.credentials]]
+# Free synchronous API.
+max_concurrency = 5
 api_url = "https://api.scrape.do"
 api_key_env = "SCRAPE_DO_API_KEY"
 
 [web_providers.scraperapi]
-# Free concurrent connections.
-max_concurrency = 5
 # Search may return google.com/goto wrappers instead of destination URLs (issue #74).
 # See README.md#known-provider-limitations; search can be disabled independently of fetch.
 enable_search = true
 enable_fetch = true
+
+[[web_providers.scraperapi.credentials]]
+# Free concurrent connections.
+max_concurrency = 5
 api_url = "https://api.scraperapi.com"
 api_key_env = "SCRAPER_API_KEY"
 
 [web_providers.scrapingant]
-# Free active request limit.
-max_concurrency = 1
 enable_search = false
 enable_fetch = true
+
+[[web_providers.scrapingant.credentials]]
+# Free active request limit.
+max_concurrency = 1
 api_url = "https://api.scrapingant.com"
 api_key_env = "SCRAPINGANT_API_KEY"
 
 [web_providers.serpapi]
-# Free hourly throughput. Each local attempt counts.
-rate_limits = [{ requests = 50, period_seconds = 3600 }]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.serpapi.credentials]]
+# Free hourly throughput. Each local attempt counts.
+rate_limits = [{ requests = 50, period_seconds = 3600 }]
 api_url = "https://serpapi.com"
 api_key_env = "SERP_API_KEY"
 
 [web_providers.jina]
-# Anonymous Reader.
-rate_limits = [{ requests = 20, period_seconds = 60 }]
 enable_search = false
 enable_fetch = true
+
+[[web_providers.jina.credentials]]
+# Anonymous Reader.
+rate_limits = [{ requests = 20, period_seconds = 60 }]
 api_url = "https://r.jina.ai"
 
 # New providers are opt-in; enable Search and Fetch independently.
 [web_providers.doubao]
+enable_search = false
+enable_fetch = false
+
+[[web_providers.doubao.credentials]]
 # Default Custom Search account only. The free-only fixed rate is unpublished.
 # Fetch needs a pay-as-you-go key and has a console-specific limit. Lower this if needed.
 rate_limits = [{ requests = 10, period_seconds = 1 }]
-enable_search = false
-enable_fetch = false
 api_url = "https://open.feedcoopapi.com/search_api"
 api_key_env = "DOUBAO_API_KEY"
 
 [web_providers.youcom]
+enable_search = false
+enable_fetch = false
+
+[[web_providers.youcom.credentials]]
 # Self-serve REST Search and Contents; this 10 QPS example applies to REST.
-# To use free MCP instead, REPLACE this entire table with the commented block below.
-# Delete api_key_env when switching; an existing YDC_API_KEY environment value is ignored.
-# Do not append a second [web_providers.youcom] table.
+# To use free MCP instead, REPLACE this provider and its credential array with the commented block below.
+# The free member must omit api_key_env; an existing YDC_API_KEY environment value is ignored.
+# Do not append a second [web_providers.youcom] table. Mixed REST/MCP entries are selected by the pool strategy.
 # BEGIN You.com free MCP replacement
 # [web_providers.youcom]
 # enable_search = true
 # enable_fetch = true
+# [[web_providers.youcom.credentials]]
 # api_url = "https://api.you.com/mcp/free"
 # END You.com free MCP replacement
 # Public free quota as of 2026-11-21: 100 queries/day; the provider may change it.
@@ -171,23 +211,22 @@ api_key_env = "DOUBAO_API_KEY"
 # Local rate_limits do not track the upstream balance or a daily quota across processes.
 # Choose any local MCP rate policy for your needs; the REST example below is not its limit.
 rate_limits = [{ requests = 10, period_seconds = 1 }]
-enable_search = false
-enable_fetch = false
 api_url = "https://ydc-index.io"
 api_key_env = "YDC_API_KEY"
 
 [web_providers.keenable]
-# Authenticated organization, shared by all keys and both endpoints.
-rate_limits = [{ requests = 10, period_seconds = 1 }]
 enable_search = false
 enable_fetch = false
+
+[[web_providers.keenable.credentials]]
+# Authenticated organization, shared by all keys and both endpoints.
+rate_limits = [{ requests = 10, period_seconds = 1 }]
 api_url = "https://api.keenable.ai"
 api_key_env = "KEENABLE_API_KEY"
 
 [web_providers.open_websearch]
 enable_search = false
 enable_fetch = false
-api_url = "http://127.0.0.1:3210"
 # User-editable example, not a built-in default or engine availability guarantee.
 # Omit engines to use the daemon's single default; explicit engines share limit=50.
 engines = [
@@ -195,34 +234,40 @@ engines = [
   "exa", "keenable", "csdn", "juejin", "hackernews",
 ]
 
+[[web_providers.open_websearch.credentials]]
+api_url = "http://127.0.0.1:3210"
+
 [web_providers.baiduqianfan]
+enable_search = false
+enable_fetch = false
+
+[[web_providers.baiduqianfan.credentials]]
 # Every logical search calls both Web Search and Agentic Search. Retries add physical attempts.
 # This conservative shared window does not enforce free billing quotas.
 rate_limits = [{ requests = 3, period_seconds = 1 }]
-enable_search = false
-enable_fetch = false
 api_url = "https://qianfan.baidubce.com"
 api_key_env = "BAIDUQIANFAN_API_KEY"
 
 [web_providers.yuanbao]
-# Unknown provisioned edition: Flagship allows 5 QPS, Fast and Standard allow 20.
-rate_limits = [{ requests = 5, period_seconds = 1 }]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.yuanbao.credentials]]
+# Unknown provisioned edition: Flagship allows 5 QPS, Fast and Standard allow 20.
+rate_limits = [{ requests = 5, period_seconds = 1 }]
 api_url = "https://api.wsa.cloud.tencent.com"
 api_key_env = "YUANBAO_API_KEY"
 
 [web_providers.zhihu]
 use_proxy = false
 # Zhihu publishes no common fixed QPS. Its account quotas do not establish a request rate.
-# This provider inherits default_max_concurrency and the existing HTTP 429 retry policy.
+# No fixed local cap or rate is implied; configure a member limit if needed. HTTP 429 retries still apply.
 enable_search = true
 enable_fetch = false
+
+[[web_providers.zhihu.credentials]]
 api_url = "https://developer.zhihu.com"
 api_key_env = "ZHIHU_ACCESS_SECRET"
-
-[academic_providers]
-default_max_concurrency = 3
 
 [academic_providers.arxiv]
 use_proxy = true
@@ -230,57 +275,71 @@ query_fields = ["ti", "abs"]
 max_results = 10
 sort_by = "relevance"
 sort_order = "descending"
+enabled = true
+
+[[academic_providers.arxiv.credentials]]
 # Legacy API courtesy rules: one connection and three seconds between requests.
 max_concurrency = 1
 min_interval_seconds = 3
-enabled = true
 api_url = "https://export.arxiv.org/api/query"
 
 [academic_providers.semantic_scholar]
+enabled = true
+
+[[academic_providers.semantic_scholar.credentials]]
 # Initial keyed rate. Anonymous use shares a pool and has no dedicated allowance.
 rate_limits = [{ requests = 1, period_seconds = 1 }]
-enabled = true
 api_url = "https://api.semanticscholar.org/graph/v1"
 # Optional:
 # api_key_env = "SEMANTIC_SCHOLAR_API_KEY"
 
 [academic_providers.openalex]
+enabled = true
+
+[[academic_providers.openalex.credentials]]
 # Free key and ordinary works search. Space all attempts for complex Boolean queries.
 rate_limits = [{ requests = 30, period_seconds = 1 }]
 min_interval_seconds = 0.5
-enabled = true
 api_key_env = "OPENALEX_API_KEY"
 api_url = "https://api.openalex.org"
 # Optional:
 # contact_email_env = "OPENALEX_CONTACT_EMAIL"
 
 [academic_providers.dblp]
+enabled = true
+
+[[academic_providers.dblp.credentials]]
 # Courtesy interval. No published fixed window.
 min_interval_seconds = 2
-enabled = true
 api_url = "https://dblp.org/search/publ/api"
 
 [academic_providers.crossref]
+enabled = true
+
+[[academic_providers.crossref.credentials]]
 # Conservative public works-list settings, including when contact email is supplied.
 rate_limits = [{ requests = 1, period_seconds = 1 }]
 max_concurrency = 1
-enabled = true
 api_url = "https://api.crossref.org"
 # Optional:
 # contact_email_env = "CROSSREF_CONTACT_EMAIL"
 
 [academic_providers.core]
+enabled = true
+
+[[academic_providers.core.credentials]]
 # The single/batch classification of /search/works is unknown. Conservative local policy.
 rate_limits = [{ requests = 1, period_seconds = 10 }]
-enabled = true
 api_url = "https://api.core.ac.uk/v3"
 api_key_env = "CORE_API_KEY"
 
 [oa_resolvers.unpaywall]
 use_proxy = true
+enabled = false
+
+[[oa_resolvers.unpaywall.credentials]]
 # Technical daily request limit, applied only when enabled.
 rate_limits = [{ requests = 100000, period_seconds = 86400 }]
-enabled = false
 api_url = "https://api.unpaywall.org/v2"
 # Required when enabled = true:
 # contact_email_env = "UNPAYWALL_CONTACT_EMAIL"
@@ -290,13 +349,12 @@ api_url = "https://api.unpaywall.org/v2"
 llm_request_body_bytes = 131072
 agent_prompt_bytes = 98304
 
-[llm_providers]
-default_max_concurrency = 2
-
 [llm_providers.openai_main]
 use_proxy = true
 protocol = "openai"
 api_endpoint = "chat_completions"
+
+[[llm_providers.openai_main.credentials]]
 api_url = "https://api.openai.com"
 api_key_env = "OPENAI_API_KEY"
 max_concurrency = 2
@@ -333,7 +391,8 @@ extra_body = {}
 [agent_providers.antigravity_main]
 harness = "antigravity"
 command = "agy"           # One executable name/path, not a shell command with flags.
-max_concurrency = 1       # Positive integer, shared by this alias's invocations.
+max_concurrency = 1       # Optional positive integer; shared by this alias's invocations.
+# rate_limits and min_interval_seconds are optional per alias and count CLI spawns.
 # Representable finite positive seconds; default 300, no Gateway-imposed maximum.
 # Each agy call keeps its configured timeout and Python +5-second protection after quota.
 # Quota waits, both scopes, and OA enrichment can add to total workflow duration.

@@ -5,7 +5,6 @@ import logging
 import math
 import random
 import re
-import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -25,6 +24,9 @@ from ..observability import (
     log_upstream_body_preview,
     make_input_preview_projector,
 )
+from ..observability import (
+    seconds_to_ms as seconds_to_ms,
+)
 from ..rate_limit import RateGate, RateLimitWaitTimeout, consume_initial_rate_budget
 from ..retry import retry_async
 from .diagnostics import (
@@ -32,13 +34,6 @@ from .diagnostics import (
     diagnostic_fields_from_failure,
     safe_diagnostic_fields,
 )
-
-
-def seconds_to_ms(seconds: float) -> int:
-    """Convert finite durations to milliseconds, including very large rate windows."""
-    if seconds >= sys.float_info.max / 1000:
-        return int(seconds) * 1000
-    return max(0, int(seconds * 1000))
 
 
 def is_retryable_http_status(status_code: int) -> bool:

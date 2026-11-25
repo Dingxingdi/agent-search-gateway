@@ -1,6 +1,7 @@
 """Select and reserve members of a logical provider's credential pool."""
 
 import asyncio
+import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence, Set
 from contextlib import asynccontextmanager
@@ -10,6 +11,7 @@ from typing import Generic, Literal, TypeVar
 from .concurrency import CapacityGate, CapacityLease, join_cleanup
 from .config import CredentialStrategy
 from .errors import ErrorCode, ExecutionFailure
+from .observability import CredentialIdentity, credential_context, log_event, seconds_to_ms
 from .rate_limit import RateGate, RateLimitWaitTimeout, SelectionBudget, initial_rate_budget
 
 A = TypeVar("A")
@@ -89,6 +91,21 @@ class CredentialPool(Generic[A]):
         self._cursor = 0
         self._selection_lock = asyncio.Lock()
 
+    def _identity(self, index: int) -> CredentialIdentity:
+        return CredentialIdentity(self.namespace, self.name, index)
+
+    def _log(self, event: str, index: int | None = None, **fields: object) -> None:
+        with credential_context(self._identity(index) if index is not None else None):
+            log_event(
+                logging.getLogger(__name__),
+                logging.DEBUG,
+                event,
+                namespace=self.namespace,
+                provider=self.name,
+                exc_info=False,
+                **fields,
+            )
+
     async def try_reserve(self, attempted: Set[int]) -> CredentialReservation[A] | None:
         async with self._selection_lock:
             size = len(self._members)
@@ -127,12 +144,19 @@ class CredentialPool(Generic[A]):
                     now = self._monotonic()
                     delay = member.rate.next_available_in_seconds()
                     if delay > 0:
+                        self._log(
+                            "credential_waiting",
+                            index,
+                            reason="rate",
+                            estimated_wait_ms=seconds_to_ms(delay),
+                        )
                         ready_at = now + delay
                         if earliest_rate is None or ready_at < earliest_rate:
                             earliest_rate = ready_at
                         continue
                 if member.capacity is None or member.capacity.in_use < member.capacity.limit:
                     return
+                self._log("credential_waiting", index, reason="capacity")
                 full.append(member.capacity)
 
             if not full and earliest_rate is None:
@@ -198,6 +222,7 @@ class CredentialPool(Generic[A]):
                 if len(attempted) == len(self._members):
                     if last_failure is not None:
                         raise last_failure
+                    self._log("credential_exhausted", reason="no_available_credential")
                     raise ExecutionFailure(self._error_code, "No available credential")
                 if reservation is None:
                     reservation = await self.try_reserve(attempted)
@@ -205,22 +230,40 @@ class CredentialPool(Generic[A]):
                     try:
                         await self.wait_available(attempted, budget)
                     except ExecutionFailure:
+                        self._log("credential_exhausted", reason="availability_timeout")
                         if last_failure is not None:
                             raise last_failure from None
                         raise
                     continue
-                attempted.add(reservation.index)
+                index = reservation.index
+                attempted.add(index)
+                self._log("credential_selected", index)
                 async with reservation.consume() as member:
                     try:
-                        with initial_rate_budget(member.rate, budget):
+                        with (
+                            credential_context(self._identity(index)),
+                            initial_rate_budget(member.rate, budget),
+                        ):
                             result = await operation(member.adapter)
                     except ExecutionFailure as exc:
                         last_failure = exc
+                        self._log(
+                            "credential_exhausted"
+                            if len(attempted) == len(self._members)
+                            else "credential_fallback",
+                            index,
+                            reason="execution_failure",
+                        )
                     else:
                         # An ungated adapter may request cancellation and return synchronously.
                         await asyncio.sleep(0)
                         return result
                 reservation = None
+        except asyncio.CancelledError:
+            self._log(
+                "credential_cancelled", reservation.index if reservation is not None else None
+            )
+            raise
         finally:
             if reservation is not None:
                 await reservation.release()

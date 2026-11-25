@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
-from .observability import log_event
+from .observability import CredentialIdentity, credential_context, log_event
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable)
@@ -57,6 +57,7 @@ class CapacityGate:
         quota_kind: str | None = None,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        identity: CredentialIdentity | None = None,
     ) -> None:
         if limit <= 0:
             raise ValueError("capacity limit must be positive")
@@ -66,6 +67,7 @@ class CapacityGate:
         self._provider = provider
         self._quota_kind = quota_kind
         self._logger = logger
+        self._identity = identity
         self._monotonic = monotonic
         self._condition = asyncio.Condition()
 
@@ -112,7 +114,7 @@ class CapacityGate:
     def _log(self, event: str, *, waited_ms: int | None = None) -> None:
         if self._logger is None or self._provider is None or self._quota_kind is None:
             return
-        if waited_ms is None:
+        with credential_context(self._identity):
             log_event(
                 self._logger,
                 logging.DEBUG,
@@ -121,18 +123,9 @@ class CapacityGate:
                 quota_kind=self._quota_kind,
                 in_use=self.in_use,
                 limit=self.limit,
+                exc_info=False,
+                **({"waited_ms": waited_ms} if waited_ms is not None else {}),
             )
-            return
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            event,
-            provider=self._provider,
-            quota_kind=self._quota_kind,
-            in_use=self.in_use,
-            limit=self.limit,
-            waited_ms=waited_ms,
-        )
 
 
 def make_capacity_gate(
@@ -142,11 +135,17 @@ def make_capacity_gate(
     quota_kind: str | None = None,
     logger: logging.Logger | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    identity: CredentialIdentity | None = None,
 ) -> CapacityGate | None:
     if limit is None:
         return None
     return CapacityGate(
-        limit, provider=provider, quota_kind=quota_kind, logger=logger, monotonic=monotonic
+        limit,
+        provider=provider,
+        quota_kind=quota_kind,
+        logger=logger,
+        monotonic=monotonic,
+        identity=identity,
     )
 
 

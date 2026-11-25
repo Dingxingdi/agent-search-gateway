@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
@@ -7,6 +8,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
+from agent_search_gateway.observability import (
+    CredentialIdentity,
+    credential_context,
+    log_event,
+    seconds_to_ms,
+)
 
 
 class RateLimitWaitTimeout(TimeoutError):
@@ -24,6 +31,7 @@ class RateGate:
         *,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        identity: CredentialIdentity | None = None,
     ) -> None:
         self._windows: list[tuple[ResolvedRateWindow, deque[float]]] = [
             (window, deque()) for window in policy.windows
@@ -32,7 +40,15 @@ class RateGate:
         self._last_sent: float | None = None
         self._monotonic = monotonic
         self._sleep = sleep
+        self._identity = identity
         self._lock = asyncio.Lock()
+
+    def _log(self, event: str, **fields: object) -> None:
+        if self._identity is not None:
+            with credential_context(self._identity):
+                log_event(
+                    logging.getLogger(__name__), logging.DEBUG, event, exc_info=False, **fields
+                )
 
     def next_available_in_seconds(self) -> float:
         """Estimate the current wait without reserving a permit or changing history."""
@@ -68,6 +84,7 @@ class RateGate:
             async with self._lock:
                 now = self._monotonic()
                 if has_slept and now > deadline:
+                    self._log("rate_gate_wait_timeout", waited_ms=seconds_to_ms(now - started))
                     raise RateLimitWaitTimeout(now - started)
                 for window, sent in self._windows:
                     while sent and sent[0] + window.period_seconds <= now:
@@ -81,9 +98,12 @@ class RateGate:
                     for _, sent in self._windows:
                         sent.append(now)
                     self._last_sent = now
+                    self._log("rate_gate_acquired", waited_ms=seconds_to_ms(waited))
                     return waited
                 if now >= deadline:
+                    self._log("rate_gate_wait_timeout", waited_ms=seconds_to_ms(now - started))
                     raise RateLimitWaitTimeout(now - started)
+            self._log("rate_gate_waiting", estimated_wait_ms=seconds_to_ms(delay))
             has_slept = True
             wait_started = self._monotonic() if budget is not None else now
             try:
@@ -98,10 +118,11 @@ def make_rate_gate(
     *,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    identity: CredentialIdentity | None = None,
 ) -> RateGate | None:
     if not policy.windows and policy.min_interval_seconds is None:
         return None
-    return RateGate(policy, monotonic=monotonic, sleep=sleep)
+    return RateGate(policy, monotonic=monotonic, sleep=sleep, identity=identity)
 
 
 @dataclass(slots=True)

@@ -123,13 +123,17 @@ async def _build_runtime(
     )
 
 
+@pytest.mark.parametrize("interval", [60.0, 1e308])
 async def test_gate_identity_is_known_before_selection_and_after_release(
-    tmp_path: Path, client_factory: _ClientFactory, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    client_factory: _ClientFactory,
+    caplog: pytest.LogCaptureFixture,
+    interval: float,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="agent_search_gateway")
     name = "open_websearch"
     config = _provider_config(name)
-    config["credentials"] = [{"max_concurrency": 1, "min_interval_seconds": 60}] * 2
+    config["credentials"] = [{"max_concurrency": 1, "min_interval_seconds": interval}] * 2
     runtime = await _build_runtime(tmp_path, {name: config}, client_factory)
     try:
         provider = runtime.web_fetch_providers[0]

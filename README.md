@@ -19,7 +19,7 @@ uv tool install .
 
 For a reproducible installation, check out a specific release tag before running `uv tool install .`. Tagged GitHub Releases also contain a wheel and source distribution built by CI. The repository `uv.lock` controls development and CI; the installed tool environment is resolved independently. PyPI publishing is not configured yet.
 
-Create `~/.config/agent-search-gateway-cli/config.toml` from `config.example.toml` and adjust the enabled providers. Only providers that require credentials use `api_key_env`; export the environment variables named by those entries. The configuration stores environment-variable names only; credential values remain in the daemon process environment.
+Create `~/.config/agent-search-gateway-cli/config.toml` from `config.example.toml` and adjust the enabled providers. Only providers that require credentials use `api_key_env` in the default template; providers with optional authentication may also set it. Export the environment variables named by each credential entry. The configuration stores environment-variable names only; credential values remain in the daemon process environment.
 
 After configuration, run the local health check before starting the foreground daemon:
 
@@ -34,7 +34,7 @@ For detailed daemon tracing, start it in DEBUG mode instead:
 agent-search-gateway start --debug
 ```
 
-`doctor` validates the configuration and required environment variables, checks directory writability, and inspects the gateway Unix socket. It makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A failed probe gives exit code 1. A missing gateway socket is informational (`[info] daemon not running`). A report with only `[ok]` and `[info]` checks gives exit code 0.
+`doctor` validates the configuration and required environment variables, checks directory writability, and inspects the gateway Unix socket. It makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` per configured open-webSearch credential endpoint. Each active or referenced HTTP member is diagnosed by namespace, provider and array index; one failed probe gives exit code 1. A missing gateway socket is informational (`[info] daemon not running`). A report with only `[ok]` and `[info]` checks gives exit code 0.
 
 A healthy response confirms daemon liveness only. Search engine and browser readiness, cloud API key validity, permissions, quotas and service availability, and Agent executable availability and login remain unverified. Some Web provider option values, including their types, are validated when the runtime is built.
 
@@ -64,13 +64,38 @@ Every Web, academic, OA resolver and LLM provider table accepts a strict boolean
 
 For example, the template sets `[web_providers.zhihu] use_proxy = false` and leaves Firecrawl, arXiv, the LLM provider and the OA resolver at `true`. Other HTTP providers accept the same field. This setting does not change external Agent subprocess networking; use the Agent's documented `pass_env` configuration for its environment.
 
-### Provider rate limits and input sizes
+### Credential pools, provider limits and input sizes
 
-For each Web provider, academic provider or OA resolver, set `rate_limits` to an array of `{ requests = N, period_seconds = T }` windows. All configured windows and any `min_interval_seconds` between starts must permit the attempt. Search, Fetch and their retries share the same provider's allowance within the daemon. `max_concurrency` independently limits in-flight work. Omitted windows and spacing impose no local frequency policy.
+Each enabled or referenced Web, academic, OA and LLM provider uses a `credentials` array, even when authentication is not required. Keep capability switches, `use_proxy`, provider-specific shared request options and LLM invocation/model settings at the logical provider level. TinyFish's two endpoint URLs and Bright Data's zones belong to each credential. Put endpoint URLs, authentication environment references, and limits in each credential entry. For example, edit the existing Tavily configuration to use two members:
 
-Local rate waiting is bounded by `[retry].request_timeout_seconds` per attempt. Fetch can use another provider with both rate and concurrency available. If a candidate exhausts its rate-wait budget, Fetch can fall back to the remaining candidates. Waiting solely for concurrency, running another candidate, and server-directed `Retry-After` sleeps are outside that local budget.
+```toml
+[web_providers.tavily]
+enable_search = true
+enable_fetch = true
+credential_strategy = "round_robin" # or "fill_first"
 
-The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 32 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing provider tables to adopt the settings that fit your account.
+[[web_providers.tavily.credentials]]
+api_url = "https://api.tavily.com"
+api_key_env = "TAVILY_API_KEY"
+rate_limits = [{ requests = 100, period_seconds = 60 }]
+
+[[web_providers.tavily.credentials]]
+api_url = "https://api.tavily.com"
+api_key_env = "TAVILY_API_KEY_SECOND"
+# Omitted limits mean no local restriction for this member.
+```
+
+Members may use different compatible endpoint URLs. `round_robin` (the default) rotates among available members; `fill_first` prefers the first available member in array order. A logical operation runs the selected member's existing retry policy before switching to another unattempted member on terminal execution failure. Each member is tried at most once per logical operation, not once per physical HTTP attempt. A successful empty or partial response does not trigger fallback. There is no cross-request credential cooldown or upstream balance tracking.
+
+**Breaking configuration migration:** replace old top-level provider endpoint/authentication/limit fields with a `[[namespace.NAME.credentials]]` entry. Remove every `default_max_concurrency` setting; old layouts are rejected. If you want to retain the old inherited caps, explicitly copy their values into each applicable member. Omission now means unlimited, not an inherited default. No user configuration is rewritten automatically.
+
+In `[web_providers]`, optionally set `fetch_order = ["jina", "firecrawl", "tavily"]`. Only enabled Fetch providers participate; unlisted enabled providers are appended in declaration order. Omit the list to retain declaration-order priority. Search fan-out is unchanged.
+
+For each HTTP credential, optionally set `rate_limits` to an array of `{ requests = N, period_seconds = T }` windows. All configured windows and any `min_interval_seconds` between starts must permit each physical attempt, including retries and internal parallel branches. A member's Search and Fetch operations (or the models and stages of one LLM alias) share that member's gates. `max_concurrency` counts concurrent logical operations, holding capacity through retries. Each omitted limit is unrestricted; there is no provider-wide or global cap, and HTTPX has no active connection cap (20 idle keepalive connections per client). Upstream account and organization limits can still be shared between keys.
+
+Initial member selection and first-permit waiting share a per-provider `[retry].request_timeout_seconds` budget for capacity and rate. Subsequent physical attempts retain their normal rate-wait timeout. Execution, HTTP retries/backoff, and Judge are outside that selection budget. Fetch tries the first provider in priority order with an available member; when none is available it waits for availability rather than dispatching duplicate network requests. A returned body rejected by Judge advances to the next logical provider, not another member of the same provider.
+
+The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 32 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing credential entries to adopt the settings that fit your account.
 
 Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the complete serialized LLM JSON body, and `agent_prompt_bytes` defaults to **98304** for the single serialized Agent prompt argument. Both measure UTF-8 bytes. Token counts depend on the model. For oversized input the gateway keeps approximately 80% of the retained variable text from its head and 20% from its tail, with an omission marker. It preserves the system instructions, template and protected user focus. If the protected content and required framing cannot fit, preparation fails with `input_budget_unfit` before any send or spawn.
 
@@ -106,9 +131,9 @@ Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the 
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
-Jina Reader is a credential-free, fetch-only provider, so its configuration must omit `api_key_env`. Each actual Jina Reader request sends `X-No-Cache: true` to refresh Reader-side content. This does not bypass content already prepared by the gateway: an admitted URL whose body is already prepared still short-circuits before provider dispatch, and the gateway exposes no force-refresh option. Configuration order remains fetch-provider priority, so place Jina earlier when free-first behavior is desired.
+Jina Reader is a credential-free, fetch-only provider, so its configuration must omit `api_key_env`. Each actual Jina Reader request sends `X-No-Cache: true` to refresh Reader-side content. This does not bypass content already prepared by the gateway: an admitted URL whose body is already prepared still short-circuits before provider dispatch, and the gateway exposes no force-refresh option. Use `fetch_order` to give Jina priority when free-first behavior is desired.
 
-Web search and fetch stages for the same provider share one concurrency quota. LLM provider transports have their own independent quotas.
+Search and Fetch share the same logical provider's credential pool; each member has its own optional gates. LLM aliases likewise share their pool across models and stages.
 
 #### Firecrawl search and explicit fetch
 
@@ -132,7 +157,7 @@ These four examples are disabled by default. Set `enable_search = true` and/or
 each capability independently. The REST configurations below use an API root;
 their adapters add the Search or Fetch path. You.com's free MCP alternative
 uses the complete endpoint shown below, without appending a REST path. Existing
-timeout and retry settings in `[retry]` and provider `max_concurrency` continue
+timeout and retry settings in `[retry]` and credential `max_concurrency` continue
 to apply.
 
 | Provider name | API root | Credential or service prerequisite |
@@ -143,17 +168,19 @@ to apply.
 | `open_websearch` | `http://127.0.0.1:3210` | Omit `api_key_env`; run your own open-webSearch HTTP daemon before enabling it. |
 
 For You.com, choose either the existing keyed REST configuration or free MCP.
-Replace the entire existing `[web_providers.youcom]` table with this free
+Replace the entire existing `[web_providers.youcom]` table and its credentials array with this free
 alternative; do not append a duplicate table:
 
 ```toml
 [web_providers.youcom]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.youcom.credentials]]
 api_url = "https://api.you.com/mcp/free"
 ```
 
-Delete its `api_key_env` line. An existing `YDC_API_KEY` environment variable may
+Omit `api_key_env` from the free MCP member. An existing `YDC_API_KEY` environment variable may
 remain; it is not automatically used without `api_key_env`. Explicit credentials
 on the free endpoint are rejected before HTTP. REST still uses its configured root
 and key; Fetch calls the separate `/v1/contents` API with its existing billing and
@@ -165,7 +192,7 @@ publishes 100 free queries per day; this external quota may change. Local
 `rate_limits` are not a remaining-balance meter or a daily quota ledger shared
 across processes. The existing REST 10 QPS example is not an official MCP limit.
 Free MCP failures follow existing Search fan-out and Fetch fallback through other
-configured providers, without automatically switching to paid You.com REST.
+configured providers, without switching to paid You.com REST unless you explicitly configure a REST member in the same pool. Mixed REST/MCP members follow the configured selection strategy; round_robin can select REST even before any MCP failure.
 See the [free MCP guide](docs/youcom-free-mcp.md) and
 [replacement fragment](config.youcom-free.fragment.toml) for configuration and checks.
 No new provider name, mode, SDK, or MCP service deployment is required.
@@ -178,8 +205,10 @@ or a supported-engine enumeration. For a smaller selection, edit the existing bl
 [web_providers.open_websearch]
 enable_search = false
 enable_fetch = false
-api_url = "http://127.0.0.1:3210"
 engines = ["bing", "duckduckgo"]
+
+[[web_providers.open_websearch.credentials]]
+api_url = "http://127.0.0.1:3210"
 ```
 
 The gateway passes the configured list to one daemon Search request, with a fixed
@@ -217,6 +246,8 @@ it is absent, or edit its existing block:
 [web_providers.baiduqianfan]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.baiduqianfan.credentials]]
 api_url = "https://qianfan.baidubce.com"
 api_key_env = "BAIDUQIANFAN_API_KEY"
 rate_limits = [{ requests = 3, period_seconds = 1 }]
@@ -228,7 +259,7 @@ Retries add physical attempts, and both APIs share the configured 3/1s local
 window. Other clients can consume the same upstream allowance, so the local
 limit cannot guarantee free billing quotas or prevent charges.
 
-Web Search supplies summaries only. Agentic Search web-page `raw_content` passes through the existing `cheap_check` and `judge` checks during Search. Retained raw content later passes through `content_clean` and `safety` during Fetch. Media results retain an HTTP(S) link, title, and snippet; the gateway does not
+Web Search supplies summaries only. Agentic Search can naturally return web-page `raw_content`; Search retains that candidate without cheap_check, Judge, Clean, or Safety. The first explicit Fetch judges it, cleans raw-only content if needed, and checks safety. Media results retain an HTTP(S) link, title, and snippet; the gateway does not
 download or transcribe media.
 
 #### Enabling Zhihu and Yuanbao
@@ -239,6 +270,8 @@ Existing user configurations are not automatically updated when the package or t
 [web_providers.yuanbao]
 enable_search = true
 enable_fetch = false
+
+[[web_providers.yuanbao.credentials]]
 api_url = "https://api.wsa.cloud.tencent.com"
 api_key_env = "YUANBAO_API_KEY"
 
@@ -246,6 +279,8 @@ api_key_env = "YUANBAO_API_KEY"
 use_proxy = false
 enable_search = true
 enable_fetch = false
+
+[[web_providers.zhihu.credentials]]
 api_url = "https://developer.zhihu.com"
 api_key_env = "ZHIHU_ACCESS_SECRET"
 ```
@@ -269,17 +304,19 @@ TinyFish uses separate public Search and Fetch services. In an existing `~/.conf
 
 ```toml
 [web_providers.tinyfish]
+
+[[web_providers.tinyfish.credentials]]
 search_api_url = "https://api.search.tinyfish.ai"
 fetch_api_url = "https://api.fetch.tinyfish.ai"
 ```
 
-Edit these two keys in the existing provider block; keep its credential reference and enable flags unchanged. Upgrading the package or changing `config.example.toml` does not update an existing user configuration. Restart the daemon after updating its configuration; restarting clears in-memory URL admission and cached content, so search again before using `url-fetch`. Deliberately configured custom endpoints remain supported and are not automatically rewritten.
+Edit these two keys in each existing TinyFish credential entry; keep its authentication reference and provider enable flags unchanged. Upgrading the package or changing `config.example.toml` does not update an existing user configuration. Restart the daemon after updating its configuration; restarting clears in-memory URL admission and cached content, so search again before using `url-fetch`. Deliberately configured custom endpoints remain supported and are not automatically rewritten.
 
 #### Known provider limitations
 
 Bright Data SERP Search has also occasionally returned HTTP 200 responses followed by JSON parsing failures. The cause remains unconfirmed. If this occurs, retry the search or choose another provider. This release documents the observation without fixing it or adding JSON-parse retries. This is a separate known limitation from the response-header checks described under DEBUG tracing.
 
-ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in organic search results; [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) documents the observed limitation. At the shared keyword-result entry point, the gateway unwraps absolute HTTP(S) URLs whose hostname is exactly `google.com` or `www.google.com`, path is exactly `/goto`, and query contains exactly one `url` parameter with a valid HTTP(S) destination. It decodes that query value once, before normal URL normalization, deduplication, admission, and cached-body merging, so later `url-fetch` uses the destination identity.
+ScraperAPI (`scraperapi`) and Scrape.do (`scrape_do`) can return Google `google.com/goto` wrapper URLs in organic search results; [issue #74](https://github.com/Dingxingdi/agent-search-gateway/issues/74) documents the observed limitation. At the shared keyword-result entry point, the gateway unwraps absolute HTTP(S) URLs whose hostname is exactly `google.com` or `www.google.com`, path is exactly `/goto`, and query contains exactly one `url` parameter with a valid HTTP(S) destination. It decodes that query value once, before normal URL normalization, deduplication, and admission of any naturally supplied body candidate, so later `url-fetch` uses the destination identity.
 
 A recognized wrapper with a missing, duplicate, empty, malformed, or unsafe destination is discarded individually. Unknown URL shapes, including unsupported opaque formats outside this rule, pass through unchanged to the existing URL rules. The gateway does not follow network redirects, recursively unwrap destinations, or decode opaque tokens. This shared rule covers matching links from every keyword provider; it does not rewrite LLM, Agent, or paper-search URLs, migrate previously admitted URLs, or establish that a particular provider has returned this shape in a live test.
 
@@ -369,11 +406,11 @@ agent-search-gateway llm-search "prompt" --provider openai_main --model gpt-5 --
 
 An explicitly empty or whitespace-only selector is an input error. Unmatched selectors fail before provider work begins and never fall back to unselected backends. When both LLM flags are supplied, the error distinguishes a missing provider, a missing model, both names being absent, and both names existing separately without a matching provider/model pair. A runtime with no search providers retains its existing no-provider error; if every selected execution fails, the existing all-providers-failed error still applies.
 
-Filters affect search fan-out only. Keyword result judging configured through `fetch_llm` and normal paper OA enrichment can still run. `url-fetch`, `start`, `stop`, and `doctor` do not accept these flags. The daemon still validates and assembles all enabled providers at startup, so selecting one provider does not bypass startup validation for other enabled providers.
+Filters affect search fan-out only. Normal paper OA enrichment can still run; keyword Search never invokes the Fetch body stages. `url-fetch`, `start`, `stop`, and `doctor` do not accept these flags. The daemon still validates and assembles all enabled providers at startup, so selecting one provider does not bypass startup validation for other enabled providers.
 
 Selection lasts for one request; the next command without flags uses the full configured set. After installing a version with these flags, stop and restart an already-running older daemon once to load the new code. Subsequent selector changes do not require restarting. Restarting clears in-memory URL admission and cached content, so search again before fetching previously admitted URLs.
 
-For a smoke test, start the daemon with `--debug` and correlate the result filename's request ID with the search-stage provider/model events. Only the selected search pipelines should execute; legitimate judge or OA enrichment events may name other services. Successful search stdout remains only the absolute result-file path.
+For a smoke test, start the daemon with `--debug` and correlate the result filename's request ID with the search-stage provider/model events. Only the selected search pipelines should execute; legitimate OA enrichment events may name other services. Successful search stdout remains only the absolute result-file path.
 
 ## Agent search
 
@@ -417,7 +454,9 @@ LLM provider aliases, even when their names match.
 |---|---|---|
 | `harness` | Required string | Only `"antigravity"` is supported |
 | `command` | String, `"agy"` | One executable name or path; relative paths are anchored to the daemon's startup cwd, bare names use PATH; no shell command, embedded flags, or expansion |
-| `max_concurrency` | Integer, `1` | Positive; shared by every invocation of that alias |
+| `max_concurrency` | Optional positive integer, no default limit | Shared by every invocation of that alias |
+| `rate_limits` | Optional array of rolling windows, no default limit | Counts CLI spawns by alias, not internal Agent HTTP requests |
+| `min_interval_seconds` | Optional positive number, no default limit | Minimum time between CLI spawns |
 | `timeout_seconds` | Number, `300` | Representable finite positive number; no Gateway-imposed upper bound |
 | `pass_env` | Array of strings, `[]` | Additional environment-variable names, never values |
 | Invocation `provider` | Required string | Exact key in `agent_providers` |
@@ -533,47 +572,58 @@ Direct paper discovery queries enabled academic providers concurrently and merge
 enabled = false
 ```
 
-Academic providers use a separate configuration namespace and concurrency budget:
+Academic providers and OA resolvers use their own namespaces and independent credential pools:
 
 ```toml
-[academic_providers]
-default_max_concurrency = 3
-
 [academic_providers.arxiv]
 use_proxy = true
 query_fields = ["ti", "abs"]
 max_results = 10
 sort_by = "relevance"
 sort_order = "descending"
+enabled = true
+
+[[academic_providers.arxiv.credentials]]
 max_concurrency = 1
 min_interval_seconds = 3
-enabled = true
 api_url = "https://export.arxiv.org/api/query"
 
 [academic_providers.semantic_scholar]
 enabled = true
+
+[[academic_providers.semantic_scholar.credentials]]
 api_url = "https://api.semanticscholar.org/graph/v1"
 
 [academic_providers.openalex]
 enabled = true
+
+[[academic_providers.openalex.credentials]]
 api_key_env = "OPENALEX_API_KEY"
 api_url = "https://api.openalex.org"
 
 [academic_providers.dblp]
 enabled = true
+
+[[academic_providers.dblp.credentials]]
 api_url = "https://dblp.org/search/publ/api"
 
 [academic_providers.crossref]
 enabled = true
+
+[[academic_providers.crossref.credentials]]
 api_url = "https://api.crossref.org"
 
 [academic_providers.core]
 enabled = true
+
+[[academic_providers.core.credentials]]
 api_url = "https://api.core.ac.uk/v3"
 api_key_env = "CORE_API_KEY"
 
 [oa_resolvers.unpaywall]
 enabled = false
+
+[[oa_resolvers.unpaywall.credentials]]
 api_url = "https://api.unpaywall.org/v2"
 ```
 
@@ -588,9 +638,9 @@ arXiv compiles ordinary words as AND-connected terms, with OR across the selecte
 
 A long natural-language query can lose recall because every term must match. Use a shorter query or an intentional quoted phrase as appropriate. The gateway performs one logical query, with existing HTTP retries; it adds no LLM rewriting or second retrieval pass and does not guarantee improved relevance. Literal input that the upstream grammar cannot represent without changing its meaning (for example, a double quote inside a word) fails only the arXiv provider with `PROTOCOL_ERROR` before sending; other selected providers can still return results.
 
-arXiv and dblp require no credentials. Semantic Scholar may set `api_key_env`; omitting it selects unauthenticated mode and there is no authentication fallback after a configured credential is rejected. CORE requires `api_key_env`, and the named environment variable must exist. OpenAlex and Crossref may set `contact_email_env`. Unpaywall is disabled by default; enabling it requires `contact_email_env`, and the named environment variable must exist. Configuration values reference environment-variable names rather than embedding API keys or contact values in TOML.
+arXiv and dblp require no credentials. Semantic Scholar may set `api_key_env`; omitting it selects unauthenticated mode for that member. There is no implicit authentication fallback after a configured credential is rejected; any fallback member must be explicitly configured. CORE requires `api_key_env`, and the named environment variable must exist. OpenAlex and Crossref may set `contact_email_env`. Unpaywall is disabled by default; enabling it requires `contact_email_env`, and the named environment variable must exist. Configuration values reference environment-variable names rather than embedding API keys or contact values in TOML.
 
-**OpenAlex migration.** Enabled OpenAlex now requires an API key. In your existing table add the environment-variable name shown above, then supply that variable from your credential store to the daemon and restart it. Alternatively, set `enabled = false` to skip OpenAlex. An optional contact email cannot satisfy the key requirement. The gateway sends the key as a Bearer credential and never falls back to anonymous access. For an offline configuration check, a dummy value such as `OPENALEX_API_KEY=example-for-doctor-only` can satisfy the presence check. Live calls require a valid key. This is a gateway requirement even though OpenAlex still permits some basic anonymous queries.
+**OpenAlex migration.** Enabled OpenAlex now requires an API key. In your existing credential entry add the environment-variable name shown above, then supply that variable from your credential store to the daemon and restart it. Alternatively, set `enabled = false` to skip OpenAlex. An optional contact email cannot satisfy the key requirement. The gateway sends the key as a Bearer credential and never falls back to anonymous access. For an offline configuration check, a dummy value such as `OPENALEX_API_KEY=example-for-doctor-only` can satisfy the presence check. Live calls require a valid key. This is a gateway requirement even though OpenAlex still permits some basic anonymous queries.
 
 `paper-search` writes `paper-<request-id>.jsonl`. Each row uses the paper schema directly and has no `type` discriminator. Fields are `title`, `authors`, `abstract`, `identifiers`, `published_date`, `updated_date`, `url`, `pdf_url`, `venue`, `topics`, `citation_counts`, `is_open_access`, `oa_status`, `license`, and `sources`. `identifiers` contains `doi`, `arxiv_id`, `semantic_scholar_id`, `openalex_id`, `dblp_key`, and `core_id`.
 
@@ -614,7 +664,7 @@ agent-search-gateway url-fetch "https://example.com/article" "pricing details"
 
 Successful search files use `keyword-<request_id>.jsonl`, `llm-<request_id>.jsonl`, `paper-<request_id>.jsonl`, or `agent-<request_id>.jsonl`. In DEBUG mode that same eight-hex-character request ID appears on the daemon's internal events, making the result file a direct correlation key for the trace.
 
-A URL must first be admitted by keyword, LLM, Agent, or academic paper search before `url-fetch` can use it. Admission, cached body content, and unavailable state are in memory only. A daemon restart therefore requires searching again before fetching the same URL.
+A URL must first be admitted by keyword, LLM, Agent, or academic paper search before `url-fetch` can use it. Search admits URLs and any naturally supplied body candidate without running Fetch Judge, Clean, Safety or Focus. On explicit Fetch, a cached candidate is judged first; a rejected candidate is discarded before fetching a replacement. The gateway progresses through NEED_FETCH, NEED_JUDGE, NEED_CLEAN, NEED_SAFETY, READY and UNAVAILABLE as appropriate. Execution failures remain retryable at the last committed stage; semantic exhaustion or Safety rejection may mark the URL unavailable. READY content is reused without rerunning body stages. Optional Focus is a request-only summary and never replaces the cached full body. Admission, cached body content, and unavailable state are in memory only. A daemon restart therefore requires searching again before fetching the same URL.
 
 Business command stdout is final-output-only: successful search commands print only the absolute result path, and successful fetch commands print only their final text. DEBUG events are emitted by the daemon process to its stderr and debug log, not into a requesting business CLI's stdout.
 
@@ -643,12 +693,13 @@ DEBUG diagnostics cover Web search and Fetch providers, JSON/XML academic provid
 | HTTP attempts and responses | `http_attempt_started`, `http_attempt_completed`, and `provider_response_diagnostic` describe individual attempts and received responses; a transport failure without a response does not invent response metadata |
 | HTTP retry and failure | `http_retrying` records another scheduled attempt; `http_failed` marks terminal HTTP failure |
 | LLM protocol and stages | `llm_protocol_attempt_started`, `provider_retrying`, and `llm_protocol_completed` describe protocol work; `llm_stage_*` events describe judge, safety, cleaning, and summary stages |
+| Credential and URL state | `credential_selected`, `credential_fallback`, `credential_exhausted`, `credential_waiting`, `credential_cancelled`, gate events, and `url_state_committed` correlate scheduling and committed transitions |
 | Provider terminal outcome | The owning search, Fetch, or OA pipeline emits one `provider_completed` or `provider_failed` for each invocation and scope; retries and different scopes are separate from that outcome |
 | Workflow outcome | The daemon's `workflow_completed` or `workflow_failed` describes the whole command; one provider failure need not fail successful sibling work |
 
 Candidate summaries keep adapter parsing (`phase=adapter`) separate from keyword admission preparation (`phase=staging`). Each phase reports received, accepted, rejected, grouped rejection reasons, and rewritten counts where relevant. Early termination distinguishes processed from unprocessed candidates rather than calling untouched candidates rejected. Unpaywall HTTP 404 is a completed OA lookup with no match, not a provider failure. Agent diagnostics include safe process classifications, exit status, and stdout/stderr byte counts after cleanup.
 
-Events retain request ID, provider, stage, model, timing, scheduler/quota decisions, and safe URL components. Target URL path/query/fragment values are filtered before logging: paths may remain, while query and fragment are omitted. URI userinfo is stripped from logged URLs; HTTP transport endpoint fields follow the same rule. Upstream error text is redacted before sanitizing and truncating: code/status/type fields are capped at 128 characters and messages at 512. Message length and truncation metadata can explain omitted detail.
+Events retain request ID, provider, stage, model, timing, scheduler/quota decisions, and safe URL components. HTTP member operations and gates include namespace, logical provider and zero-based `credential_index` when a member is known; Agent aliases have no HTTP credential index. Target URL path/query/fragment values are filtered before logging: paths may remain, while query and fragment are omitted. URI userinfo is stripped from logged URLs; HTTP transport endpoint fields follow the same rule. Upstream error text is redacted before sanitizing and truncating: code/status/type fields are capped at 128 characters and messages at 512. Message length and truncation metadata can explain omitted detail.
 
 Ordinary mode emits no body previews. In DEBUG mode each actual HTTP send (including each retry) and each Agent spawn attempt produces one `upstream_body_preview` with request and response sides. The response side shows the HTTP body or captured Agent stdout. A missing response has a null preview. A preparation failure or rate wait that prevents the call produces no preview event.
 

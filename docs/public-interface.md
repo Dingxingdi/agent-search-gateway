@@ -165,6 +165,14 @@ scope; the daemon records the whole workflow outcome. An individual provider fai
 need not fail a partially successful workflow. Unpaywall 404 remains a completed
 lookup with no match.
 
+HTTP credential operations, capacity and rate gates use the logical provider name,
+a namespace (web, academic, oa, or llm), and a zero-based `credential_index`.
+Selection, fallback, exhaustion, waiting and cancellation events omit the index when
+no member is known. These fields do not expose authentication values, and are not
+part of public result rows. Agent alias gates have no HTTP credential index.
+`url_state_committed` records only completed, atomic URL-state changes, never an
+uncommitted transition or the page body.
+
 Success diagnostics retain metadata and counts. Failure diagnostics add allowlisted
 upstream code/status/type and short messages when safely extractable. Adapter and
 keyword staging candidate counts have separate phases, grouped rejection reasons,
