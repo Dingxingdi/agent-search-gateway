@@ -7,8 +7,8 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from tempfile import TemporaryDirectory
@@ -17,6 +17,7 @@ from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ...input_limits import InputBudgetUnfit, PreparedInput, fit_messages_to_budget
 from ...observability import log_event, log_upstream_body_preview, make_input_preview_projector
+from ...rate_limit import RateLimitWaitTimeout
 from ..contracts import ChatMessage
 from ..diagnostics import best_effort_diagnostics, safe_diagnostic_fields
 
@@ -311,7 +312,8 @@ async def run_antigravity(
     command: str,
     timeout_seconds: float,
     pass_env: Sequence[str],
-    quota: CapacityGate,
+    quota: CapacityGate | None,
+    acquire_rate_permit: Callable[[], Awaitable[float]] | None = None,
     prompt_max_bytes: int = 98304,
 ) -> str:
     prepared = _prepare_prompt(messages, prompt_max_bytes)
@@ -330,14 +332,13 @@ async def run_antigravity(
     ]
     if model is not None:
         argv.extend(["--model", model])
-    async with quota.lease():
+    async with quota.lease() if quota is not None else nullcontext():
         with TemporaryDirectory(prefix="agent-search-") as directory:
             spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
             spawn_attempted = False
             stdout_capture = bytearray()
             tasks: list[asyncio.Task[None] | asyncio.Task[int]] = []
             succeeded = False
-            started = asyncio.get_running_loop().time()
             process: asyncio.subprocess.Process | None = None
             stdout_count, stderr_count = _ByteCount(), _ByteCount()
             diagnostics: dict[str, object] = {}
@@ -395,6 +396,13 @@ async def run_antigravity(
                 )
                 return fields
 
+            if acquire_rate_permit is not None:
+                try:
+                    await acquire_rate_permit()
+                except RateLimitWaitTimeout:
+                    raise _execution_failure("rate_limit_wait_timeout") from None
+
+            started = asyncio.get_running_loop().time()
             try:
                 async with asyncio.timeout(timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS):
                     env = _curated_environment(pass_env)

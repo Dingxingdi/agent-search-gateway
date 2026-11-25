@@ -223,9 +223,8 @@ async def test_new_web_provider_obeys_capability_switches(
             [name] if fetch_enabled else []
         )
         assert len(client_factory.clients) == 2 + int(search_enabled or fetch_enabled)
-        if not search_enabled and not fetch_enabled:
-            with pytest.raises(KeyError):
-                runtime.quotas.get_web(name)
+        for facade in (*runtime.web_search_providers, *runtime.web_fetch_providers):
+            assert only_member(facade).capacity.limit == 7
     finally:
         await runtime.aclose()
 

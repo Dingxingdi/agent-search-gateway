@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import UNAVAILABLE_MESSAGE, ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -16,7 +16,7 @@ from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
-from tests.support.fakes import FakeURLFetchProvider
+from tests.support.fakes import FakeURLFetchProvider, pooled_web
 from tests.support.http import RecordingJsonExecutor
 
 
@@ -88,11 +88,7 @@ def _build(
 ) -> FetchOrchestrator:
     stages = _flow_stages(client)
     scheduler = FetchScheduler(
-        providers,
-        ProviderQuotaManager(
-            web_limits={provider.name: 1 for provider in providers},
-            llm_limits={},
-        ),
+        [pooled_web(p, CapacityGate(1)) for p in providers],
         stages,
     )
     return FetchOrchestrator(store=store, scheduler=scheduler, stages=stages)

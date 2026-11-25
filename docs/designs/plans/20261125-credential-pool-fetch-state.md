@@ -695,11 +695,11 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resou
 - Test: `tests/daemon/test_agent_shutdown.py`
 - Test: `tests/unit/test_agent_stages.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 `test_agent_without_limits_starts_independent_invocations`；`test_agent_rate_counts_invocation_start` 用假 CLI/spawn 边界和假时间，分别验证 alias capacity、window、interval。输入准备失败不占许可；spawn/timeout/取消都释放容量并保留原 reap。rate 等待超时不得误报 subprocess timeout，不切换 HTTP credential。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent/test_antigravity_cli.py tests/providers/agent/test_antigravity_lifecycle.py -k "without_limits or rate_counts or rate_wait" -v
@@ -707,7 +707,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent/test_antig
 
 预期：旧默认 cap=1 或缺少 invocation rate gate。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 先验证 invocation/prompt 并沿用原输入裁剪
@@ -720,7 +720,7 @@ rate wait failure 在 subprocess TimeoutError handler 外转换为原 Agent stag
 
 不同 model 共享同 alias gates；不统计 CLI 内部 HTTP。pass_env、认证、命令和 hard timeout 的计时起点保持原合同。
 
-- [ ] **Step 4: 验证 GREEN 与组件回归**
+- [x] **Step 4: 验证 GREEN 与组件回归**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent tests/runtime/test_agent_runtime_assembly.py tests/daemon/test_agent_shutdown.py tests/unit/test_agent_stages.py -v
@@ -728,7 +728,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent tests/runt
 
 预期：无限制和显式规则均可证明，所有 subprocess 生命周期及输入上限回归通过。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 复用现有 gate/错误类别，避免在 Agent runner 中增加 pool、账户或额外 retry；重跑上列命令。
 
@@ -742,7 +742,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent tests/runt
 - Test: `tests/scheduler/test_fetch_outcomes.py`
 - Test support: `tests/support/fakes.py`、`tests/support/controlled.py`
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 | 建议测试 | 可观察结果 |
 |---|---|
@@ -755,7 +755,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent tests/runt
 
 保留纯执行失败、实际语义失败优先的混合终止、候选结构与 cheap_check 区别；补全 capacity-only 选择等待的有界新语义。
 
-- [ ] **Step 2: 验证 RED**
+- [x] **Step 2: 验证 RED**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler/test_fetch_capacity.py tests/scheduler/test_fetch_outcomes.py -k "credential or reservation or before_judge or remaining_selection" -v
@@ -763,7 +763,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler/test_fetch_capac
 
 预期：旧 scheduler 仍只观察逻辑 provider gate、Judge 占用 Web lease 或重新选成员。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 ~~~text
 保持 request-local 逻辑 provider 候选与 semantic_failure_seen
@@ -780,7 +780,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler/test_fetch_capac
 
 不要 `create_task(provider.fetch(...))` 破坏 initial_rate_budget 的 task 绑定。Scheduler 退出时取消并 await 所有 loser waiter。不能把缓存候选的先前拒绝塞进 scheduler.semantic_failure_seen。知乎/百度千帆 Search 的子任务各自取得物理 permit；保留初次预算的 owner 检查，不为这些分支放宽 task 隔离。
 
-- [ ] **Step 4: 验证 GREEN 与第一个集成检查点**
+- [x] **Step 4: 验证 GREEN 与第一个集成检查点**
 
 ~~~bash
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler tests/runtime tests/providers tests/daemon tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py -v
@@ -788,7 +788,7 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler tests/runtime te
 
 预期：新配置到物理 HTTP/fetch 调度全链路通过。迁移 slow logging、late wake、精确截止、竞争、cancel/join 等既有测试；只修改 spec 明确改变的等待计费和 gate 所有权断言。
 
-- [ ] **Step 5: 整理并保持 GREEN**
+- [x] **Step 5: 整理并保持 GREEN**
 
 删除 scheduler 中旧 provider gate 获取和重复 rate 预扣；不改变 FetchOutcome 的公开分类或 Judge 错误因果。重跑 scheduler 与运行时组件命令。
 
@@ -1409,7 +1409,9 @@ uv run python scripts/build_docs.py
 | 9 | 完成 | pool/façade 66 通过；过滤/调用选择 115 通过；20 文件 Ruff、4 生产文件 scoped mypy 通过。扩大诊断 329 通过、5 项后续配置/Doctor 迁移失败。 |
 | 10 | 完成 | 公共 HTTP factory/资源 owner 7 项 RED→GREEN；真实 HTTPX 直连/环境代理 transport 的活动连接上限均为无限制表示，keepalive 为 20；2 文件 Ruff 通过。 |
 | 11 | 完成 | HTTP 装配目标 16 通过、76 deselected；资源及相关启动/Academic/optional 26 通过（含资源 15）；扩大回归 291 通过、7 个明确 Task 12/13 依赖 deselected。19 文件 Ruff lint/format 通过；三个生产模块 mypy 仅余 Task 12 的 quota=None 参数类型问题。 |
-| 12–23 | 待实施 | Agent gates、Fetch 调度、URL 状态机、诊断、文档和全量验收尚未完成。 |
+| 12 | 完成 | Agent 111 通过；Task 11 两项移交用例 2 通过；quota/pool 51 通过；5 文件 Ruff lint/format 和 3 生产模块 mypy 通过，消除 Task 11 的类型依赖。 |
+| 13 | 完成 | 首个完整集成检查点 4,008 通过、0 失败；Scheduler 37 通过；迁移的 URL Fetch 编排器及 gateway workflow 71 通过；22 文件 Ruff lint/format、6 生产模块 mypy 通过。 |
+| 14–23 | 待实施 | URL 状态机、Search 延迟处理、诊断、文档和全量验收尚未完成。 |
 
 配置检查点实际命令：
 
@@ -1419,9 +1421,9 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/unit/test_config_web_provi
 
 相同选择的 `-v` 曾超过 LocalHost 120 KB 输出上限并以 143 中断；上列 `-q` 全部执行通过。后续大套件采用相同测试选择的紧凑输出，保留实际退出码与数量，不将输出中断当成断言失败或通过。
 
-当前为 Task 1–11 组件检查点，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点以及代理/认证 fixture 已迁移；Doctor 仍归 Task 19。首次 rate budget 的旧标量参数仅为 Scheduler 迁移过渡，Task 13 收敛到统一 SelectionBudget。未修改用户实际配置、共享 daemon 或主仓库分支。
+当前为 Task 1–13 的第一个完整集成检查点，覆盖 Scheduler、Runtime、providers、daemon 和四类配置，不能据此声称全仓库已通过。Runtime 多凭证装配、异步启动、40 个测试构造调用点和代理/认证 fixture 已迁移。Python 代码已清除旧 HTTP 聚合 quota API、InitialRateBudget 及 initial_rate_budget 标量入口，统一使用 SelectionBudget。Agent 保留 alias 级可选 gate；URL 状态机和 Doctor 尚待后续任务。未修改用户实际配置、共享 daemon 或主仓库分支。
 
-Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，Task 13 集成门槛将全部运行。
+Task 11 的 7 个明确后置依赖保留原测试，未标记 skip：Task 12 的 `test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias` 与 `test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent` 需要 Agent runner 支持无 gate；Task 13 的 `test_new_web_provider_search_and_fetch_contend_for_runtime_quota` 四个参数分支（doubao、youcom、keenable、open_websearch）及 `test_youcom_mcp_search_and_fetch_share_concurrency` 需要 Scheduler 改用池预留接口。这 7 项仅在 Task 11 扩大诊断命令中 deselect，已在 Tasks 12–13 修复并在 Task 13 集成门槛中全部通过。
 
 Task 11 已复现并修复部分构造、反复取消、并发关闭和 socket bind 失败时的资源清理；`join_cleanup(task)` 屏蔽等待者取消并等待真实清理完成，随后传播取消。多个 Runtime.aclose 调用等待同一个关闭任务，清理或日志错误不掩盖原始启动错误。所有 HTTP 成员 key/email 在资源分配前注册脱敏。TinyFish、BrightData、You.com REST/MCP、Academic/OA 和 LLM 的成员 endpoint/auth/options 以真实适配器 + MockTransport 出站验证。
 
@@ -1434,6 +1436,29 @@ env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_credential_po
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/test_http_executor.py tests/providers/test_bounded_http_executor.py tests/providers/llm/test_openai_chat.py tests/runtime/test_credential_pool.py tests/unit/test_retry.py tests/unit/test_input_limits.py -q --tb=short
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_pooled_providers.py tests/runtime/test_credential_pool.py -q
 env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/orchestrators/test_keyword_provider_filtering.py tests/orchestrators/test_paper_provider_filtering.py tests/orchestrators/test_llm_provider_model_filtering.py tests/orchestrators/test_llm_invocation_selection.py -q
+~~~
+
+Task 12 在受控 condition 竞争下复现重复取消使容量计数 in_use 停留为 1，使用 join_cleanup 完成释放后再传播取消，相关回归通过。输入校验/UTF-8 裁剪先于可选 gates；rate 等待复用 retry.request_timeout_seconds，CLI 执行 timeout 仍从取得许可后的原边界计时。
+
+Task 13 先迁移接口后得到 32 通过 / 4 失败的实际调度行为 RED，修复首次 waiter 迟调度与清理取消边界。最终自检再次复现“超时已发生但 observer 仍在清理，loser 取消掩盖超时后调用过期凭证”的交错；ManualClock 回归现在断言两个候选超时、发送为零，同时保留精确截止就绪的重检机会。首轮大集合的 7 项 arXiv/Firecrawl 旧配置 fixture 已迁移，最终 4,008 全绿。
+
+Runtime 与 Agent 实际验证命令（对应上表历史检查点）：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_assembly.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_optional_credentials.py -k 'one_pool or credential or sorts_fetch' -q --tb=line
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_runtime_resources.py tests/runtime/test_academic_runtime_assembly.py tests/runtime/test_optional_credentials.py tests/daemon/test_daemon_debug.py tests/daemon/test_daemon_shutdown.py -q --tb=line
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime tests/daemon/test_daemon_debug.py tests/daemon/test_daemon_shutdown.py tests/daemon/test_agent_shutdown.py tests/providers/academic/test_arxiv.py::test_runtime_arxiv_options_reach_real_http_request -k 'not binds_each_alias_and_does_not_retry and not search_and_fetch_contend_for_runtime_quota and not mcp_search_and_fetch_share_concurrency and not exhausted_web_rate_allows_same_named_llm_and_agent' -q --tb=line
+uv run mypy src/agent_search_gateway/runtime.py src/agent_search_gateway/daemon.py src/agent_search_gateway/concurrency.py
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/providers/agent tests/runtime/test_agent_runtime_assembly.py tests/daemon/test_agent_shutdown.py tests/unit/test_agent_stages.py -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_agent_runtime_assembly.py::test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_alias tests/runtime/test_runtime_assembly.py::test_runtime_exhausted_web_rate_allows_same_named_llm_and_agent -q
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/runtime/test_quota_manager.py tests/runtime/test_credential_pool.py -q
+uv run mypy src/agent_search_gateway/providers/agent/antigravity_cli.py src/agent_search_gateway/runtime.py src/agent_search_gateway/concurrency.py
+~~~
+
+Task 13 集成检查点实际命令，4,008 passed in 16.33s：
+
+~~~bash
+env -u WEB_SEARCH_RUN_INTEGRATION uv run pytest tests/scheduler tests/runtime tests/providers tests/daemon tests/unit/test_config_web_providers.py tests/unit/test_config_academic_providers.py tests/unit/test_config_llm.py tests/unit/test_config_agent.py -q --tb=short
 ~~~
 
 ## 计划编写与自检记录

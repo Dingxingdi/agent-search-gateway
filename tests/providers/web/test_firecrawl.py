@@ -47,21 +47,23 @@ def test_firecrawl_registry_factory_accepts_resolved_options(options: dict[str, 
             "web_providers": {
                 "firecrawl": {
                     "enable_search": True,
-                    "api_key_env": "TEST_KEY",
-                    "api_url": "https://fire.example.test",
+                    "credentials": [
+                        {"api_key_env": "TEST_KEY", "api_url": "https://fire.example.test"}
+                    ],
                     "use_proxy": False,
                     **options,
                 }
             }
         },
         registry,
-        {"TEST_KEY": "x"},
+        {"TEST_KEY": "[REDACTED_SECRET]"},
     ).providers
+    [member] = provider.credentials
     adapter = registry.require(provider.name).factory(
         name=provider.name,
-        secret=provider.secret,
+        secret=member.api_key,
         http_executor=RecordingJsonExecutor([]),
-        **provider.options,
+        **member.options,
     )
     assert isinstance(adapter, FirecrawlAdapter)
 
@@ -74,25 +76,25 @@ async def test_firecrawl_resolved_options_snapshot_lists_before_factory(
     original_parsers = tuple(parsers)
     table = {
         "enable_fetch": True,
-        "api_key_env": "TEST_KEY",
-        "api_url": "https://fire.example.test",
+        "credentials": [{"api_key_env": "TEST_KEY", "api_url": "https://fire.example.test"}],
         "scrape_formats": formats,
         "scrape_parsers": parsers,
     }
     registry = build_default_registry()
     [config] = resolve_web_provider_config(
-        {"web_providers": {"firecrawl": table}}, registry, {"TEST_KEY": "x"}
+        {"web_providers": {"firecrawl": table}}, registry, {"TEST_KEY": "[REDACTED_SECRET]"}
     ).providers
     assert table["scrape_formats"] == ["rawHtml", "markdown"]
     assert table["scrape_parsers"] == list(original_parsers)
     formats.clear()
     parsers[:] = ["pdf"] if not original_parsers else []
     executor = RecordingJsonExecutor([_fixture("scrape.json")])
+    [member] = config.credentials
     adapter = registry.require(config.name).factory(
         name=config.name,
-        secret=config.secret,
+        secret=member.api_key,
         http_executor=executor,
-        **config.options,
+        **member.options,
     )
     assert isinstance(adapter, FirecrawlAdapter)
 

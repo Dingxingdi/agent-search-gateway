@@ -10,7 +10,7 @@ from agent_search_gateway.input_limits import PreparedInput
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.providers.http import HttpJsonExecutor, HttpStatusFailure
 from agent_search_gateway.providers.web.common import JsonRequester
-from agent_search_gateway.rate_limit import RateGate, initial_rate_budget
+from agent_search_gateway.rate_limit import RateGate, SelectionBudget, initial_rate_budget
 from tests.support.http import RecordingHttpExecutor, RecordingJsonExecutor
 from tests.support.logging import structured_test_logger
 
@@ -906,7 +906,6 @@ async def test_recording_requesters_accept_options_with_predecoded_results(kind:
 
 
 async def test_parallel_http_branches_take_separate_permits_without_spending_owner_budget() -> None:
-    from agent_search_gateway.rate_limit import SelectionBudget
     from tests.support.controlled import ManualClock
 
     clock = ManualClock()
@@ -957,7 +956,7 @@ async def test_bounded_attempt_deadline_starts_after_rate_permit() -> None:
         executor = HttpJsonExecutor(
             client, RetryPolicy(1, 0, 0, 0.01), provider_name="test", rate_gate=gate
         )
-        with initial_rate_budget(gate, remaining_seconds=1, waited_seconds=0):
+        with initial_rate_budget(gate, SelectionBudget(1, 0)):
             assert (
                 await executor.request_json(
                     "GET", "https://example.test", stage="search", max_response_bytes=1

@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar
 
-from .concurrency import CapacityGate, CapacityLease
+from .concurrency import CapacityGate, CapacityLease, join_cleanup
 from .config import CredentialStrategy
 from .errors import ErrorCode, ExecutionFailure
 from .rate_limit import RateGate, RateLimitWaitTimeout, SelectionBudget, initial_rate_budget
@@ -109,7 +109,13 @@ class CredentialPool(Generic[A]):
                 return CredentialReservation(index, member, self, lease)
             return None
 
-    async def wait_available(self, attempted: Set[int], budget: SelectionBudget) -> None:
+    async def wait_available(
+        self,
+        attempted: Set[int],
+        budget: SelectionBudget,
+        *,
+        on_rate_wait: Callable[[float], None] | None = None,
+    ) -> None:
         """Observe an eligible member without claiming its capacity or rate permit."""
         while True:
             full: list[CapacityGate] = []
@@ -136,6 +142,8 @@ class CredentialPool(Generic[A]):
             deadline = self._monotonic() + budget.remaining_seconds
             if earliest_rate is not None:
                 deadline = min(deadline, earliest_rate)
+                if on_rate_wait is not None:
+                    on_rate_wait(max(0, earliest_rate - self._monotonic()))
             waiters: list[asyncio.Task[None]] = []
             try:
                 for gate in full:
@@ -151,13 +159,17 @@ class CredentialPool(Generic[A]):
                 for waiter in waiters:
                     if not waiter.done():
                         waiter.cancel()
-                await asyncio.gather(*waiters, return_exceptions=True)
+                await join_cleanup(asyncio.create_task(self._join_waiters(waiters)))
 
         raise ExecutionFailure(
             self._error_code,
             "Provider availability wait timed out",
             reason="rate_limit_wait_timeout",
         )
+
+    @staticmethod
+    async def _join_waiters(waiters: Sequence[asyncio.Task[None]]) -> None:
+        await asyncio.gather(*waiters, return_exceptions=True)
 
     async def _wake_at(self, deadline: float) -> None:
         delay = deadline - self._monotonic()

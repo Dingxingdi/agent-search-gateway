@@ -2,7 +2,6 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import (
     UNAVAILABLE_MESSAGE,
     ErrorCode,
@@ -61,7 +60,6 @@ def _build(store: URLStore, client: _CachedPathClient) -> FetchOrchestrator:
     )
     scheduler = FetchScheduler(
         [],
-        ProviderQuotaManager(web_limits={}, llm_limits={}),
         stages,
     )
     return FetchOrchestrator(store=store, scheduler=scheduler, stages=stages)

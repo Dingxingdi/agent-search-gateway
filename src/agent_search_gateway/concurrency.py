@@ -5,14 +5,12 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Hashable, Mapping
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar
+from typing import Generic, TypeVar
 
 from .observability import log_event
-from .rate_limit import RateGate
 
 T = TypeVar("T")
 K = TypeVar("K", bound=Hashable)
-RateNamespace = Literal["web", "academic", "oa"]
 
 
 async def join_cleanup(task: asyncio.Task[None]) -> None:
@@ -41,7 +39,7 @@ class CapacityLease:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
-        await self.release()
+        await join_cleanup(asyncio.create_task(self.release()))
 
     async def release(self) -> None:
         if not self._acquired or self._released:
@@ -156,46 +154,11 @@ class ProviderQuotaManager:
     def __init__(
         self,
         *,
-        web_limits: Mapping[str, int],
-        llm_limits: Mapping[str, int],
-        academic_limits: Mapping[str, int] | None = None,
         agent_limits: Mapping[str, int | None] | None = None,
         logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        self._rates: dict[tuple[RateNamespace, str], RateGate] = {}
         event_logger = logger or logging.getLogger(__name__)
-        self._web = {
-            name: CapacityGate(
-                limit,
-                provider=name,
-                quota_kind="web",
-                logger=event_logger,
-                monotonic=monotonic,
-            )
-            for name, limit in web_limits.items()
-        }
-        self._llm = {
-            name: CapacityGate(
-                limit,
-                provider=name,
-                quota_kind="llm",
-                logger=event_logger,
-                monotonic=monotonic,
-            )
-            for name, limit in llm_limits.items()
-        }
-        self._academic = {
-            name: CapacityGate(
-                limit,
-                provider=name,
-                quota_kind="academic",
-                logger=event_logger,
-                monotonic=monotonic,
-            )
-            for name, limit in (academic_limits or {}).items()
-        }
-
         self._agent = {
             name: make_capacity_gate(
                 limit,
@@ -207,43 +170,8 @@ class ProviderQuotaManager:
             for name, limit in (agent_limits or {}).items()
         }
 
-    def register_rate(self, namespace: RateNamespace, name: str, gate: RateGate) -> None:
-        self._rates[namespace, name] = gate
-
-    def get_rate(self, namespace: RateNamespace, name: str) -> RateGate | None:
-        return self._rates.get((namespace, name))
-
     def get_agent(self, name: str) -> CapacityGate | None:
         return self._agent[name]
-
-    def get_web(self, name: str) -> CapacityGate:
-        return self._web[name]
-
-    def get_llm(self, name: str) -> CapacityGate:
-        return self._llm[name]
-
-    def get_academic(self, name: str) -> CapacityGate:
-        return self._academic[name]
-
-    async def wait_until_any_web_available(self, candidate_names: tuple[str, ...]) -> None:
-        if not candidate_names:
-            return
-        tasks = [
-            asyncio.create_task(self.get_web(name).wait_until_available())
-            for name in candidate_names
-        ]
-        try:
-            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-            for task in done:
-                task.result()
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
 
 
 @dataclass(slots=True)

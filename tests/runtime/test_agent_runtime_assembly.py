@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import replace
@@ -128,8 +129,8 @@ async def test_runtime_anchors_agent_paths_before_invocation_cwd_changes(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     resolved = resolve_config(agent_config(command), build_default_registry(), _environment())
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, agent_limits={"primary": 1})
-    runners = Runtime._build_agent_runners(resolved.agent, quotas)
+    quotas = ProviderQuotaManager(agent_limits={"primary": 1})
+    runners = Runtime._build_agent_runners(resolved, quotas)
     later_cwd = tmp_path / "later"
     later_cwd.mkdir()
     monkeypatch.chdir(later_cwd)
@@ -200,7 +201,6 @@ async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_
         assert len({row["pid"] for row in first}) == 2
         assert all(row["a"] == "a-option" and row["b"] is None for row in first)
         assert all(row["argv"][5] == "7s" and "--model" not in row["argv"] for row in first)
-        assert runtime.quotas.get_agent("primary").max_observed_in_use == 1
         with pytest.raises(ExecutionFailure):
             await runtime.search_orchestrator.agent_search(
                 "q", request_id="22222222", provider="second"
@@ -209,13 +209,38 @@ async def test_runtime_binds_each_alias_and_does_not_retry_or_invoke_unselected_
         assert last["argv"][5:] == ["9s", "--model", "pin"]
         assert last["a"] is None and last["b"] == "b-option"
         assert len(evidence.read_text().splitlines()) == 3
-        assert (
-            runtime.quotas.get_agent("primary").in_use
-            == runtime.quotas.get_agent("second").in_use
-            == 0
-        )
+        assert runtime.quotas.get_agent("primary") is None
+        assert runtime.quotas.get_agent("second") is None
     finally:
         await runtime.aclose()
+
+
+async def test_agent_alias_rate_is_shared_by_models_with_configured_wait_budget(
+    tmp_path: Path,
+) -> None:
+    command = write_fake_cli(
+        tmp_path, 'print(json.dumps({"status": "SUCCESS", "response": sys.argv[-1]}))'
+    )
+    raw = agent_config(str(command))
+    provider = {
+        "harness": "antigravity",
+        "command": str(command),
+        "min_interval_seconds": 60,
+        "timeout_seconds": 120,
+    }
+    raw["agent_providers"] = {"primary": provider, "second": dict(provider)}
+    raw["search_agent"] = {"providers": [{"provider": "primary"}, {"provider": "second"}]}
+    raw["retry"] = {"request_timeout_seconds": 0.01}
+    resolved = resolve_config(raw, build_default_registry(), _environment())
+    quotas = ProviderQuotaManager(agent_limits={"primary": None, "second": None})
+    runners = Runtime._build_agent_runners(resolved, quotas)
+
+    async with asyncio.timeout(2):
+        assert await runners["primary"]("first-model", []) == "first-model"
+        with pytest.raises(ExecutionFailure) as expired:
+            await runners["primary"]("second-model", [])
+        assert expired.value.reason == "rate_limit_wait_timeout"
+        assert await runners["second"]("second-model", []) == "second-model"
 
 
 async def test_runtime_build_is_lazy_and_closes_only_http_resources_once(tmp_path: Path) -> None:
@@ -275,10 +300,8 @@ async def test_runtime_rejects_unknown_resolved_harness(tmp_path: Path) -> None:
     )
     with pytest.raises(ConfigFailure) as caught:
         Runtime._build_agent_runners(
-            invalid,
+            replace(resolved, agent=invalid),
             ProviderQuotaManager(
-                web_limits={},
-                llm_limits={},
                 agent_limits={"primary": 1},
             ),
         )

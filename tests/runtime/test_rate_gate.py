@@ -416,16 +416,16 @@ async def test_initial_rate_budget_is_one_shot_and_bound_to_gate_and_current_tas
     async def in_child() -> SelectionBudget | None:
         return consume_initial_rate_budget(first)
 
-    with initial_rate_budget(first, remaining_seconds=0, waited_seconds=0.5):
+    with initial_rate_budget(first, SelectionBudget(0, 0.5)):
         assert await asyncio.create_task(in_child()) is None
         assert consume_initial_rate_budget(other) is None
-        with initial_rate_budget(other, remaining_seconds=0.25, waited_seconds=0.25):
+        with initial_rate_budget(other, SelectionBudget(0.25, 0.25)):
             assert consume_initial_rate_budget(first) is None
             assert consume_initial_rate_budget(other) == SelectionBudget(0.25, 0.25)
             assert consume_initial_rate_budget(other) is None
         assert consume_initial_rate_budget(first) == SelectionBudget(0, 0.5)
         assert consume_initial_rate_budget(first) is None
-    with initial_rate_budget(first, remaining_seconds=0.5, waited_seconds=0):
+    with initial_rate_budget(first, SelectionBudget(0.5, 0)):
         pass
     assert consume_initial_rate_budget(first) is None
 
@@ -436,7 +436,7 @@ async def test_initial_budget_requires_an_owning_task_even_for_a_loop_callback()
 
     def callback() -> None:
         try:
-            with initial_rate_budget(gate, remaining_seconds=0.1, waited_seconds=0.4):
+            with initial_rate_budget(gate, SelectionBudget(0.1, 0.4)):
                 result = consume_initial_rate_budget(gate)
         except Exception as exc:
             observed.set_exception(exc)

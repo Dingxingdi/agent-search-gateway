@@ -4,18 +4,20 @@ from collections.abc import Mapping, Sequence
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.config import ResolvedRatePolicy
+from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.providers.contracts import ChatMessage, URLFetchCandidate
-from agent_search_gateway.rate_limit import InitialRateBudget, RateGate, consume_initial_rate_budget
+from agent_search_gateway.providers.pooled import PooledWebProvider
+from agent_search_gateway.rate_limit import RateGate, SelectionBudget, consume_initial_rate_budget
 from agent_search_gateway.request_ids import bind_request_id
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import NormalizedURL, normalize_url
 from tests.support.controlled import ManualClock
-from tests.support.fakes import FakeLLMClient, FakeURLFetchProvider
+from tests.support.fakes import FakeLLMClient, FakeURLFetchProvider, pooled_web
 from tests.support.logging import structured_test_logger
 
 
@@ -49,7 +51,8 @@ def _scheduler(
     providers: list[FakeURLFetchProvider],
     *,
     logger: logging.Logger | None = None,
-    quotas: ProviderQuotaManager | None = None,
+    capacities: dict[str, CapacityGate] | None = None,
+    rates: dict[str, RateGate] | None = None,
     judge: _JudgeClient | None = None,
     timeout: float = 30,
 ) -> FetchScheduler:
@@ -62,12 +65,10 @@ def _scheduler(
         focus_summary=invocation,
     )
     return FetchScheduler(
-        providers,
-        quotas
-        or ProviderQuotaManager(
-            web_limits={provider.name: 1 for provider in providers},
-            llm_limits={},
-        ),
+        [
+            pooled_web(p, (capacities or {}).get(p.name), (rates or {}).get(p.name))
+            for p in providers
+        ],
         stages,
         logger=logger,
         request_timeout_seconds=timeout,
@@ -152,8 +153,7 @@ async def test_fetch_scheduler_attributes_judge_dependency_failure_and_stops_fal
     )
     later = FakeURLFetchProvider("later", URLFetchCandidate(raw_content="later-success"))
     scheduler = FetchScheduler(
-        [failed_judge, later],
-        ProviderQuotaManager(web_limits={"first": 1, "later": 1}, llm_limits={}),
+        [pooled_web(failed_judge), pooled_web(later)],
         stages,
         logger=logger,
     )
@@ -202,11 +202,7 @@ async def test_fetch_scheduler_debug_events_cover_fallback_semantics_and_accepta
             ),
         ),
     ]
-    quotas = ProviderQuotaManager(
-        web_limits={provider.name: 1 for provider in providers},
-        llm_limits={},
-    )
-    scheduler = FetchScheduler(providers, quotas, stages, logger=logger)
+    scheduler = FetchScheduler([pooled_web(p) for p in providers], stages, logger=logger)
     url = normalize_url("https://example.com/fetch?id=42&mode=test")
 
     with bind_request_id("0badc0de"):
@@ -389,8 +385,7 @@ async def test_judge_failure_keeps_diagnostics_and_public_failure_without_fallba
     first = FakeURLFetchProvider("first", URLFetchCandidate("body"))
     later = FakeURLFetchProvider("later")
     scheduler = FetchScheduler(
-        [first, later],
-        ProviderQuotaManager(web_limits={"first": 1, "later": 1}, llm_limits={}),
+        [pooled_web(first), pooled_web(later)],
         stages,
         logger=logger,
     )
@@ -454,19 +449,25 @@ async def test_fetch_cancellation_records_one_terminal_and_never_falls_back(phas
         focus_summary=invocation,
     )
     later = FakeURLFetchProvider("later")
-    quotas = ProviderQuotaManager(web_limits={"first": 1, "later": 1}, llm_limits={})
-    scheduler = FetchScheduler([BlockingProvider("first"), later], quotas, stages, logger=logger)
+    capacity = CapacityGate(1)
+    scheduler = FetchScheduler(
+        [pooled_web(BlockingProvider("first"), capacity), pooled_web(later)], stages, logger=logger
+    )
     task = asyncio.create_task(
         scheduler.fetch_until_accepted(normalize_url("https://example.test"))
     )
     async with asyncio.timeout(1):
         await entered.wait()
+        if phase == "judge":
+            lease = await capacity.try_lease()
+            assert lease is not None
+            await lease.release()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
     logged = stream.getvalue()
     assert later.calls == []
-    assert quotas.get_web("first").in_use == 0
+    assert capacity.in_use == 0
     assert logged.count("event=provider_started") == 1
     assert logged.count("event=provider_failed ") == 1
     assert "reason=cancelled" in logged
@@ -506,11 +507,9 @@ async def test_semantic_rejection_precedes_exhaustion_of_rate_limited_fallbacks(
 ) -> None:
     rejected = FakeURLFetchProvider("rejected", URLFetchCandidate(rejected_body))
     limited = FakeURLFetchProvider("limited")
-    quotas = ProviderQuotaManager(web_limits={"rejected": 1, "limited": 1}, llm_limits={})
     gate = RateGate(ResolvedRatePolicy(min_interval_seconds=3600))
     await gate.permit(timeout_seconds=0)
-    quotas.register_rate("web", "limited", gate)
-    scheduler = _scheduler([rejected, limited], quotas=quotas, timeout=0)
+    scheduler = _scheduler([rejected, limited], rates={"limited": gate}, timeout=0)
     outcome = await scheduler.fetch_until_accepted(normalize_url("https://example.test"))
     assert outcome.kind == "semantic_failure"
     assert [f.reason for f in outcome.failures] == ["rate_limit_wait_timeout"]
@@ -522,13 +521,12 @@ async def test_other_providers_fetch_and_judge_do_not_spend_a_blocked_candidates
     phase: str,
 ) -> None:
     clock = ManualClock()
-    quotas = ProviderQuotaManager(web_limits={"limited": 1, "other": 1}, llm_limits={})
+    capacities = {"limited": CapacityGate(1), "other": CapacityGate(1)}
     gate = RateGate(
         ResolvedRatePolicy(min_interval_seconds=0.4), monotonic=clock.monotonic, sleep=clock.sleep
     )
     await gate.permit(timeout_seconds=0)
-    quotas.register_rate("web", "limited", gate)
-    budgets: list[InitialRateBudget | None] = []
+    budgets: list[SelectionBudget | None] = []
     failure = ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "other failed")
 
     class LaterReady(FakeURLFetchProvider):
@@ -548,15 +546,64 @@ async def test_other_providers_fetch_and_judge_do_not_spend_a_blocked_candidates
             self, invocation: LLMInvocation, messages: Sequence[ChatMessage]
         ) -> Mapping[str, object]:
             if "judge-reject" in messages[-1]["content"]:
-                assert quotas.get_web("other").in_use == 1
+                assert capacities["other"].in_use == 0
                 await clock.advance_to(0.8)
             return await super().complete_json(invocation, messages)
 
     scheduler = _scheduler(
-        [LaterReady("limited"), Other("other")], quotas=quotas, judge=SlowJudge(), timeout=0.5
+        [LaterReady("limited"), Other("other")],
+        capacities=capacities,
+        rates={"limited": gate},
+        judge=SlowJudge(),
+        timeout=0.5,
     )
     outcome = await scheduler.fetch_until_accepted(normalize_url("https://example.test"))
     assert outcome.kind == "accepted"
     assert outcome.failures == ((failure,) if phase == "provider" else ())
-    assert budgets == [InitialRateBudget(0.5, 0)]
-    assert quotas.get_web("limited").in_use == quotas.get_web("other").in_use == 0
+    assert budgets == [SelectionBudget(0.5, 0)]
+    assert capacities["limited"].in_use == capacities["other"].in_use == 0
+
+
+@pytest.mark.parametrize("first_result", ["accepted", "execution_failure", "semantic_failure"])
+async def test_first_reservation_and_credential_fallback_stay_in_logical_provider(
+    first_result: str,
+) -> None:
+    first = FakeURLFetchProvider(
+        "a1",
+        URLFetchCandidate("judge-reject" if first_result == "semantic_failure" else "first"),
+        failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "retries exhausted")
+        if first_result == "execution_failure"
+        else None,
+    )
+    second = FakeURLFetchProvider("a2", URLFetchCandidate("second"))
+    later = FakeURLFetchProvider("b", URLFetchCandidate("later"))
+    pool = PooledWebProvider(
+        CredentialPool(
+            "web",
+            "a",
+            [
+                CredentialMember(first, CapacityGate(1)),
+                CredentialMember(second, CapacityGate(1)),
+            ],
+        )
+    )
+    invocation = LLMInvocation("judge", "model", {})
+    stages = LLMStages(
+        {"judge": _JudgeClient()},
+        judge=invocation,
+        safety=invocation,
+        content_clean=invocation,
+        focus_summary=invocation,
+    )
+    scheduler = FetchScheduler([pool, pooled_web(later)], stages)
+    url = normalize_url("https://example.test")
+    async with asyncio.timeout(1):
+        outcome = await scheduler.fetch_until_accepted(url)
+    assert outcome.kind == "accepted" and first.calls == [url]
+    assert second.calls == ([url] if first_result == "execution_failure" else [])
+    assert later.calls == ([url] if first_result == "semantic_failure" else [])
+    if first_result == "accepted":
+        next_reservation = await pool.try_reserve_fetch()
+        assert next_reservation is not None
+        assert next_reservation.member.adapter is second
+        await next_reservation.release()

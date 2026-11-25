@@ -17,10 +17,8 @@ from .concurrency import ProviderQuotaManager, join_cleanup, make_capacity_gate
 from .config import (
     LLMProviderConfig,
     ResolvedAcademicProviderConfig,
-    ResolvedAgentConfig,
     ResolvedConfig,
     ResolvedCredential,
-    ResolvedInputLimits,
     ResolvedOAResolverConfig,
     ResolvedWebProviderConfig,
 )
@@ -65,7 +63,6 @@ from .scheduler.fetch import FetchScheduler
 from .url_store import URLStore
 
 HttpClientFactory = Callable[..., httpx.AsyncClient]
-_DEFAULT_INPUT_LIMITS = ResolvedInputLimits()
 _RESERVED_WEB_ADAPTER_KWARGS = frozenset({"name", "http_executor", "secret"})
 _RESERVED_ACADEMIC_ADAPTER_KWARGS = frozenset({"name", "executor", "api_key", "contact_email"})
 
@@ -342,14 +339,12 @@ class Runtime:
         )
         direct_ssl_context = _prepare_direct_ssl_context() if needs_direct else None
         quotas = ProviderQuotaManager(
-            web_limits={},
-            llm_limits={},
             agent_limits={item.name: item.max_concurrency for item in config.agent.providers},
         )
         resources = _RuntimeResources()
         assembly = _HTTPAssembly(resources, http_client_factory, direct_ssl_context, config.retry)
         try:
-            agent_runners = cls._build_agent_runners(config.agent, quotas, config.input_limits)
+            agent_runners = cls._build_agent_runners(config, quotas)
             web_search, web_fetch = await cls._build_web_providers(
                 enabled_web, provider_registry, config.web.fetch_order, assembly
             )
@@ -398,7 +393,6 @@ class Runtime:
                 store=store,
                 scheduler=FetchScheduler(
                     web_fetch,
-                    quotas,
                     stages,
                     request_timeout_seconds=config.retry.request_timeout_seconds,
                 ),
@@ -528,17 +522,17 @@ class Runtime:
 
     @staticmethod
     def _build_agent_runners(
-        config: ResolvedAgentConfig,
+        config: ResolvedConfig,
         quotas: ProviderQuotaManager,
-        input_limits: ResolvedInputLimits = _DEFAULT_INPUT_LIMITS,
     ) -> dict[str, AgentTextRunner]:
         runners: dict[str, AgentTextRunner] = {}
-        for provider in config.providers:
+        for provider in config.agent.providers:
             if provider.harness != "antigravity":
                 raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Unsupported Agent harness")
             command = provider.command
             if "/" in command:
                 command = os.path.abspath(command)
+            rate = make_rate_gate(provider.rate_policy)
             runners[provider.name] = partial(
                 run_antigravity,
                 provider_name=provider.name,
@@ -546,7 +540,12 @@ class Runtime:
                 timeout_seconds=provider.timeout_seconds,
                 pass_env=provider.pass_env,
                 quota=quotas.get_agent(provider.name),
-                prompt_max_bytes=input_limits.agent_prompt_bytes,
+                acquire_rate_permit=(
+                    partial(rate.permit, timeout_seconds=config.retry.request_timeout_seconds)
+                    if rate is not None
+                    else None
+                ),
+                prompt_max_bytes=config.input_limits.agent_prompt_bytes,
             )
         return runners
 

@@ -1,10 +1,12 @@
 """Business provider interfaces backed by logical credential pools."""
 
+import logging
 from collections.abc import Callable, Mapping, Sequence
 
 from ..credential_pool import CredentialPool, CredentialReservation
 from ..input_limits import PreparedInput
 from ..models import LLMInvocation, OAResolution
+from ..observability import log_event
 from ..rate_limit import SelectionBudget
 from ..url_normalization import NormalizedURL
 from .contracts import (
@@ -19,6 +21,7 @@ from .contracts import (
     URLFetchProvider,
     WebAdapter,
 )
+from .http import seconds_to_ms
 
 
 class PooledWebProvider:
@@ -41,7 +44,18 @@ class PooledWebProvider:
         return await self._pool.try_reserve(set())
 
     async def wait_fetch_available(self, budget: SelectionBudget) -> None:
-        await self._pool.wait_available(set(), budget)
+        def log_wait(delay: float) -> None:
+            log_event(
+                logging.getLogger(__name__),
+                logging.DEBUG,
+                "rate_limit_waiting",
+                provider=self.name,
+                stage="fetch",
+                attempt=1,
+                estimated_wait_ms=seconds_to_ms(delay),
+            )
+
+        await self._pool.wait_available(set(), budget, on_rate_wait=log_wait)
 
     async def fetch_reserved(
         self, url: NormalizedURL, first: CredentialReservation[WebAdapter], budget: SelectionBudget

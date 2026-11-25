@@ -4,7 +4,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
 
@@ -90,7 +90,7 @@ class RateGate:
                 await self._sleep(min(delay, deadline - now))
             finally:
                 if budget is not None:
-                    budget._charge_wait(self._monotonic() - wait_started)
+                    budget.charge_wait(self._monotonic() - wait_started)
 
 
 def make_rate_gate(
@@ -108,6 +108,7 @@ def make_rate_gate(
 class SelectionBudget:
     remaining_seconds: float
     waited_seconds: float = 0.0
+    past_deadline: bool = field(default=False, init=False, repr=False, compare=False)
 
     @contextmanager
     def waiting(self, monotonic: Callable[[], float] = time.monotonic) -> Iterator[None]:
@@ -118,11 +119,12 @@ class SelectionBudget:
             yield
         finally:
             finished = monotonic()
-            self._charge_wait(finished - started)
-        if finished > deadline:
+            self.charge_wait(finished - started)
+            self.past_deadline = finished > deadline
+        if self.past_deadline:
             raise RateLimitWaitTimeout(self.waited_seconds)
 
-    def _charge_wait(self, elapsed: float) -> None:
+    def charge_wait(self, elapsed: float) -> None:
         self.waited_seconds += elapsed
         self.remaining_seconds = max(0.0, self.remaining_seconds - elapsed)
 
@@ -134,21 +136,12 @@ _initial_budget: ContextVar[_BudgetBinding | None] = ContextVar("initial_rate_bu
 @contextmanager
 def initial_rate_budget(
     gate: RateGate | None,
-    budget: SelectionBudget | None = None,
-    *,
-    remaining_seconds: float | None = None,
-    waited_seconds: float = 0.0,
+    budget: SelectionBudget,
 ) -> Iterator[None]:
     """Carry a fetch candidate's budget into its first matching HTTP permit."""
     owner = asyncio.current_task()
     binding = None
     if gate is not None and owner is not None:
-        if budget is None:
-            if remaining_seconds is None:
-                raise TypeError("a selection budget or remaining_seconds is required")
-            budget = SelectionBudget(remaining_seconds, waited_seconds)
-        elif remaining_seconds is not None or waited_seconds:
-            raise TypeError("pass either the selection budget or its initial durations")
         binding = (owner, gate, budget)
     token = _initial_budget.set(binding)
     try:

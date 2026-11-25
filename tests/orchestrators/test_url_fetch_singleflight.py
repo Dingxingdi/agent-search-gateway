@@ -2,7 +2,7 @@ import asyncio
 import logging
 from collections.abc import Mapping, Sequence
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
 from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
@@ -11,6 +11,7 @@ from agent_search_gateway.request_ids import bind_request_id, current_request_id
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import NormalizedURL, normalize_url
 from agent_search_gateway.url_store import URLStore
+from tests.support.fakes import pooled_web
 from tests.support.logging import structured_test_logger
 
 _WAIT_TIMEOUT_SECONDS = 5.0
@@ -108,8 +109,7 @@ def _build(
         logger=logger,
     )
     scheduler = FetchScheduler(
-        [provider],
-        ProviderQuotaManager(web_limits={"fetch": 2}, llm_limits={}),
+        [pooled_web(provider, CapacityGate(2))],
         stages,
         logger=logger,
     )
