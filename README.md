@@ -66,7 +66,7 @@ For example, the template sets `[web_providers.zhihu] use_proxy = false` and lea
 
 ### Credential pools, provider limits and input sizes
 
-Each enabled or referenced Web, academic, OA and LLM provider uses a `credentials` array, even when authentication is not required. Keep capability switches, `use_proxy`, provider-specific shared request options and LLM invocation/model settings at the logical provider level. TinyFish's two endpoint URLs and Bright Data's zones belong to each credential. Put endpoint URLs, authentication environment references, and limits in each credential entry. For example, edit the existing Tavily configuration to use two members:
+Each enabled or referenced Web, academic, OA and LLM provider uses a `credentials` array, even when authentication is not required. Keep capability switches, `use_proxy`, and provider-specific shared request options at the logical provider level. LLM aliases also keep `protocol` and `api_endpoint`; invocation and model settings remain in `[global_default_llm]`, `[[search_llm.providers]]`, and `[fetch_llm]` or its stage tables. TinyFish's two endpoint URLs belong to each credential. Bright Data's `search_zone` and `fetch_zone` may be shared provider defaults and overridden per credential. Put endpoint URLs, authentication environment references, and limits in each credential entry. For example, edit the existing Tavily configuration to use two members:
 
 ```toml
 [web_providers.tavily]
