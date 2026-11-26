@@ -5,6 +5,7 @@ import logging
 import os
 import signal
 from contextlib import suppress
+from functools import partial
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -12,10 +13,248 @@ from typing import Any
 import pytest
 
 from agent_search_gateway.concurrency import CapacityGate
-from agent_search_gateway.errors import ExecutionFailure
+from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
+from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.observability import configure_debug_logging
 from agent_search_gateway.providers.agent import antigravity_cli as adapter
+from agent_search_gateway.rate_limit import RateGate
 from tests.support.agent_cli import force_cleanup, process_is_alive, wait_for_json, write_fake_cli
+from tests.support.controlled import ManualClock
+
+
+@pytest.mark.parametrize("limit", [None, 1])
+async def test_agent_without_limits_starts_independent_invocations(
+    monkeypatch: pytest.MonkeyPatch, limit: int | None
+) -> None:
+    gate = CapacityGate(limit) if limit is not None else None
+    started = {"a": asyncio.Event(), "b": asyncio.Event()}
+    release = asyncio.Event()
+
+    async def spawn(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        started[argv[-1]].set()
+        await release.wait()
+        raise FileNotFoundError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    run = partial(
+        adapter.run_antigravity,
+        provider_name="alias",
+        command="fake",
+        timeout_seconds=10,
+        pass_env=(),
+        quota=gate,
+    )
+    tasks = [asyncio.create_task(run("a", [])), asyncio.create_task(run("b", []))]
+    try:
+        async with asyncio.timeout(2):
+            await started["a"].wait()
+            if gate is None:
+                await started["b"].wait()
+            else:
+                assert gate.in_use == 1 and not started["b"].is_set()
+    finally:
+        release.set()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(
+        isinstance(exc, ExecutionFailure) and exc.reason == "spawn_failure" for exc in outcomes
+    )
+    assert started["b"].is_set()
+    if gate is not None:
+        assert gate.in_use == 0
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        (ResolvedRatePolicy(windows=(ResolvedRateWindow(2, 10),)), [0, 0, 10]),
+        (ResolvedRatePolicy(min_interval_seconds=3), [0, 3, 6]),
+    ],
+)
+async def test_agent_rate_counts_invocation_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: ResolvedRatePolicy, expected: list[int]
+) -> None:
+    clock = ManualClock()
+
+    async def advance(seconds: float) -> None:
+        await clock.advance_to(clock.now + seconds)
+
+    rate = RateGate(policy, monotonic=clock.monotonic, sleep=advance)
+    starts: list[float] = []
+    original = asyncio.create_subprocess_exec
+
+    async def spawn(*argv: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        starts.append(clock.now)
+        return await original(*argv, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    command = write_fake_cli(tmp_path, 'print(json.dumps({"status":"SUCCESS","response":"ok"}))')
+    run = partial(
+        adapter.run_antigravity,
+        provider_name="alias",
+        command=str(command),
+        timeout_seconds=1,
+        pass_env=(),
+        quota=None,
+        acquire_rate_permit=partial(rate.permit, timeout_seconds=10),
+    )
+    with pytest.raises(ExecutionFailure) as rejected:
+        await run(None, [{"role": "user", "content": "bad\0argument"}])
+    assert rejected.value.reason == "input_budget_unfit"
+    assert rate.next_available_in_seconds() == 0 and not starts
+    for model in ("a", "b", "a"):
+        assert await run(model, []) == "ok"
+    assert starts == expected
+
+
+async def test_busy_event_loop_preserves_spacing_between_concurrent_cli_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    starts: list[float] = []
+
+    async def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    def busy_callback() -> None:
+        clock.now += 0.75
+
+    async def spawn(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        starts.append(clock.now)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    rate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=0.5), monotonic=clock.monotonic, sleep=advance
+    )
+    run = partial(
+        adapter.run_antigravity,
+        provider_name="alias",
+        command="fake",
+        timeout_seconds=1,
+        pass_env=(),
+        quota=None,
+        acquire_rate_permit=partial(rate.permit, timeout_seconds=10),
+    )
+    first = asyncio.create_task(run("a", []))
+    asyncio.get_running_loop().call_soon(busy_callback)
+    second = asyncio.create_task(run("b", []))
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert all(
+        isinstance(exc, ExecutionFailure) and exc.reason == "spawn_failure" for exc in outcomes
+    )
+    assert starts == [0.75, 1.25]
+
+
+async def test_agent_rate_wait_timeout_releases_capacity_without_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    capacity = CapacityGate(1)
+
+    async def advance(seconds: float) -> None:
+        assert capacity.in_use == 1
+        await clock.advance_to(clock.now + seconds)
+
+    rate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=10), monotonic=clock.monotonic, sleep=advance
+    )
+    await rate.permit(timeout_seconds=1)
+
+    async def forbidden(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        pytest.fail("rate wait expired before spawn")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    with pytest.raises(ExecutionFailure) as caught:
+        await adapter.run_antigravity(
+            None,
+            [],
+            provider_name="alias",
+            command="fake",
+            timeout_seconds=20,
+            pass_env=(),
+            quota=capacity,
+            acquire_rate_permit=partial(rate.permit, timeout_seconds=2),
+        )
+    assert caught.value.code is ErrorCode.ALL_PROVIDERS_FAILED
+    assert caught.value.reason == "rate_limit_wait_timeout"
+    assert clock.now == 2 and capacity.in_use == 0
+    assert rate.next_available_in_seconds() == 8
+
+
+async def test_cancel_when_agent_rate_wait_wakes_keeps_the_permit_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    asleep = asyncio.Event()
+    wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def sleep(seconds: float) -> None:
+        asleep.set()
+        await wake
+
+    async def forbidden(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        pytest.fail("cancelled rate wait must not launch the CLI")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    rate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=1), monotonic=clock.monotonic, sleep=sleep
+    )
+    await rate.permit(timeout_seconds=0)
+    task = asyncio.create_task(
+        adapter.run_antigravity(
+            None,
+            [],
+            provider_name="alias",
+            command="fake",
+            timeout_seconds=1,
+            pass_env=(),
+            quota=None,
+            acquire_rate_permit=partial(rate.permit, timeout_seconds=5),
+        )
+    )
+    await asleep.wait()
+    clock.now = 1
+    wake.set_result(None)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert rate.next_available_in_seconds() == 0
+
+
+async def test_repeated_cancellation_during_agent_rate_wait_releases_capacity() -> None:
+    waiting = asyncio.Event()
+
+    async def sleep(seconds: float) -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    capacity = CapacityGate(1)
+    rate = RateGate(ResolvedRatePolicy(min_interval_seconds=10), sleep=sleep)
+    await rate.permit(timeout_seconds=10)
+    async with asyncio.timeout(2), asyncio.TaskGroup() as group:
+        task = group.create_task(
+            adapter.run_antigravity(
+                None,
+                [],
+                provider_name="alias",
+                command="unused",
+                timeout_seconds=10,
+                pass_env=(),
+                quota=capacity,
+                acquire_rate_permit=partial(rate.permit, timeout_seconds=10),
+            )
+        )
+        await waiting.wait()
+        # Force the second cancellation to land while the real lease is being returned.
+        async with capacity._condition:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+            await asyncio.sleep(0)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert capacity.in_use == 0
 
 
 def hanging_cli(

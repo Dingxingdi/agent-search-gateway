@@ -189,7 +189,8 @@ async def _run(provider: str, stage: str) -> None:
     failed = False
     try:
         async with httpx.AsyncClient(
-            event_hooks={"request": [observed.request], "response": [observed.response]}
+            limits=httpx.Limits(max_connections=None),
+            event_hooks={"request": [observed.request], "response": [observed.response]},
         ) as client:
             executor = HttpJsonExecutor(client, _POLICY, provider_name=provider)
             adapter = _adapter(provider, root, secret, executor)
@@ -323,7 +324,10 @@ async def _run_youcom_mcp(query: str, transport: httpx.AsyncBaseTransport | None
 
     try:
         async with httpx.AsyncClient(
-            transport=transport, follow_redirects=False, event_hooks={"request": [guard]}
+            limits=httpx.Limits(max_connections=None),
+            transport=transport,
+            follow_redirects=False,
+            event_hooks={"request": [guard]},
         ) as client:
             executor = HttpJsonExecutor(
                 client, RetryPolicy(1, 0.25, 2.0, 30.0), provider_name="youcom"

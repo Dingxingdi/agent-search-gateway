@@ -56,7 +56,7 @@ class ExaAdapter:
             stage="search",
             response_diagnostics=_search_response_diagnostics,
             headers=self._headers,
-            json_body={"query": query, "contents": {"text": True, "highlights": True}},
+            json_body={"query": query, "contents": {"highlights": True}},
         )
         root = require_object(payload, self.name, "search", "response")
         results = require_list(root.get("results"), self.name, "search", "results")

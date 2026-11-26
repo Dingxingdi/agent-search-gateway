@@ -5,7 +5,6 @@ import logging
 import math
 import random
 import re
-import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -25,6 +24,9 @@ from ..observability import (
     log_upstream_body_preview,
     make_input_preview_projector,
 )
+from ..observability import (
+    seconds_to_ms as seconds_to_ms,
+)
 from ..rate_limit import RateGate, RateLimitWaitTimeout, consume_initial_rate_budget
 from ..retry import retry_async
 from .diagnostics import (
@@ -32,13 +34,6 @@ from .diagnostics import (
     diagnostic_fields_from_failure,
     safe_diagnostic_fields,
 )
-
-
-def seconds_to_ms(seconds: float) -> int:
-    """Convert finite durations to milliseconds, including very large rate windows."""
-    if seconds >= sys.float_info.max / 1000:
-        return int(seconds) * 1000
-    return max(0, int(seconds * 1000))
 
 
 def is_retryable_http_status(status_code: int) -> bool:
@@ -147,12 +142,14 @@ class HttpJsonExecutor:
         *,
         provider_name: str,
         rate_gate: RateGate | None = None,
+        rate_limit_error_code: ErrorCode = ErrorCode.ALL_PROVIDERS_FAILED,
         logger: logging.Logger | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._rate_gate = rate_gate
+        self._rate_limit_error_code = rate_limit_error_code
         self._retry_policy = retry_policy
         self._provider_name = provider_name
         self._logger = logger or logging.getLogger(__name__)
@@ -785,7 +782,9 @@ class HttpJsonExecutor:
             start_attempt()
 
         try:
-            await gate.permit(timeout_seconds=timeout, before_reserve=before_reserve)
+            await gate.permit(
+                timeout_seconds=timeout, before_reserve=before_reserve, budget=initial
+            )
         except RateLimitWaitTimeout as exc:
             reason = "rate_limit_wait_timeout"
             log_event(
@@ -798,7 +797,7 @@ class HttpJsonExecutor:
                 **context,
             )
             raise ExecutionFailure(
-                ErrorCode.ALL_PROVIDERS_FAILED,
+                self._rate_limit_error_code,
                 f"{self._provider_name}/{stage}: {reason}",
                 reason=reason,
             ) from exc

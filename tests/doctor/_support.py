@@ -15,6 +15,7 @@ def write_valid_config(path: Path) -> None:
                 "[llm_providers.primary]",
                 'protocol = "openai"',
                 'api_endpoint = "chat_completions"',
+                "[[llm_providers.primary.credentials]]",
                 'api_url = "https://llm.example.test"',
                 f'{credential_field} = "{env_name}"',
                 "",

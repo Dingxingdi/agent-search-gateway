@@ -17,6 +17,38 @@ def _fixture(name: str) -> object:
     return json.loads((_FIXTURES / name).read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("raw_content", [None, "Natural raw body"])
+async def test_tavily_search_does_not_request_raw_body(raw_content: str | None) -> None:
+    result = {
+        "url": "https://example.com/a",
+        "title": "Example result",
+        "content": "Search summary",
+    }
+    if raw_content is not None:
+        result["raw_content"] = raw_content
+    executor = RecordingJsonExecutor([{"results": [result]}])
+    adapter = TavilyAdapter(
+        name="tavily",
+        api_url="https://tavily.example.test",
+        secret=SecretValue("x"),
+        http_executor=executor,
+    )
+
+    hits = await adapter.search("query")
+
+    assert hits == [
+        KeywordSearchHit(
+            url="https://example.com/a",
+            title="Example result",
+            snippet="Search summary",
+            raw_content=raw_content or "",
+            content="",
+        )
+    ]
+    [request] = executor.requests
+    assert request.json_body == {"query": "query"}
+
+
 async def test_tavily_adapter_conforms_to_registered_search_and_fetch_contracts() -> None:
     executor = RecordingJsonExecutor([_fixture("search.json"), _fixture("extract.json")])
     adapter = TavilyAdapter(
@@ -42,7 +74,7 @@ async def test_tavily_adapter_conforms_to_registered_search_and_fetch_contracts(
     search_request, fetch_request = executor.requests
     assert search_request.url == "https://tavily.example.test/base/search"
     assert search_request.headers == {"Authorization": "Bearer x"}
-    assert search_request.json_body == {"query": "query", "include_raw_content": "markdown"}
+    assert search_request.json_body == {"query": "query"}
     assert fetch_request.url == "https://tavily.example.test/base/extract"
     assert fetch_request.json_body == {"urls": ["https://example.com/a"]}
     assert "URLStore" not in str(adapter.search.__annotations__)

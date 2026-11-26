@@ -2,7 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation
@@ -27,7 +26,6 @@ def _orchestrator(tmp_path: Path, invocations: tuple[LLMInvocation, ...]) -> Sea
     return SearchOrchestrator(
         keyword_providers=(),
         llm_invocations=invocations,
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
         stages=LLMStages(
             {client.name: client},
             judge=fallback,

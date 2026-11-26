@@ -13,7 +13,7 @@ from tests.support.fakes import FakeKeywordSearchProvider
 
 
 @pytest.mark.parametrize("with_key", [False, True])
-async def test_runtime_injects_optional_secret_only_when_present(
+async def test_runtime_injects_optional_credential_only_when_present(
     tmp_path: Path, with_key: bool
 ) -> None:
     captured: dict[str, object] = {}
@@ -33,13 +33,13 @@ async def test_runtime_injects_optional_secret_only_when_present(
             supports_optional_api_key=True,
         )
     )
-    options: dict[str, object] = {"enable_search": True}
+    options: dict[str, object] = {"enable_search": True, "credentials": [{}]}
     if with_key:
-        options["api_key_env"] = "ENV_A"
+        options["credentials"] = [{"api_key_env": "ENV_A"}]
     raw = _config()
     raw["web_providers"] = {"optional": options}
     resolved = resolve_config(raw, registry, _environment())
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=registry,
@@ -47,8 +47,8 @@ async def test_runtime_injects_optional_secret_only_when_present(
     )
     try:
         if with_key:
-            assert resolved.web.providers[0].secret is not None
-            assert captured["secret"] is resolved.web.providers[0].secret
+            assert resolved.web.providers[0].credentials[0].api_key is not None
+            assert captured["secret"] is resolved.web.providers[0].credentials[0].api_key
         else:
             assert "secret" not in captured
     finally:

@@ -32,7 +32,7 @@ async def test_agent_shutdown_awaits_process_group_cleanup_before_stopping(
     monkeypatch.setattr(adapter, "_TERMINATE_GRACE_SECONDS", 0.05)
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     paths = RuntimePaths(tmp_path / "config.toml", tmp_path / "daemon.sock", tmp_path / "results")
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
         paths,
         http_client_factory=_CountingAsyncClient,
@@ -77,7 +77,9 @@ async def test_agent_shutdown_awaits_process_group_cleanup_before_stopping(
                 with pytest.raises(ProtocolFailure, match="ended before newline"):
                     await active
                 await daemon_task
-            assert_clean(state, runtime.quotas.get_agent("primary"))
+            gate = runtime.quotas.get_agent("primary")
+            assert gate is not None
+            assert_clean(state, gate)
             assert close_calls == 1
             assert not paths.socket_file.exists()
             assert not list(paths.results_dir.glob("*.jsonl"))

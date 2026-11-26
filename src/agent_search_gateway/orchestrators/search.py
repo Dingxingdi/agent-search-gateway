@@ -8,9 +8,8 @@ from dataclasses import dataclass
 from typing import TypeVar
 
 from ..academic.aggregator import PaperAggregator
-from ..concurrency import ProviderQuotaManager
 from ..errors import ErrorCode, ExecutionFailure, InputFailure, ParserFailure
-from ..llm.stages import LLMStages, cheap_check
+from ..llm.stages import LLMStages
 from ..llm_search_parser import parse_search_markdown
 from ..models import (
     AgentInvocation,
@@ -53,13 +52,23 @@ class _StagedKeyword:
     content: str = ""
 
 
+def _usable_keyword_body(text: str) -> str:
+    """Keep the original body only if Fetch can send it to the LLM."""
+    if not text.strip():
+        return ""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    return text
+
+
 class SearchOrchestrator:
     def __init__(
         self,
         *,
         keyword_providers: Sequence[KeywordSearchProvider],
         llm_invocations: Sequence[LLMInvocation],
-        quotas: ProviderQuotaManager,
         stages: LLMStages,
         store: URLStore,
         result_writer: ResultWriter,
@@ -72,7 +81,6 @@ class SearchOrchestrator:
         self._keyword_providers = tuple(keyword_providers)
         self._llm_invocations = tuple(llm_invocations)
         self._agent_invocations = tuple(agent_invocations)
-        self.quotas = quotas
         self._stages = stages
         self._store = store
         self._result_writer = result_writer
@@ -127,12 +135,15 @@ class SearchOrchestrator:
             if not isinstance(outcome, list):
                 continue
             for staged in outcome:
-                self._store.admit(
-                    staged.url,
-                    staged.abstract,
-                    raw_content=staged.raw_content,
-                    content=staged.content,
-                )
+                if staged.raw_content or staged.content:
+                    await self._store.admit_candidate(
+                        staged.url,
+                        staged.abstract,
+                        raw_content=staged.raw_content,
+                        content=staged.content,
+                    )
+                else:
+                    self._store.admit(staged.url, staged.abstract)
                 if staged.url not in seen:
                     seen.add(staged.url)
                     ordered_urls.append(staged.url)
@@ -569,8 +580,7 @@ class SearchOrchestrator:
             stage="search",
         )
         try:
-            async with self.quotas.get_web(provider.name).lease():
-                hits = await provider.search(query)
+            hits = await provider.search(query)
             if not isinstance(hits, list):
                 raise TypeError("provider search result must be a list")
         except asyncio.CancelledError as exc:
@@ -588,21 +598,9 @@ class SearchOrchestrator:
 
         counts = CandidateCounts(len(hits))
         staged: list[_StagedKeyword] = []
-        hit_failure: ExecutionFailure | None = None
-        failed_hits = 0
         try:
             for hit in hits:
-                try:
-                    staged_hit = await self._stage_keyword_hit(
-                        hit, provider=provider.name, counts=counts
-                    )
-                except ExecutionFailure as exc:
-                    # Keyword hits are independent; one failed judge must not discard sibling hits.
-                    if hit_failure is None:
-                        hit_failure = exc
-                    counts.reject("judge_execution_failed")
-                    failed_hits += 1
-                    continue
+                staged_hit = self._stage_keyword_hit(hit, provider=provider.name, counts=counts)
                 if staged_hit is not None:
                     counts.accept()
                     staged.append(staged_hit)
@@ -626,17 +624,6 @@ class SearchOrchestrator:
                 **counts.as_fields(),
             )
 
-        if hit_failure is not None:
-            if not staged:
-                self._log_provider_failure(provider.name, "judge", started, hit_failure)
-                raise hit_failure
-            self._log_provider_partial_failure(
-                provider.name,
-                "judge",
-                started,
-                hit_failure,
-                failed_hits=failed_hits,
-            )
         log_event(
             self._logger,
             logging.DEBUG,
@@ -649,7 +636,7 @@ class SearchOrchestrator:
         )
         return staged
 
-    async def _stage_keyword_hit(
+    def _stage_keyword_hit(
         self,
         hit: KeywordSearchHit,
         *,
@@ -707,59 +694,12 @@ class SearchOrchestrator:
             url=target_url_for_log(str(url)),
             abstract_chars=len(abstract),
         )
-        current = self._store.get(url)
-        if current is not None and not current.available:
-            self._log_body_decision(provider, url, "body_skipped", "stored_unavailable")
-            return _StagedKeyword(url=url, abstract=abstract, provider=provider)
-
-        had_body = bool(hit.raw_content or hit.content)
-        raw_content = hit.raw_content if hit.raw_content.strip() else ""
-        content = hit.content if hit.content.strip() else ""
-        candidate = content or raw_content
-        if not candidate:
-            reason = "cheap_check" if had_body else "no_body"
-            event = "body_rejected" if had_body else "body_skipped"
-            self._log_body_decision(provider, url, event, reason)
-            return _StagedKeyword(url=url, abstract=abstract, provider=provider)
-        if not cheap_check(candidate):
-            self._log_body_decision(provider, url, "body_rejected", "cheap_check")
-            return _StagedKeyword(url=url, abstract=abstract, provider=provider)
-
-        decision = await self._stages.judge(candidate)
-        if not decision.ok:
-            self._log_body_decision(provider, url, "body_rejected", "judge_rejected")
-            return _StagedKeyword(url=url, abstract=abstract, provider=provider)
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            "body_accepted",
-            provider=provider,
-            url=target_url_for_log(str(url)),
-            raw_chars=len(raw_content),
-            content_chars=len(content),
-        )
         return _StagedKeyword(
             url=url,
             abstract=abstract,
             provider=provider,
-            raw_content=raw_content,
-            content=content,
-        )
-
-    def _log_body_decision(
-        self,
-        provider: str,
-        url: NormalizedURL,
-        event: str,
-        reason: str,
-    ) -> None:
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            event,
-            provider=provider,
-            url=target_url_for_log(str(url)),
-            reason=reason,
+            raw_content=_usable_keyword_body(hit.raw_content),
+            content=_usable_keyword_body(hit.content),
         )
 
     def _log_provider_failure(
@@ -776,29 +716,6 @@ class SearchOrchestrator:
             provider=provider,
             stage=stage,
             error_type=type(exc).__name__,
-            elapsed_ms=elapsed_ms(self._monotonic, started),
-            reason=safe_failure_reason(exc),
-            exc_info=False,
-            **diagnostic_fields_from_failure(exc),
-        )
-
-    def _log_provider_partial_failure(
-        self,
-        provider: str,
-        stage: str,
-        started: float,
-        exc: Exception,
-        *,
-        failed_hits: int,
-    ) -> None:
-        log_event(
-            self._logger,
-            logging.DEBUG,
-            "provider_partial_failure",
-            provider=provider,
-            stage=stage,
-            error_type=type(exc).__name__,
-            failed_hits=failed_hits,
             elapsed_ms=elapsed_ms(self._monotonic, started),
             reason=safe_failure_reason(exc),
             exc_info=False,

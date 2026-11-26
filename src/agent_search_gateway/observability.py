@@ -3,8 +3,10 @@
 import json
 import logging
 import re
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import suppress
+import sys
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
@@ -183,10 +185,17 @@ def normalize_log_reason(value: str, max_chars: int = 160) -> str:
     return f"{normalized[: max_chars - 1]}…"
 
 
+def seconds_to_ms(seconds: float) -> int:
+    """Convert finite durations to milliseconds, including very large rate windows."""
+    if seconds >= sys.float_info.max / 1000:
+        return int(seconds) * 1000
+    return max(0, int(seconds * 1000))
+
+
 def elapsed_ms(monotonic: Callable[[], float], started: float) -> int:
     """Convert a monotonic interval to a non-negative whole-millisecond duration."""
 
-    return max(0, int((monotonic() - started) * 1000))
+    return seconds_to_ms(monotonic() - started)
 
 
 def target_url_for_log(value: str) -> str:
@@ -335,6 +344,29 @@ class KeyValueFormatter(logging.Formatter):
         return self._redactor.redact(" ".join(parts))
 
 
+@dataclass(frozen=True, slots=True)
+class CredentialIdentity:
+    """A logical provider and its zero-based credential index, never the credential itself."""
+
+    namespace: str
+    provider: str
+    index: int
+
+
+_credential_identity: ContextVar[CredentialIdentity | None] = ContextVar(
+    "credential_identity", default=None
+)
+
+
+@contextmanager
+def credential_context(identity: CredentialIdentity | None) -> Iterator[None]:
+    token = _credential_identity.set(identity)
+    try:
+        yield
+    finally:
+        _credential_identity.reset(token)
+
+
 def log_event(
     logger: logging.Logger,
     level: int,
@@ -349,6 +381,15 @@ def log_event(
     for name in fields:
         _validated_field_name(name)
     try:
+        identity = _credential_identity.get()
+        if (
+            identity is not None
+            and fields.get("provider", identity.provider) == identity.provider
+            and fields.get("namespace", identity.namespace) == identity.namespace
+        ):
+            fields.setdefault("provider", identity.provider)
+            fields.setdefault("namespace", identity.namespace)
+            fields.setdefault("credential_index", identity.index)
         for name, limit in DIAGNOSTIC_TEXT_LIMITS:
             value = fields.get(name)
             if type(value) is int and name != "upstream_message":

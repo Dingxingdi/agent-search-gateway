@@ -21,6 +21,33 @@ The request-scoped `--provider` flag on `keyword-search`, `paper-search`, and `l
 
 ### HTTP provider configuration
 
+**Breaking configuration change:** every enabled or referenced HTTP Web, academic, OA and LLM provider requires a nonempty ordered `credentials` array, declared with `[[namespace.provider.credentials]]`. Put existing endpoint fields, environment-variable authentication references and optional limits in each member. Endpoint names remain `api_url` or the provider's existing dedicated fields; TinyFish retains both `search_api_url` and `fetch_api_url`. Provider tables retain enable flags, `use_proxy`, business options and LLM protocol settings. Model and invocation tables keep their existing locations. Write provider fields before its first credentials table and use full paths for subsequent business subtables.
+
+Old provider-level endpoint/authentication/limit fields and `default_max_concurrency`, including mixed old/new configurations, are rejected with migration errors. Move them manually into each member. To retain previous concurrency, explicitly set its former value on each applicable member; omission now means no capacity gate. Upgrades do not convert user configuration.
+
+`credential_strategy` is `round_robin` by default, or `fill_first`. Round Robin advances stable array positions when selecting; Fill First selects the first currently available member on every call, so an unrestricted first member can handle every call. Existing HTTP and LLM protocol retries finish within the selected credential. Only terminal provider execution failure tries another untried member, for one pass through the pool. Empty results, OA no-match and accepted partial success complete successfully. Failures create no memory, cooldown or persistent disablement.
+
+`[web_providers].fetch_order` orders logical Fetch providers. Enabled providers omitted from the list append in TOML declaration order; this is ordering, not filtering. A disabled registered Fetch provider may appear; unknown, duplicate and search-only names are errors. Scheduling chooses a currently ready pool without waiting for a higher-priority limited pool. Credential fallback completes before trying another provider. A rejected body moves to the next logical provider.
+
+For example, two independently configured Jina endpoints can omit all limits:
+
+```toml
+[web_providers.jina]
+enable_fetch = true
+credential_strategy = "round_robin"
+
+[[web_providers.jina.credentials]]
+api_url = "https://r.jina.ai"
+
+[[web_providers.jina.credentials]]
+api_url = "https://r.jina.ai"
+```
+
+This demonstrates array ordering and absent gates; duplicate endpoints do not create independent upstream allowances. Recommended settings in the rate reference must be configured explicitly.
+
+Even authentication-free endpoints require credential members. arXiv, anonymous Jina and open-webSearch need no invented key; official You.com free MCP forbids key configuration, while its REST endpoint requires it. Academic and OA key/email references belong to the member. Bright Data members may override the provider's common zone options.
+
+
 Web, academic, OA resolver and LLM provider tables accept `use_proxy` as a strict boolean, defaulting to `true`. The default preserves HTTPX environment proxies and `NO_PROXY`. Setting it to `false` connects that provider directly while preserving TLS certificate and hostname verification and CA environment settings: `SSL_CERT_FILE` takes precedence over `SSL_CERT_DIR`. This field applies only to HTTP providers and does not affect external Agent subprocess networking or its `pass_env` rules. Edit the existing configuration and restart the daemon normally to apply changes; upgrades do not rewrite user configuration.
 
 Firecrawl Search returns metadata without requesting page scraping; page bodies require explicit Fetch. Its documented options are `search_limit` (integer 1–100, default 10), `search_highlights` (boolean, default true), `scrape_formats` (nonempty unique list of `markdown`/`rawHtml`, default `["markdown"]`) and `scrape_parsers` (unique list of `pdf`/`image`, default `[]`). Parser choices affect supplier costs; base64-only PDF responses are not usable text and can use existing Fetch fallback. See the [README](../README.md#firecrawl-search-and-explicit-fetch) for current supplier rules and billing caveats.
@@ -29,9 +56,9 @@ arXiv supports `query_fields` (nonempty ordered unique list of `ti`/`abs`, defau
 
 ### Provider rate policies, credentials and input limits
 
-Web, academic and OA provider tables accept `rate_limits`, an array of windows with a positive integer `requests` count and a positive `period_seconds` duration. `min_interval_seconds` independently sets minimum spacing between starts. Each physical request, including retries, counts against all windows for its provider in that daemon. Web Search and Fetch share them. `max_concurrency` governs in-flight work separately. Omission leaves the local rate policy empty. Existing configurations are not automatically rewritten. See the [provider rate reference](provider-rate-limits.md) for all 31 services, including unpublished or account-dependent values. Source coverage does not imply live verification.
+Each HTTP credential accepts independently optional `rate_limits`, `min_interval_seconds` and `max_concurrency`. Windows contain a positive integer `requests` count and positive `period_seconds`; minimum intervals space physical attempts. Every physical HTTP attempt counts, including parallel branches and retries. Search and Fetch share the same member's policy. Capacity counts a logical operation including internal retries. Omitted limits create no gates and inherit no global or provider cap. HTTPX has unlimited active connections; its 20 idle keepalive connections are not an active-work limit. Agent limits remain at the CLI alias and count invocations; Agent has no HTTP credentials or multi-account fallback. See the [provider rate reference](provider-rate-limits.md) for all 32 services and explicit example policies; these examples are not runtime defaults or live verification.
 
-`[retry].request_timeout_seconds` bounds local rate waiting per attempt. Fetch can select a different ready provider. The scheduler and the first send share the selected candidate's remaining wait budget. A rate-wait timeout allows fallback to other candidates. Waiting only for concurrency, running another candidate, and `Retry-After` sleeps do not use that budget.
+`[retry].request_timeout_seconds` bounds credential selection waiting across rate and capacity checks. Rechecks consume the same budget. The scheduler and first send share the selected candidate's remaining wait budget. Existing per-attempt HTTP timeouts and Retry-After handling remain in effect; no new whole-operation deadline is added.
 
 **Breaking configuration change.** Enabled OpenAlex requires `api_key_env` naming a nonempty credential in the daemon environment (for example, `OPENALEX_API_KEY`). Supply the variable and restart, or disable OpenAlex. The gateway uses Bearer authentication with no anonymous fallback. `contact_email_env` is optional and cannot replace the key. This policy is stricter than the upstream basic anonymous mode.
 
@@ -96,6 +123,14 @@ The gateway does not promise tool execution or source access based solely on ter
 success. These additions do not turn Python imports or the socket protocol into a
 stable SDK.
 
+### Deferred URL body processing
+
+Search does not request full page text and performs no cheap check, Judge, Clean, Safety or Focus stage. Naturally returned bodies are retained as candidates. Tavily Search omits `include_raw_content` and Exa Search omits `contents.text`; their Fetch behavior is unchanged. Exa summaries retain the first highlight, then summary/title fallback; Firecrawl uses description metadata.
+
+URL records hold exactly URL, raw content, content, abstract and status. The six statuses are `need_fetch`, `need_judge`, `need_clean`, `need_safety`, `ready` and `unavailable`. Metadata-only Search admission starts at `need_fetch`; natural body candidates start at `need_judge`.
+
+Fetch requires an admitted URL. Under the existing per-URL lock it rereads state, judges cached candidates, cleans when required and runs Safety once for the final body. Cached-body rejection clears both body fields and continues actual Fetch. Pure execution failure then leaves `need_fetch`; stage errors retain the last completed state for a later retry. A ready body reuses its Safety result, without TTL or refresh. Focus summaries are request-specific and never cached. Unavailable records retain the existing unavailable response.
+
 ### Keyword result URL identity
 
 At the shared keyword-result entry point, before normal URL normalization and
@@ -114,7 +149,9 @@ adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 ## Diagnostic interfaces
 
-`doctor` makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` to the configured open-webSearch daemon. A healthy response confirms daemon liveness only. A failed probe produces a `[fail]` check and exit code 1. A missing gateway Unix socket is independently reported as `[info] daemon not running`. A report containing only `[ok]` and `[info]` checks exits with code 0.
+`doctor` makes no network requests when `open_websearch` is absent or both Search and Fetch are disabled. With valid configuration and either capability enabled, it sends one credential-free `GET /health` per configured open-webSearch member. A healthy response confirms daemon liveness only. A failed probe produces a `[fail]` check and exit code 1. A missing gateway Unix socket is independently reported as `[info] daemon not running`. A report containing only `[ok]` and `[info]` checks exits with code 0.
+
+Doctor validates every enabled or referenced credential separately, including later members, and reports namespace/provider/index labels. A successful member cannot hide another member's configuration or health failure. Existing applicable health checks do not perform paid Search or Fetch or measure balances.
 
 `doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `2.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
@@ -127,6 +164,14 @@ Search, Fetch, and OA owners record one terminal outcome for each invocation and
 scope; the daemon records the whole workflow outcome. An individual provider failure
 need not fail a partially successful workflow. Unpaywall 404 remains a completed
 lookup with no match.
+
+HTTP credential operations, capacity and rate gates use the logical provider name,
+a namespace (web, academic, oa, or llm), and a zero-based `credential_index`.
+Selection, fallback, exhaustion, waiting and cancellation events omit the index when
+no member is known. These fields do not expose authentication values, and are not
+part of public result rows. Agent alias gates have no HTTP credential index.
+`url_state_committed` records only completed, atomic URL-state changes, never an
+uncommitted transition or the page body.
 
 Success diagnostics retain metadata and counts. Failure diagnostics add allowlisted
 upstream code/status/type and short messages when safely extractable. Adapter and

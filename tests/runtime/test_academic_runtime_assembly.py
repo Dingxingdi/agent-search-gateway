@@ -10,6 +10,7 @@ from agent_search_gateway.providers.academic.defaults import (
 )
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.runtime import Runtime
+from tests.runtime.conftest import configured_capacity
 from tests.runtime.test_runtime_assembly import _config, _CountingAsyncClient
 
 
@@ -21,14 +22,15 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
     resolver_registry = build_default_oa_resolver_registry()
     raw = _config()
     raw["academic_providers"] = {
-        "default_max_concurrency": 2,
         "core": {
             "enabled": True,
-            "api_key_env": "CORE_API_KEY",
-            "max_concurrency": 4,
+            "credentials": [{"api_key_env": "ENV_CORE", "max_concurrency": 4}],
         },
         "arxiv": {"enabled": False},
-        "openalex": {"enabled": True, "api_key_env": "ENV_A"},
+        "openalex": {
+            "enabled": True,
+            "credentials": [{"api_key_env": "ENV_A", "max_concurrency": 2}],
+        },
     }
     resolved = resolve_config(
         raw,
@@ -40,19 +42,19 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
             "ENV_D": "x",
             "ENV_E": "x",
             "ENV_F": "x",
-            "CORE_API_KEY": "x",
+            "ENV_CORE": "x",
         },
         academic_registry=academic_registry,
         oa_resolver_registry=resolver_registry,
     )
     clients: list[_CountingAsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
+    def client_factory(**kwargs: object) -> httpx.AsyncClient:
         client = _CountingAsyncClient()
         clients.append(client)
         return client
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=web_registry,
@@ -64,11 +66,8 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
         "core",
         "openalex",
     ]
-    assert runtime.quotas.get_rate("academic", "arxiv") is None
-    assert runtime.quotas.get_rate("oa", "unpaywall") is None
     assert runtime.oa_resolver is None
-    assert runtime.quotas.get_academic("core").limit == 4
-    assert runtime.quotas.get_academic("openalex").limit == 2
+    assert [configured_capacity(p).limit for p in runtime.academic_search_providers] == [4, 2]
     assert (
         runtime.search_orchestrator._paper_aggregator
         is runtime.paper_search_orchestrator.aggregator
@@ -78,3 +77,72 @@ async def test_runtime_instantiates_only_enabled_academic_providers_in_configure
 
     await runtime.aclose()
     assert all(client.close_calls == 1 for client in clients)
+
+
+async def test_academic_and_oa_credential_endpoints_and_contacts(tmp_path: Path) -> None:
+    raw = _config()
+    raw["web_providers"] = {}
+    raw["academic_providers"] = {
+        "crossref": {
+            "enabled": True,
+            "credentials": [
+                {"api_url": f"https://crossref-{i}.test", "contact_email_env": env}
+                for i, env in enumerate(("FIRST", "SECOND"))
+            ],
+        }
+    }
+    raw["oa_resolvers"] = {
+        "unpaywall": {
+            "enabled": True,
+            "credentials": [
+                {"api_url": f"https://oa-{i}.test", "contact_email_env": env}
+                for i, env in enumerate(("FIRST", "SECOND"))
+            ],
+        }
+    }
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host.startswith("oa-"):
+            return httpx.Response(404)
+        return httpx.Response(200, json={"message": {"items": []}})
+
+    env = {
+        "FIRST": "first@example.test",
+        "SECOND": "second@example.test",
+        "ENV_D": "example",
+        "ENV_E": "example",
+    }
+    config = resolve_config(
+        raw,
+        build_default_registry(),
+        env,
+        academic_registry=build_default_academic_registry(),
+        oa_resolver_registry=build_default_oa_resolver_registry(),
+    )
+    runtime = await Runtime.build(
+        config,
+        RuntimePaths.from_home(tmp_path),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    try:
+        (provider,) = runtime.academic_search_providers
+        assert runtime.oa_resolver is not None
+        for _ in range(2):
+            assert await provider.search("test query") == []
+            assert await runtime.oa_resolver.resolve("10.1234/example") is None
+        assert [r.url.host for r in requests] == [
+            "crossref-0.test",
+            "oa-0.test",
+            "crossref-1.test",
+            "oa-1.test",
+        ]
+        assert [r.url.params.get("email") or r.url.params["mailto"] for r in requests] == [
+            env["FIRST"],
+            env["FIRST"],
+            env["SECOND"],
+            env["SECOND"],
+        ]
+    finally:
+        await runtime.aclose()

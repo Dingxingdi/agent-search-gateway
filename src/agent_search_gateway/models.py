@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
+from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from .errors import ErrorCode, ExecutionFailure
@@ -14,13 +15,22 @@ if TYPE_CHECKING:
     from .providers.contracts import URLFetchCandidate
 
 
+class URLStatus(StrEnum):
+    NEED_FETCH = "need_fetch"
+    NEED_JUDGE = "need_judge"
+    NEED_CLEAN = "need_clean"
+    NEED_SAFETY = "need_safety"
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+
+
 @dataclass(frozen=True, slots=True)
 class URLRecord:
     url: NormalizedURL
     raw_content: str = ""
     content: str = ""
     abstract: str = ""
-    available: bool = True
+    status: URLStatus = URLStatus.NEED_FETCH
 
 
 @dataclass(frozen=True, slots=True)

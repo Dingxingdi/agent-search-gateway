@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
-from agent_search_gateway.concurrency import ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.models import OAResolution
 from agent_search_gateway.orchestrators.paper import PaperSearchOrchestrator
@@ -49,17 +48,8 @@ def _orchestrator(
     store: URLStore | None = None,
     logger: object | None = None,
 ) -> PaperSearchOrchestrator:
-    names = [
-        provider.name  # type: ignore[attr-defined]
-        for provider in providers
-    ]
     return PaperSearchOrchestrator(
         providers=providers,  # type: ignore[arg-type]
-        quotas=ProviderQuotaManager(
-            web_limits={},
-            llm_limits={},
-            academic_limits={name: 1 for name in names},
-        ),
         aggregator=PaperAggregator(PRIORITY),
         resolver=resolver,  # type: ignore[arg-type]
         store=store or URLStore(),
@@ -133,8 +123,6 @@ async def test_providers_run_concurrently_but_output_uses_configured_order(tmp_p
 
     titles = [json.loads(line)["title"] for line in target.read_text().splitlines()]
     assert titles == ["First", "Second"]
-    assert orchestrator.quotas.get_academic("openalex").max_observed_in_use == 1
-    assert orchestrator.quotas.get_academic("core").max_observed_in_use == 1
 
 
 async def test_duplicate_hits_merge_then_resolve_doi_once_and_admit_only_landing(

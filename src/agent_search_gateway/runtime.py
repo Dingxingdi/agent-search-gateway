@@ -1,27 +1,32 @@
 """Resolved runtime assembly for the foreground daemon."""
 
+import asyncio
 import logging
 import os
 import ssl
 from collections.abc import Callable, Mapping
+from contextlib import suppress
+from dataclasses import dataclass
 from functools import partial
-from typing import cast
+from typing import TypeVar, cast
 
 import httpx
 
 from .academic.aggregator import PaperAggregator
-from .concurrency import ProviderQuotaManager
+from .concurrency import ProviderQuotaManager, join_cleanup, make_capacity_gate
 from .config import (
+    LLMProviderConfig,
     ResolvedAcademicProviderConfig,
-    ResolvedAgentConfig,
     ResolvedConfig,
-    ResolvedInputLimits,
+    ResolvedCredential,
     ResolvedOAResolverConfig,
     ResolvedWebProviderConfig,
 )
+from .credential_pool import CredentialMember, CredentialPool
 from .errors import ConfigFailure, ErrorCode
 from .llm.stages import LLMStages
-from .observability import log_event
+from .models import RetryPolicy
+from .observability import CredentialIdentity, log_event
 from .orchestrators.fetch import FetchOrchestrator
 from .orchestrators.paper import PaperSearchOrchestrator
 from .orchestrators.search import SearchOrchestrator
@@ -38,19 +43,26 @@ from .providers.contracts import (
     KeywordSearchProvider,
     LLMClient,
     OAResolver,
-    URLFetchProvider,
+    PreparedLLMClient,
+    ReservableFetchProvider,
+    WebAdapter,
 )
 from .providers.defaults import build_default_registry
 from .providers.http import HttpJsonExecutor
 from .providers.llm.openai_chat import OpenAIChatCompletionsClient
-from .providers.registry import ProviderRegistry
-from .rate_limit import RateGate
+from .providers.pooled import (
+    PooledAcademicProvider,
+    PooledLLMClient,
+    PooledOAResolver,
+    PooledWebProvider,
+)
+from .providers.registry import ProviderRegistry, WebProviderRegistration
+from .rate_limit import make_rate_gate
 from .result_writer import ResultWriter
 from .scheduler.fetch import FetchScheduler
 from .url_store import URLStore
 
 HttpClientFactory = Callable[..., httpx.AsyncClient]
-_DEFAULT_INPUT_LIMITS = ResolvedInputLimits()
 _RESERVED_WEB_ADAPTER_KWARGS = frozenset({"name", "http_executor", "secret"})
 _RESERVED_ACADEMIC_ADAPTER_KWARGS = frozenset({"name", "executor", "api_key", "contact_email"})
 
@@ -93,16 +105,194 @@ def _create_http_client(
     direct_ssl_context: ssl.SSLContext | None,
     label: str,
 ) -> httpx.AsyncClient:
+    limits = httpx.Limits(max_connections=None, max_keepalive_connections=20)
     if use_proxy:
-        return factory()
+        return factory(limits=limits)
     if direct_ssl_context is None:
         raise ConfigFailure(ErrorCode.CONFIG_ERROR, f"Missing direct TLS context for {label}")
     try:
-        return factory(trust_env=False, verify=direct_ssl_context)
+        return factory(trust_env=False, verify=direct_ssl_context, limits=limits)
     except TypeError:
         raise ConfigFailure(
             ErrorCode.CONFIG_ERROR, f"HTTP client factory failed for direct connection to {label}"
         ) from None
+
+
+class _RuntimeResources:
+    """Owns the physical HTTP clients allocated during runtime assembly."""
+
+    def __init__(self) -> None:
+        self._clients: dict[int, httpx.AsyncClient] = {}
+        self._closing: asyncio.Task[None] | None = None
+
+    def register(self, client: httpx.AsyncClient) -> httpx.AsyncClient:
+        self._clients[id(client)] = client
+        return client
+
+    async def aclose(self) -> None:
+        if self._closing is None or (self._closing.done() and self._clients):
+            self._closing = asyncio.create_task(self._close_clients())
+        await join_cleanup(self._closing)
+
+    async def _close_clients(self) -> None:
+        while self._clients:
+            _, client = self._clients.popitem()
+            try:
+                await client.aclose()
+            except (asyncio.CancelledError, Exception):
+                # The caller waits through join_cleanup. A cancelled transport close
+                # must not interrupt cleanup of the remaining clients.
+                log_event(logging.getLogger(__name__), logging.ERROR, "runtime_client_close_failed")
+
+
+ProviderConfig = (
+    ResolvedWebProviderConfig
+    | ResolvedAcademicProviderConfig
+    | ResolvedOAResolverConfig
+    | LLMProviderConfig
+)
+Adapter = TypeVar("Adapter")
+
+
+@dataclass
+class _HTTPAssembly:
+    resources: _RuntimeResources
+    factory: HttpClientFactory
+    direct_ssl_context: ssl.SSLContext | None
+    retry: RetryPolicy
+
+    async def build_pool(
+        self,
+        namespace: str,
+        provider: ProviderConfig,
+        create_adapter: Callable[[ResolvedCredential, HttpJsonExecutor], Adapter],
+    ) -> tuple[CredentialPool[Adapter], Adapter]:
+        error_code = (
+            ErrorCode.LLM_STAGE_FAILED if namespace == "llm" else ErrorCode.ALL_PROVIDERS_FAILED
+        )
+        members: list[CredentialMember[Adapter]] = []
+        for index, credential in enumerate(provider.credentials):
+            identity = CredentialIdentity(namespace, provider.name, index)
+            capacity = make_capacity_gate(
+                credential.max_concurrency,
+                provider=provider.name,
+                quota_kind=namespace,
+                logger=logging.getLogger(__name__),
+                identity=identity,
+            )
+            rate = make_rate_gate(credential.rate_policy, identity=identity)
+            client = self.resources.register(
+                _create_http_client(
+                    self.factory,
+                    use_proxy=provider.use_proxy,
+                    direct_ssl_context=self.direct_ssl_context,
+                    label=f"{namespace} provider {provider.name}",
+                )
+            )
+            executor = HttpJsonExecutor(
+                client,
+                self.retry,
+                provider_name=provider.name,
+                rate_gate=rate,
+                rate_limit_error_code=error_code,
+            )
+            adapter = create_adapter(credential, executor)
+            members.append(CredentialMember(adapter, capacity, rate))
+            # Startup can be cancelled between physical allocations.
+            await asyncio.sleep(0)
+        if not members:
+            raise ConfigFailure(
+                ErrorCode.CONFIG_ERROR,
+                f"Missing credentials for {namespace} provider {provider.name}",
+            )
+        pool = CredentialPool(
+            namespace,
+            provider.name,
+            members,
+            strategy=provider.credential_strategy,
+            request_timeout_seconds=self.retry.request_timeout_seconds,
+            error_code=error_code,
+        )
+        return pool, members[0].adapter
+
+
+def _vendor_adapter(
+    factory: Callable[..., object],
+    label: str,
+    options: Mapping[str, object],
+    reserved: frozenset[str],
+    **kwargs: object,
+) -> object:
+    conflicts = reserved.intersection(options)
+    if conflicts:
+        raise ConfigFailure(
+            ErrorCode.CONFIG_ERROR,
+            f"Reserved config key(s) for {label}: {', '.join(sorted(conflicts))}",
+        )
+    try:
+        return factory(**kwargs, **options)
+    except TypeError as exc:
+        raise ConfigFailure(ErrorCode.CONFIG_ERROR, f"Invalid configuration for {label}") from exc
+
+
+def _web_adapter(
+    registration: WebProviderRegistration,
+    credential: ResolvedCredential,
+    executor: HttpJsonExecutor,
+) -> WebAdapter:
+    kwargs: dict[str, object] = {"name": registration.name, "http_executor": executor}
+    if credential.api_key is not None and (
+        registration.requires_api_key or registration.supports_optional_api_key
+    ):
+        kwargs["secret"] = credential.api_key
+    elif registration.requires_api_key:
+        raise ConfigFailure(
+            ErrorCode.CONFIG_ERROR, f"Invalid enabled web provider: {registration.name}"
+        )
+    return cast(
+        WebAdapter,
+        _vendor_adapter(
+            registration.factory,
+            f"web provider {registration.name}",
+            credential.options,
+            _RESERVED_WEB_ADAPTER_KWARGS,
+            **kwargs,
+        ),
+    )
+
+
+def _llm_adapter(
+    name: str, config: ResolvedConfig, credential: ResolvedCredential, executor: HttpJsonExecutor
+) -> PreparedLLMClient:
+    api_url = credential.options["api_url"]
+    if not isinstance(api_url, str) or credential.api_key is None:
+        raise ConfigFailure(
+            ErrorCode.CONFIG_ERROR, f"Invalid configuration for LLM provider {name}"
+        )
+    return OpenAIChatCompletionsClient(
+        name=name,
+        api_url=api_url,
+        secret=credential.api_key,
+        executor=executor,
+        request_body_bytes=config.input_limits.llm_request_body_bytes,
+        retry_policy=config.retry,
+    )
+
+
+def _academic_adapter(
+    factory: Callable[..., object],
+    label: str,
+    credential: ResolvedCredential,
+    executor: HttpJsonExecutor,
+) -> object:
+    kwargs: dict[str, object] = {"executor": executor}
+    if credential.api_key is not None:
+        kwargs["api_key"] = credential.api_key
+    if credential.contact_email is not None:
+        kwargs["contact_email"] = credential.contact_email
+    return _vendor_adapter(
+        factory, label, credential.options, _RESERVED_ACADEMIC_ADAPTER_KWARGS, **kwargs
+    )
 
 
 class Runtime:
@@ -113,7 +303,7 @@ class Runtime:
         *,
         quotas: ProviderQuotaManager,
         web_search_providers: tuple[KeywordSearchProvider, ...],
-        web_fetch_providers: tuple[URLFetchProvider, ...],
+        web_fetch_providers: tuple[ReservableFetchProvider, ...],
         academic_search_providers: tuple[AcademicSearchProvider, ...],
         oa_resolver: OAResolver | None,
         llm_clients: Mapping[str, LLMClient],
@@ -121,8 +311,7 @@ class Runtime:
         search_orchestrator: SearchOrchestrator,
         paper_search_orchestrator: PaperSearchOrchestrator,
         fetch_orchestrator: FetchOrchestrator,
-        web_http_executors: tuple[HttpJsonExecutor, ...],
-        academic_http_executors: tuple[HttpJsonExecutor, ...],
+        resources: _RuntimeResources,
     ) -> None:
         self.quotas = quotas
         self.web_search_providers = web_search_providers
@@ -134,12 +323,10 @@ class Runtime:
         self.search_orchestrator = search_orchestrator
         self.paper_search_orchestrator = paper_search_orchestrator
         self.fetch_orchestrator = fetch_orchestrator
-        self._web_http_executors = web_http_executors
-        self._academic_http_executors = academic_http_executors
-        self._closed = False
+        self._resources = resources
 
     @classmethod
-    def build(
+    async def build(
         cls,
         config: ResolvedConfig,
         paths: RuntimePaths,
@@ -164,337 +351,200 @@ class Runtime:
         )
         direct_ssl_context = _prepare_direct_ssl_context() if needs_direct else None
         quotas = ProviderQuotaManager(
-            web_limits={item.name: item.max_concurrency for item in enabled_web},
-            llm_limits={item.name: item.max_concurrency for item in config.llm.providers},
-            academic_limits={item.name: item.max_concurrency for item in enabled_academic},
             agent_limits={item.name: item.max_concurrency for item in config.agent.providers},
         )
-        agent_runners = cls._build_agent_runners(config.agent, quotas, config.input_limits)
-        web_search, web_fetch, web_executors = cls._build_web_providers(
-            enabled_web,
-            provider_registry,
-            config,
-            quotas,
-            http_client_factory,
-            direct_ssl_context,
-        )
-        academic_search, academic_executors = cls._build_academic_providers(
-            enabled_academic,
-            academic_provider_registry,
-            config,
-            quotas,
-            http_client_factory,
-            direct_ssl_context,
-        )
-        oa_resolver, resolver_executors = cls._build_oa_resolver(
-            config.oa_resolver,
-            resolver_registry,
-            config,
-            quotas,
-            http_client_factory,
-            direct_ssl_context,
-        )
-        llm_clients = cls._build_llm_clients(
-            config, quotas, http_client_factory, direct_ssl_context
-        )
-        stages = LLMStages(
-            llm_clients,
-            judge=config.llm.judge,
-            safety=config.llm.safety,
-            content_clean=config.llm.content_clean,
-            focus_summary=config.llm.focus_summary,
-            agent_runners=agent_runners,
-        )
-        store = URLStore()
-        result_writer = ResultWriter(paths.results_dir)
-        paper_aggregator = PaperAggregator(
-            (
-                *(provider.name for provider in academic_search),
-                *(f"llm:{item.provider}" for item in config.llm.search_invocations),
-                *(f"agent:{item.provider}" for item in config.agent.search_invocations),
+        resources = _RuntimeResources()
+        assembly = _HTTPAssembly(resources, http_client_factory, direct_ssl_context, config.retry)
+        try:
+            agent_runners = cls._build_agent_runners(config, quotas)
+            web_search, web_fetch = await cls._build_web_providers(
+                enabled_web, provider_registry, config.web.fetch_order, assembly
             )
-        )
-        search_orchestrator = SearchOrchestrator(
-            keyword_providers=web_search,
-            llm_invocations=config.llm.search_invocations,
-            agent_invocations=config.agent.search_invocations,
-            quotas=quotas,
-            stages=stages,
-            store=store,
-            result_writer=result_writer,
-            paper_aggregator=paper_aggregator,
-            paper_resolver=oa_resolver,
-        )
-        paper_search_orchestrator = PaperSearchOrchestrator(
-            providers=academic_search,
-            quotas=quotas,
-            aggregator=paper_aggregator,
-            resolver=oa_resolver,
-            store=store,
-            result_writer=result_writer,
-        )
-        fetch_orchestrator = FetchOrchestrator(
-            store=store,
-            scheduler=FetchScheduler(
-                web_fetch,
-                quotas,
-                stages,
-                request_timeout_seconds=config.retry.request_timeout_seconds,
-            ),
-            stages=stages,
-        )
-        runtime = cls(
-            quotas=quotas,
-            web_search_providers=web_search,
-            web_fetch_providers=web_fetch,
-            academic_search_providers=academic_search,
-            oa_resolver=oa_resolver,
-            llm_clients=llm_clients,
-            store=store,
-            search_orchestrator=search_orchestrator,
-            paper_search_orchestrator=paper_search_orchestrator,
-            fetch_orchestrator=fetch_orchestrator,
-            web_http_executors=web_executors,
-            academic_http_executors=(*academic_executors, *resolver_executors),
-        )
-        log_event(
-            logging.getLogger(__name__),
-            logging.DEBUG,
-            "runtime_built",
-            web_use_proxy=",".join(
-                f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_web
+            academic_search = await cls._build_academic_providers(
+                enabled_academic, academic_provider_registry, assembly
             )
-            or "-",
-            academic_use_proxy=",".join(
-                f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_academic
+            oa_resolver = await cls._build_oa_resolver(
+                config.oa_resolver, resolver_registry, assembly
             )
-            or "-",
-            oa_use_proxy=(
-                f"{config.oa_resolver.name}:{str(config.oa_resolver.use_proxy).lower()}"
-                if config.oa_resolver is not None
-                else "-"
-            ),
-            llm_use_proxy=",".join(
-                f"{item.name}:{str(item.use_proxy).lower()}" for item in config.llm.providers
+            llm_clients = await cls._build_llm_clients(config, assembly)
+            stages = LLMStages(
+                llm_clients,
+                judge=config.llm.judge,
+                safety=config.llm.safety,
+                content_clean=config.llm.content_clean,
+                focus_summary=config.llm.focus_summary,
+                agent_runners=agent_runners,
             )
-            or "-",
-            web_providers=",".join(item.name for item in enabled_web) or "-",
-            web_provider_count=len(enabled_web),
-            llm_providers=",".join(item.name for item in config.llm.providers) or "-",
-            llm_provider_count=len(config.llm.providers),
-            academic_providers=",".join(item.name for item in enabled_academic) or "-",
-            academic_provider_count=len(enabled_academic),
-            oa_resolver=config.oa_resolver.name if config.oa_resolver is not None else "-",
-            web_limits=",".join(f"{item.name}:{item.max_concurrency}" for item in enabled_web)
-            or "-",
-            llm_limits=",".join(
-                f"{item.name}:{item.max_concurrency}" for item in config.llm.providers
+            store = URLStore()
+            result_writer = ResultWriter(paths.results_dir)
+            paper_aggregator = PaperAggregator(
+                (
+                    *(provider.name for provider in academic_search),
+                    *(f"llm:{item.provider}" for item in config.llm.search_invocations),
+                    *(f"agent:{item.provider}" for item in config.agent.search_invocations),
+                )
             )
-            or "-",
-            academic_limits=",".join(
-                f"{item.name}:{item.max_concurrency}" for item in enabled_academic
+            search_orchestrator = SearchOrchestrator(
+                keyword_providers=web_search,
+                llm_invocations=config.llm.search_invocations,
+                agent_invocations=config.agent.search_invocations,
+                stages=stages,
+                store=store,
+                result_writer=result_writer,
+                paper_aggregator=paper_aggregator,
+                paper_resolver=oa_resolver,
             )
-            or "-",
-        )
-        return runtime
+            paper_search_orchestrator = PaperSearchOrchestrator(
+                providers=academic_search,
+                aggregator=paper_aggregator,
+                resolver=oa_resolver,
+                store=store,
+                result_writer=result_writer,
+            )
+            fetch_orchestrator = FetchOrchestrator(
+                store=store,
+                scheduler=FetchScheduler(
+                    web_fetch,
+                    stages,
+                    request_timeout_seconds=config.retry.request_timeout_seconds,
+                ),
+                stages=stages,
+            )
+            runtime = cls(
+                quotas=quotas,
+                web_search_providers=web_search,
+                web_fetch_providers=web_fetch,
+                academic_search_providers=academic_search,
+                oa_resolver=oa_resolver,
+                llm_clients=llm_clients,
+                store=store,
+                search_orchestrator=search_orchestrator,
+                paper_search_orchestrator=paper_search_orchestrator,
+                fetch_orchestrator=fetch_orchestrator,
+                resources=resources,
+            )
+            log_event(
+                logging.getLogger(__name__),
+                logging.DEBUG,
+                "runtime_built",
+                web_use_proxy=",".join(
+                    f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_web
+                )
+                or "-",
+                academic_use_proxy=",".join(
+                    f"{item.name}:{str(item.use_proxy).lower()}" for item in enabled_academic
+                )
+                or "-",
+                oa_use_proxy=(
+                    f"{config.oa_resolver.name}:{str(config.oa_resolver.use_proxy).lower()}"
+                    if config.oa_resolver is not None
+                    else "-"
+                ),
+                llm_use_proxy=",".join(
+                    f"{item.name}:{str(item.use_proxy).lower()}" for item in config.llm.providers
+                )
+                or "-",
+                web_providers=",".join(item.name for item in enabled_web) or "-",
+                web_provider_count=len(enabled_web),
+                llm_providers=",".join(item.name for item in config.llm.providers) or "-",
+                llm_provider_count=len(config.llm.providers),
+                academic_providers=",".join(item.name for item in enabled_academic) or "-",
+                academic_provider_count=len(enabled_academic),
+                oa_resolver=config.oa_resolver.name if config.oa_resolver is not None else "-",
+            )
+            return runtime
+        except BaseException:
+            # Finish cleanup before propagating the original startup exception.
+            with suppress(asyncio.CancelledError):
+                await resources.aclose()
+            raise
 
-    @classmethod
-    def _build_web_providers(
-        cls,
+    @staticmethod
+    async def _build_web_providers(
         providers: tuple[ResolvedWebProviderConfig, ...],
         registry: ProviderRegistry,
-        config: ResolvedConfig,
-        quotas: ProviderQuotaManager,
-        http_client_factory: HttpClientFactory,
-        direct_ssl_context: ssl.SSLContext | None,
-    ) -> tuple[
-        tuple[KeywordSearchProvider, ...],
-        tuple[URLFetchProvider, ...],
-        tuple[HttpJsonExecutor, ...],
-    ]:
+        fetch_order: tuple[str, ...],
+        assembly: _HTTPAssembly,
+    ) -> tuple[tuple[KeywordSearchProvider, ...], tuple[ReservableFetchProvider, ...]]:
         search: list[KeywordSearchProvider] = []
-        fetch: list[URLFetchProvider] = []
-        executors: list[HttpJsonExecutor] = []
-        for provider_config in providers:
-            registration = registry.get(provider_config.name)
+        fetch: dict[str, ReservableFetchProvider] = {}
+        for provider in providers:
+            registration = registry.get(provider.name)
             if registration is None:
                 raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Invalid enabled web provider: {provider_config.name}",
+                    ErrorCode.CONFIG_ERROR, f"Invalid enabled web provider: {provider.name}"
                 )
-            credential_kwargs: dict[str, object] = {}
-            private_value = provider_config.secret
-            if registration.requires_api_key and private_value is None:
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Invalid enabled web provider: {provider_config.name}",
-                )
-            if private_value is not None and (
-                registration.requires_api_key or registration.supports_optional_api_key
-            ):
-                credential_kwargs["secret"] = private_value
-            reserved = set(provider_config.options) & _RESERVED_WEB_ADAPTER_KWARGS
-            if reserved:
-                names = ", ".join(sorted(reserved))
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Reserved config key(s) for web provider {provider_config.name}: {names}",
-                )
-            gate = RateGate(provider_config.rate_policy)
-            quotas.register_rate("web", provider_config.name, gate)
-            executor = HttpJsonExecutor(
-                _create_http_client(
-                    http_client_factory,
-                    use_proxy=provider_config.use_proxy,
-                    direct_ssl_context=direct_ssl_context,
-                    label=f"web provider {provider_config.name}",
-                ),
-                config.retry,
-                provider_name=provider_config.name,
-                rate_gate=gate,
-            )
-            kwargs: dict[str, object] = {
-                "name": provider_config.name,
-                "http_executor": executor,
-            }
-            kwargs.update(credential_kwargs)
-            kwargs.update(provider_config.options)
-            try:
-                adapter = registration.factory(**kwargs)
-            except TypeError as exc:
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Invalid configuration for web provider {provider_config.name}",
-                ) from exc
-            executors.append(executor)
-            if provider_config.enable_search:
-                search.append(cast(KeywordSearchProvider, adapter))
-            if provider_config.enable_fetch:
-                fetch.append(cast(URLFetchProvider, adapter))
-        return tuple(search), tuple(fetch), tuple(executors)
 
-    @classmethod
-    def _build_academic_providers(
-        cls,
+            create = partial(_web_adapter, registration)
+            pool, _ = await assembly.build_pool("web", provider, create)
+            facade = PooledWebProvider(pool)
+            if provider.enable_search and registration.capabilities.search:
+                search.append(facade)
+            if provider.enable_fetch and registration.capabilities.fetch:
+                fetch[provider.name] = facade
+        ordered = dict.fromkeys((*fetch_order, *fetch))
+        return tuple(search), tuple(fetch[name] for name in ordered if name in fetch)
+
+    @staticmethod
+    async def _build_academic_providers(
         providers: tuple[ResolvedAcademicProviderConfig, ...],
         registry: AcademicProviderRegistry,
-        config: ResolvedConfig,
-        quotas: ProviderQuotaManager,
-        http_client_factory: HttpClientFactory,
-        direct_ssl_context: ssl.SSLContext | None,
-    ) -> tuple[tuple[AcademicSearchProvider, ...], tuple[HttpJsonExecutor, ...]]:
+        assembly: _HTTPAssembly,
+    ) -> tuple[AcademicSearchProvider, ...]:
         search: list[AcademicSearchProvider] = []
-        executors: list[HttpJsonExecutor] = []
-        for provider_config in providers:
-            registration = registry.get(provider_config.name)
+        for provider in providers:
+            registration = registry.get(provider.name)
             if registration is None:
                 raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Invalid enabled academic provider: {provider_config.name}",
+                    ErrorCode.CONFIG_ERROR, f"Invalid enabled academic provider: {provider.name}"
                 )
-            reserved = set(provider_config.options) & _RESERVED_ACADEMIC_ADAPTER_KWARGS
-            if reserved:
-                names = ", ".join(sorted(reserved))
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Reserved config key(s) for academic provider {provider_config.name}: {names}",
-                )
-            gate = RateGate(provider_config.rate_policy)
-            quotas.register_rate("academic", provider_config.name, gate)
-            executor = HttpJsonExecutor(
-                _create_http_client(
-                    http_client_factory,
-                    use_proxy=provider_config.use_proxy,
-                    direct_ssl_context=direct_ssl_context,
-                    label=f"academic provider {provider_config.name}",
-                ),
-                config.retry,
-                provider_name=provider_config.name,
-                rate_gate=gate,
+            create = partial(
+                _academic_adapter, registration.factory, f"academic provider {provider.name}"
             )
-            kwargs: dict[str, object] = {"executor": executor}
-            if provider_config.api_key is not None:
-                kwargs["api_key"] = provider_config.api_key
-            if provider_config.contact_email is not None:
-                kwargs["contact_email"] = provider_config.contact_email
-            kwargs.update(provider_config.options)
-            try:
-                adapter = registration.factory(**kwargs)
-            except TypeError as exc:
-                raise ConfigFailure(
-                    ErrorCode.CONFIG_ERROR,
-                    f"Invalid configuration for academic provider {provider_config.name}",
-                ) from exc
-            search.append(cast(AcademicSearchProvider, adapter))
-            executors.append(executor)
-        return tuple(search), tuple(executors)
+            pool, _ = await assembly.build_pool(
+                "academic",
+                provider,
+                cast(
+                    Callable[[ResolvedCredential, HttpJsonExecutor], AcademicSearchProvider], create
+                ),
+            )
+            search.append(PooledAcademicProvider(pool))
+        return tuple(search)
 
-    @classmethod
-    def _build_oa_resolver(
-        cls,
-        resolver_config: ResolvedOAResolverConfig | None,
+    @staticmethod
+    async def _build_oa_resolver(
+        provider: ResolvedOAResolverConfig | None,
         registry: OAResolverRegistry,
-        config: ResolvedConfig,
-        quotas: ProviderQuotaManager,
-        http_client_factory: HttpClientFactory,
-        direct_ssl_context: ssl.SSLContext | None,
-    ) -> tuple[OAResolver | None, tuple[HttpJsonExecutor, ...]]:
-        if resolver_config is None:
-            return None, ()
-        registration = registry.get(resolver_config.name)
+        assembly: _HTTPAssembly,
+    ) -> OAResolver | None:
+        if provider is None:
+            return None
+        registration = registry.get(provider.name)
         if registration is None:
             raise ConfigFailure(
-                ErrorCode.CONFIG_ERROR,
-                f"Invalid enabled OA resolver: {resolver_config.name}",
+                ErrorCode.CONFIG_ERROR, f"Invalid enabled OA resolver: {provider.name}"
             )
-        reserved = set(resolver_config.options) & _RESERVED_ACADEMIC_ADAPTER_KWARGS
-        if reserved:
-            names = ", ".join(sorted(reserved))
-            raise ConfigFailure(
-                ErrorCode.CONFIG_ERROR,
-                f"Reserved config key(s) for OA resolver {resolver_config.name}: {names}",
-            )
-        gate = RateGate(resolver_config.rate_policy)
-        quotas.register_rate("oa", resolver_config.name, gate)
-        executor = HttpJsonExecutor(
-            _create_http_client(
-                http_client_factory,
-                use_proxy=resolver_config.use_proxy,
-                direct_ssl_context=direct_ssl_context,
-                label=f"OA resolver {resolver_config.name}",
-            ),
-            config.retry,
-            provider_name=resolver_config.name,
-            rate_gate=gate,
+        create = partial(_academic_adapter, registration.factory, f"OA resolver {provider.name}")
+        pool, _ = await assembly.build_pool(
+            "oa",
+            provider,
+            cast(Callable[[ResolvedCredential, HttpJsonExecutor], OAResolver], create),
         )
-        kwargs: dict[str, object] = {"executor": executor}
-        if resolver_config.api_key is not None:
-            kwargs["api_key"] = resolver_config.api_key
-        if resolver_config.contact_email is not None:
-            kwargs["contact_email"] = resolver_config.contact_email
-        kwargs.update(resolver_config.options)
-        try:
-            adapter = registration.factory(**kwargs)
-        except TypeError as exc:
-            raise ConfigFailure(
-                ErrorCode.CONFIG_ERROR,
-                f"Invalid configuration for OA resolver {resolver_config.name}",
-            ) from exc
-        return cast(OAResolver, adapter), (executor,)
+        return PooledOAResolver(pool)
 
     @staticmethod
     def _build_agent_runners(
-        config: ResolvedAgentConfig,
+        config: ResolvedConfig,
         quotas: ProviderQuotaManager,
-        input_limits: ResolvedInputLimits = _DEFAULT_INPUT_LIMITS,
     ) -> dict[str, AgentTextRunner]:
         runners: dict[str, AgentTextRunner] = {}
-        for provider in config.providers:
+        for provider in config.agent.providers:
             if provider.harness != "antigravity":
                 raise ConfigFailure(ErrorCode.CONFIG_ERROR, "Unsupported Agent harness")
             command = provider.command
             if "/" in command:
                 command = os.path.abspath(command)
+            rate = make_rate_gate(provider.rate_policy)
             runners[provider.name] = partial(
                 run_antigravity,
                 provider_name=provider.name,
@@ -502,51 +552,30 @@ class Runtime:
                 timeout_seconds=provider.timeout_seconds,
                 pass_env=provider.pass_env,
                 quota=quotas.get_agent(provider.name),
-                prompt_max_bytes=input_limits.agent_prompt_bytes,
+                acquire_rate_permit=(
+                    partial(rate.permit, timeout_seconds=config.retry.request_timeout_seconds)
+                    if rate is not None
+                    else None
+                ),
+                prompt_max_bytes=config.input_limits.agent_prompt_bytes,
             )
         return runners
 
     @staticmethod
-    def _build_llm_clients(
-        config: ResolvedConfig,
-        quotas: ProviderQuotaManager,
-        http_client_factory: HttpClientFactory,
-        direct_ssl_context: ssl.SSLContext | None,
+    async def _build_llm_clients(
+        config: ResolvedConfig, assembly: _HTTPAssembly
     ) -> dict[str, LLMClient]:
         clients: dict[str, LLMClient] = {}
-        for provider_config in config.llm.providers:
-            private_value = provider_config.secret
-            executor = HttpJsonExecutor(
-                _create_http_client(
-                    http_client_factory,
-                    use_proxy=provider_config.use_proxy,
-                    direct_ssl_context=direct_ssl_context,
-                    label=f"LLM provider {provider_config.name}",
-                ),
-                config.retry,
-                provider_name=provider_config.name,
-            )
-            clients[provider_config.name] = OpenAIChatCompletionsClient(
-                name=provider_config.name,
-                api_url=provider_config.api_url,
-                secret=private_value,
-                executor=executor,
-                quota=quotas.get_llm(provider_config.name),
-                request_body_bytes=config.input_limits.llm_request_body_bytes,
-                retry_policy=config.retry,
-            )
+        for provider in config.llm.providers:
+            create = partial(_llm_adapter, provider.name, config)
+            pool, first = await assembly.build_pool("llm", provider, create)
+            # All physical clients use the alias protocol and input budget.
+            prepare = cast(OpenAIChatCompletionsClient, first).prepare_request
+            clients[provider.name] = PooledLLMClient(pool, prepare)
         return clients
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        for executor in self._web_http_executors:
-            await executor.aclose()
-        for executor in self._academic_http_executors:
-            await executor.aclose()
-        for client in self.llm_clients.values():
-            await client.aclose()
+        await self._resources.aclose()
 
     def __repr__(self) -> str:
         resolver_name = self.oa_resolver.name if self.oa_resolver is not None else "-"

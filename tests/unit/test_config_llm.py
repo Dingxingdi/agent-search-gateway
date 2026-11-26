@@ -12,19 +12,23 @@ from agent_search_gateway.providers.registry import ProviderRegistry
 def _config() -> dict[str, object]:
     return {
         "llm_providers": {
-            "default_max_concurrency": 2,
             "primary": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://primary.example.test",
-                "api_key_env": "LLM_A_ENV",
+                "credentials": [
+                    {"api_url": "https://primary.example.test", "api_key_env": "LLM_A_ENV"}
+                ],
             },
             "secondary": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://secondary.example.test",
-                "api_key_env": "LLM_B_ENV",
-                "max_concurrency": 4,
+                "credentials": [
+                    {
+                        "api_url": "https://secondary.example.test",
+                        "api_key_env": "LLM_B_ENV",
+                        "max_concurrency": 4,
+                    }
+                ],
             },
         },
         "global_default_llm": {
@@ -66,11 +70,9 @@ def test_resolve_llm_config_preserves_independent_search_entries_and_fetch_inher
     original = copy.deepcopy(data)
     resolved = resolve_llm_config(data, _environment())
 
-    assert resolved.default_max_concurrency == 2
-    assert [(provider.name, provider.max_concurrency) for provider in resolved.providers] == [
-        ("primary", 2),
-        ("secondary", 4),
-    ]
+    assert [
+        (provider.name, provider.credentials[0].max_concurrency) for provider in resolved.providers
+    ] == [("primary", None), ("secondary", 4)]
     assert [invocation.provider for invocation in resolved.search_invocations] == [
         "primary",
         "secondary",
@@ -97,6 +99,345 @@ def test_resolve_llm_config_preserves_independent_search_entries_and_fetch_inher
     global_table["extra_body"] = {"mutated": True}
     assert resolved.search_invocations[1].extra_body == {"scope": {"name": "global"}}
     assert resolved.search_invocations[1].extra_body is not resolved.focus_summary.extra_body
+
+
+def test_referenced_llm_alias_resolves_ordered_credentials() -> None:
+    data = {
+        "llm_providers": {
+            "primary": {
+                "protocol": "openai",
+                "api_endpoint": "chat_completions",
+                "credentials": [
+                    {"api_url": "https://first.example.test", "api_key_env": "LLM_A_ENV"},
+                    {
+                        "api_url": "https://second.example.test",
+                        "api_key_env": "LLM_B_ENV",
+                        "max_concurrency": 4,
+                        "rate_limits": [{"requests": 3, "period_seconds": 2}],
+                        "min_interval_seconds": 0.5,
+                    },
+                ],
+            },
+        },
+        "global_default_llm": {"provider": "primary", "model": "global-model"},
+        "search_llm": {"providers": [{"provider": "primary", "model": "search-model"}]},
+    }
+    original = copy.deepcopy(data)
+    resolved = resolve_llm_config(data, _environment())
+    assert len(resolved.providers) == 1
+    provider = resolved.providers[0]
+    assert (provider.name, provider.protocol, provider.api_endpoint) == (
+        "primary",
+        "openai",
+        "chat_completions",
+    )
+    first, second = provider.credentials
+    assert [member.options["api_url"] for member in provider.credentials] == [
+        "https://first.example.test",
+        "https://second.example.test",
+    ]
+    assert [member.api_key_env for member in provider.credentials] == ["LLM_A_ENV", "LLM_B_ENV"]
+    assert first.api_key is not None and second.api_key is not None
+    assert [first.api_key.reveal(), second.api_key.reveal()] == ["x", "y"]
+    assert first.api_key is not second.api_key
+    assert first.max_concurrency is None
+    assert first.rate_policy.windows == ()
+    assert first.rate_policy.min_interval_seconds is None
+    assert second.max_concurrency == 4
+    assert [(window.requests, window.period_seconds) for window in second.rate_policy.windows] == [
+        (3, 2.0)
+    ]
+    assert second.rate_policy.min_interval_seconds == 0.5
+    assert resolved.search_invocations[0].model == "search-model"
+    assert resolved.judge.provider == provider.name
+    assert resolved.judge.model == "global-model"
+    assert data == original
+
+
+def _primary(data: dict[str, object]) -> dict[str, object]:
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    table = tables["primary"]
+    assert isinstance(table, dict)
+    return table
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({}, "round_robin"),
+        ({"credential_strategy": "round_robin"}, "round_robin"),
+        ({"credential_strategy": "fill_first"}, "fill_first"),
+    ],
+)
+def test_llm_credential_strategy_defaults_and_valid_values(
+    fields: dict[str, object], expected: str
+) -> None:
+    data = _config()
+    _primary(data).update(fields)
+    assert resolve_llm_config(data, _environment()).providers[0].credential_strategy == expected
+
+
+@pytest.mark.parametrize("key", ["credentials_strategy", "max_concurency"])
+def test_referenced_llm_alias_rejects_unknown_options(key: str) -> None:
+    data = _config()
+    _primary(data)[key] = "fill_first"
+
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.*unknown") as caught:
+        resolve_llm_config(data, _environment())
+
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert "fill_first" not in str(caught.value)
+
+
+@pytest.mark.parametrize("value", ["fill_out", "unknown", "", None, True, 1, [], {}])
+def test_llm_credential_strategy_rejects_invalid_values(value: object) -> None:
+    data = _config()
+    _primary(data)["credential_strategy"] = value
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.credential_strategy"):
+        resolve_llm_config(data, _environment())
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "api_url",
+        "api_key_env",
+        "api_key",
+        "contact_email_env",
+        "contact_email",
+        "secret",
+        "max_concurrency",
+        "rate_limits",
+        "min_interval_seconds",
+        "default_max_concurrency",
+    ],
+)
+@pytest.mark.parametrize("referenced", [False, True])
+@pytest.mark.parametrize("mixed", [False, True])
+def test_llm_legacy_alias_fields_are_rejected(key: str, referenced: bool, mixed: bool) -> None:
+    data = _config()
+    table = _primary(data) if referenced else {}
+    if not referenced:
+        tables = data["llm_providers"]
+        assert isinstance(tables, dict)
+        tables["unused"] = table
+    if not mixed:
+        table.pop("credentials", None)
+    table[key] = "[REDACTED_SECRET]"
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_llm_config(data, _environment())
+    alias = "primary" if referenced else "unused"
+    assert f"llm_providers.{alias}.{key}" in str(caught.value)
+    assert "removed" in str(caught.value)
+    assert "[REDACTED_SECRET]" not in str(caught.value)
+
+
+def test_llm_legacy_category_default_is_rejected() -> None:
+    data = _config()
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    tables["default_max_concurrency"] = 2
+    with pytest.raises(ConfigFailure, match=r"llm_providers.default_max_concurrency.*removed"):
+        resolve_llm_config(data, _environment())
+
+
+@pytest.mark.parametrize("value", [None, [], {}, "bad", True, [None], [{}]])
+def test_referenced_llm_credentials_require_nonempty_tables(value: object) -> None:
+    data = _config()
+    _primary(data)["credentials"] = value
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.credentials"):
+        resolve_llm_config(data, _environment())
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model",
+        "protocol",
+        "api_endpoint",
+        "use_proxy",
+        "credentials",
+        "credential_strategy",
+        "default_max_concurrency",
+        "api_key",
+        "secret",
+        "contact_email_env",
+        "unknown",
+    ],
+)
+def test_llm_credentials_reject_unknown_fields(key: str) -> None:
+    data = _config()
+    members = _primary(data)["credentials"]
+    assert isinstance(members, list)
+    members[0][key] = "[REDACTED_SECRET]"
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.credentials\[0\]") as caught:
+        resolve_llm_config(data, _environment())
+    if key == "default_max_concurrency":
+        assert "removed" in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        ("global_default_llm",),
+        ("search_llm",),
+        ("search_llm", "providers", 0),
+        ("fetch_llm",),
+        *(("fetch_llm", stage) for stage in ("judge", "safety", "content_clean", "focus_summary")),
+    ],
+)
+def test_llm_legacy_default_is_rejected_in_invocation_tables(path: tuple[str | int, ...]) -> None:
+    data = _config()
+    table: object = data
+    for key in path:
+        if isinstance(key, int):
+            assert isinstance(table, list)
+            table = table[key]
+        else:
+            assert isinstance(table, dict)
+            table = table[key]
+    assert isinstance(table, dict)
+    table["default_max_concurrency"] = 2
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_llm_config(data, _environment())
+    assert "default_max_concurrency" in str(caught.value)
+    assert "removed" in str(caught.value)
+
+
+def test_llm_extra_body_and_unused_fields_keep_their_existing_boundary() -> None:
+    data = _config()
+    global_table = data["global_default_llm"]
+    assert isinstance(global_table, dict)
+    global_table["extra_body"] = {"default_max_concurrency": 3, "credentials": "vendor-payload"}
+    tables = data["llm_providers"]
+    assert isinstance(tables, dict)
+    tables["unused"] = {
+        "protocol": None,
+        "credentials": [{"api_key_env": "MISSING_ENV"}],
+        "credential_strategy": "invalid",
+        "use_proxy": None,
+        "unknown": True,
+    }
+    resolved = resolve_llm_config(data, _environment())
+    assert resolved.search_invocations[1].extra_body == {
+        "default_max_concurrency": 3,
+        "credentials": "vendor-payload",
+    }
+    assert [provider.name for provider in resolved.providers] == ["primary", "secondary"]
+
+
+_INVALID_INTEGER_LIMITS: tuple[object, ...] = (
+    None,
+    0,
+    -1,
+    True,
+    False,
+    1.5,
+    "2",
+    [],
+    {},
+    float("nan"),
+    float("inf"),
+)
+_INVALID_SECONDS_LIMITS: tuple[object, ...] = (
+    None,
+    0,
+    -1,
+    True,
+    False,
+    "2",
+    [],
+    {},
+    float("nan"),
+    float("inf"),
+    float("-inf"),
+    10**400,
+)
+_INVALID_WINDOW_CONTAINERS: tuple[object, ...] = (None, {}, "bad", True, [None], [[]])
+_INVALID_EXPLICIT_LIMITS: list[tuple[str, object, str]] = [
+    *(("max_concurrency", value, "max_concurrency") for value in _INVALID_INTEGER_LIMITS),
+    *(("min_interval_seconds", value, "min_interval_seconds") for value in _INVALID_SECONDS_LIMITS),
+    *(("rate_limits", value, "rate_limits") for value in _INVALID_WINDOW_CONTAINERS),
+    ("rate_limits", [{}], "rate_limits[0].requests"),
+    ("rate_limits", [{"requests": 1}], "rate_limits[0].period_seconds"),
+    ("rate_limits", [{"requests": 1, "period_seconds": 1, "unknown": True}], "rate_limits[0]"),
+    *(
+        ("rate_limits", [{"requests": value, "period_seconds": 1}], "rate_limits[0].requests")
+        for value in _INVALID_INTEGER_LIMITS
+    ),
+    *(
+        ("rate_limits", [{"requests": 1, "period_seconds": value}], "rate_limits[0].period_seconds")
+        for value in _INVALID_SECONDS_LIMITS
+    ),
+]
+
+
+@pytest.mark.parametrize(("key", "value", "field"), _INVALID_EXPLICIT_LIMITS)
+def test_llm_invalid_explicit_limits_report_credential_field_path(
+    key: str, value: object, field: str
+) -> None:
+    data = _config()
+    members = _primary(data)["credentials"]
+    assert isinstance(members, list)
+    members.append(
+        {
+            "api_url": "https://second.example.test/private-endpoint",
+            "api_key_env": "LLM_B_ENV",
+            key: value,
+        }
+    )
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_llm_config(data, _environment())
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert f"llm_providers.primary.credentials[1].{field}" in str(caught.value)
+    assert "private-endpoint" not in str(caught.value)
+
+
+@pytest.mark.parametrize("capacity", [False, True])
+@pytest.mark.parametrize("window", [False, True])
+@pytest.mark.parametrize("interval", [False, True])
+def test_llm_credential_limits_are_independently_optional(
+    capacity: bool, window: bool, interval: bool
+) -> None:
+    data = _config()
+    members = _primary(data)["credentials"]
+    assert isinstance(members, list)
+    member = members[0]
+    member["rate_limits"] = []
+    if capacity:
+        member["max_concurrency"] = 7
+    if window:
+        member["rate_limits"] = [{"requests": 2, "period_seconds": 3}]
+    if interval:
+        member["min_interval_seconds"] = 0.25
+    resolved = resolve_llm_config(data, _environment()).providers[0].credentials[0]
+    assert resolved.max_concurrency == (7 if capacity else None)
+    assert [(rule.requests, rule.period_seconds) for rule in resolved.rate_policy.windows] == (
+        [(2, 3.0)] if window else []
+    )
+    assert resolved.rate_policy.min_interval_seconds == (0.25 if interval else None)
+
+
+@pytest.mark.parametrize("key", ["api_url", "api_key_env"])
+@pytest.mark.parametrize("value", [None, "", " ", True, 1, [], {}])
+def test_llm_credentials_require_endpoint_and_auth_strings(key: str, value: object) -> None:
+    data = _config()
+    members = _primary(data)["credentials"]
+    assert isinstance(members, list)
+    members[0][key] = value
+    with pytest.raises(ConfigFailure) as caught:
+        resolve_llm_config(data, _environment())
+    assert f"llm_providers.primary.credentials[0].{key}" in str(caught.value)
+
+
+def test_referenced_llm_validates_each_credential_environment() -> None:
+    data = _config()
+    members = _primary(data)["credentials"]
+    assert isinstance(members, list)
+    members.append({"api_url": "https://second.example.test", "api_key_env": "MISSING_ENV"})
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.credentials\[1\].api_key_env"):
+        resolve_llm_config(data, _environment())
 
 
 Mutator = Callable[[dict[str, object]], None]
@@ -131,7 +472,9 @@ def _bad_concurrency(data: dict[str, object]) -> None:
     assert isinstance(providers, dict)
     primary = providers["primary"]
     assert isinstance(primary, dict)
-    primary["max_concurrency"] = 0
+    credentials = primary["credentials"]
+    assert isinstance(credentials, list)
+    credentials[0]["max_concurrency"] = 0
 
 
 @pytest.mark.parametrize(
@@ -280,22 +623,22 @@ def test_unreferenced_llm_provider_use_proxy_remains_ignored(value: object) -> N
     assert [provider.name for provider in resolved.providers] == ["primary", "secondary"]
 
 
-def test_llm_provider_use_proxy_preserves_old_constructor_and_frozen_config() -> None:
-    from agent_search_gateway.config import LLMProviderConfig
+def test_llm_provider_use_proxy_and_credentials_are_frozen() -> None:
+    from agent_search_gateway.config import LLMProviderConfig, ResolvedCredential
     from agent_search_gateway.observability import SecretValue
 
-    secret = SecretValue("fixture-value")
-    provider = LLMProviderConfig(
-        "primary",
-        "openai",
-        "chat_completions",
-        "https://provider.example.test",
-        "TEST_KEY",
-        secret,
-        7,
+    credential = ResolvedCredential(
+        options={"api_url": "https://provider.example.test"},
+        api_key=SecretValue("[REDACTED_SECRET]"),
+        max_concurrency=7,
     )
-    assert provider.max_concurrency == 7
-    assert provider.secret is secret
+    provider = LLMProviderConfig("primary", "openai", "chat_completions", (credential,))
+    assert provider.credentials == (credential,)
+    assert provider.credentials[0].max_concurrency == 7
     assert provider.use_proxy is True
+    assert provider.credential_strategy == "round_robin"
+    assert "https://provider.example.test" not in repr(provider)
     with pytest.raises(FrozenInstanceError):
         provider.use_proxy = False  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        provider.credentials[0].options["api_url"] = "https://changed.example.test"  # type: ignore[index]

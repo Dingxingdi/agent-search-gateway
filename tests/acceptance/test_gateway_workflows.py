@@ -12,7 +12,7 @@ import pytest
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
 from agent_search_gateway.cli import build_parser, run_command
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.daemon import ForegroundDaemon
 from agent_search_gateway.errors import ErrorCode, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
@@ -28,6 +28,7 @@ from agent_search_gateway.models import (
     ShutdownRequest,
     SuccessResponse,
     URLFetchRequest,
+    URLStatus,
 )
 from agent_search_gateway.observability import SecretValue, configure_debug_logging
 from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
@@ -65,6 +66,7 @@ from tests.support.fakes import (
     FakeKeywordSearchProvider,
     FakeLLMClient,
     FakeURLFetchProvider,
+    pooled_web,
 )
 from tests.support.logging import structured_test_logger
 
@@ -268,23 +270,25 @@ async def test_debug_gateway_rate_fallback_preserves_admitted_fetch_result(
             "tavily": {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_key_env": "TEST_KEY",
-                "api_url": "https://tavily.test",
-                "min_interval_seconds": 600,
+                "credentials": [
+                    {
+                        "api_key_env": "TEST_KEY",
+                        "api_url": "https://tavily.test",
+                        "min_interval_seconds": 600,
+                    }
+                ],
             },
             "firecrawl": {
                 "enable_search": False,
                 "enable_fetch": True,
-                "api_key_env": "TEST_KEY",
-                "api_url": "https://firecrawl.test",
+                "credentials": [{"api_key_env": "TEST_KEY", "api_url": "https://firecrawl.test"}],
             },
         },
         "llm_providers": {
             "chat": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": "https://llm.test", "api_key_env": "TEST_KEY"}],
             }
         },
         "global_default_llm": {"provider": "chat", "model": "default"},
@@ -328,10 +332,12 @@ async def test_debug_gateway_rate_fallback_preserves_admitted_fetch_result(
     request_ids = iter(("aaaabbbb", "ccccdddd"))
     try:
         registry = build_default_registry()
-        runtime = Runtime.build(
+        runtime = await Runtime.build(
             resolve_config(config, registry, {"TEST_KEY": "offline-credential"}),
             paths,
-            http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            http_client_factory=lambda **_: httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
         )
         daemon = ForegroundDaemon(
             paths,
@@ -427,7 +433,7 @@ async def test_fetch_singleflight_cancellation_stops_pending_attempt(
 
     paths = RuntimePaths.from_home(tmp_path)
     runtime = build_acceptance_runtime(paths)
-    quotas = ProviderQuotaManager(web_limits={"tavily": 1}, llm_limits={})
+    capacity = CapacityGate(1)
     store = URLStore()
     url = normalize_url("https://example.test/workflow")
     store.admit(url, "Abstract")
@@ -436,8 +442,6 @@ async def test_fetch_singleflight_cancellation_stops_pending_attempt(
         if wait == "rate"
         else None
     )
-    if gate is not None:
-        quotas.register_rate("web", "tavily", gate)
     invocation = LLMInvocation("llm", "model")
     stages = LLMStages(
         {"llm": FakeLLMClient("llm")},
@@ -462,7 +466,9 @@ async def test_fetch_singleflight_cancellation_stops_pending_attempt(
             http_executor=executor,
         )
         runtime.fetch_orchestrator = FetchOrchestrator(
-            store=store, stages=stages, scheduler=FetchScheduler([adapter], quotas, stages)
+            store=store,
+            stages=stages,
+            scheduler=FetchScheduler([pooled_web(adapter, capacity, gate)], stages),
         )
         daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime, shutdown_waiter=expire)
         async with _running_daemon(daemon):
@@ -491,9 +497,10 @@ async def test_fetch_singleflight_cancellation_stops_pending_attempt(
                     follower.cancel()
                     await asyncio.gather(leader, follower, return_exceptions=True)
     assert sends == 1 and cancelled.is_set()
-    assert quotas.get_web("tavily").in_use == 0 and runtime.close_calls == 1
+    assert capacity.in_use == 0 and runtime.close_calls == 1
     snapshot = store.get(url)
-    assert snapshot is not None and snapshot.available and snapshot.raw_content == ""
+    assert snapshot is not None and snapshot.status is URLStatus.NEED_FETCH
+    assert (snapshot.raw_content, snapshot.content) == ("", "")
 
 
 async def test_cli_waits_for_example_http_retry_budget(
@@ -868,10 +875,9 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
     store = URLStore()
     url = normalize_url(target)
     if existing_body:
-        store.admit(
+        await store.admit_candidate(
             url, "Existing abstract", raw_content="Existing raw", content="Existing content"
         )
-    quotas = ProviderQuotaManager(web_limits={"brightdata": 1, "scraperapi": 1}, llm_limits={})
     invocation = LLMInvocation("judge", "model", {})
     stages = LLMStages(
         {"judge": FakeLLMClient("judge")},
@@ -905,7 +911,6 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
             search = SearchOrchestrator(
                 keyword_providers=[brightdata, scraperapi],
                 llm_invocations=(),
-                quotas=quotas,
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(tmp_path / "results"),
@@ -926,7 +931,7 @@ async def test_real_keyword_adapters_deduplicate_goto_and_preserve_target_fetch_
 
             fetch = FetchOrchestrator(
                 store=store,
-                scheduler=FetchScheduler([brightdata], quotas, stages),
+                scheduler=FetchScheduler([pooled_web(brightdata, CapacityGate(1))], stages),
                 stages=stages,
             )
             with pytest.raises(InputFailure) as not_admitted:
@@ -1025,7 +1030,6 @@ async def test_zhihu_cli_selection_deduplicates_both_branch_urls(
             runtime.search_orchestrator = SearchOrchestrator(
                 keyword_providers=providers,
                 llm_invocations=(),
-                quotas=ProviderQuotaManager(web_limits={"zhihu": 1, "other": 1}, llm_limits={}),
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(paths.results_dir),
@@ -1123,7 +1127,6 @@ async def test_zhihu_terminal_event_matches_branch_outcomes(
             runtime.search_orchestrator = SearchOrchestrator(
                 keyword_providers=[zhihu],
                 llm_invocations=(),
-                quotas=ProviderQuotaManager(web_limits={"zhihu": 1}, llm_limits={}),
                 stages=stages,
                 store=store,
                 result_writer=ResultWriter(paths.results_dir),
@@ -1219,7 +1222,6 @@ async def test_yuanbao_summary_does_not_skip_url_fetch(tmp_path: Path) -> None:
         )
 
     store = URLStore()
-    quotas = ProviderQuotaManager(web_limits={"yuanbao": 1, "fetch": 1}, llm_limits={})
     invocation = LLMInvocation("judge", "model", {})
     stages = LLMStages(
         {"judge": FakeLLMClient("judge")},
@@ -1244,7 +1246,6 @@ async def test_yuanbao_summary_does_not_skip_url_fetch(tmp_path: Path) -> None:
         search = SearchOrchestrator(
             keyword_providers=[yuanbao],
             llm_invocations=(),
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=ResultWriter(tmp_path / "results"),
@@ -1262,7 +1263,7 @@ async def test_yuanbao_summary_does_not_skip_url_fetch(tmp_path: Path) -> None:
 
         fetch = FetchOrchestrator(
             store=store,
-            scheduler=FetchScheduler([fetch_provider], quotas, stages),
+            scheduler=FetchScheduler([pooled_web(fetch_provider, CapacityGate(1))], stages),
             stages=stages,
         )
         assert await fetch.url_fetch(target) == "Article body from Fetch"
@@ -1296,7 +1297,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
         focus_summary=invocation,
         agent_runners={"agent": RecordingRunner(markdown)},
     )
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, academic_limits={"openalex": 1})
     writer = ResultWriter(tmp_path / "results")
     if kind == "paper":
         academic = PaperSearchOrchestrator(
@@ -1314,7 +1314,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
                     ],
                 )
             ],
-            quotas=quotas,
             aggregator=PaperAggregator(("openalex",)),
             resolver=None,
             store=store,
@@ -1326,7 +1325,6 @@ async def test_google_goto_is_unchanged_outside_keyword_ingestion(
             keyword_providers=(),
             llm_invocations=[invocation],
             agent_invocations=[AgentInvocation("agent")],
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=writer,
@@ -1355,7 +1353,7 @@ class _NewWebWorkflow:
         self, tmp_path: Path, client: httpx.AsyncClient, name: str, *, free_mcp: bool = False
     ) -> None:
         self.store = URLStore()
-        self.quotas = ProviderQuotaManager(web_limits={name: 1, "tavily": 1}, llm_limits={})
+        self.capacities = {name: CapacityGate(1), "tavily": CapacityGate(1)}
         self.llm = FakeLLMClient("llm", text_result=_NEW_WEB_BODY)
         self.stages = LLMStages(
             {"llm": self.llm},
@@ -1399,15 +1397,18 @@ class _NewWebWorkflow:
             secret=SecretValue("test-credential"),
             http_executor=HttpJsonExecutor(client, RetryPolicy(1, 0, 1, 0), provider_name="tavily"),
         )
+        facades = [
+            pooled_web(provider, self.capacities[name]),
+            pooled_web(tavily, self.capacities["tavily"]),
+        ]
         self.search_orchestrator = SearchOrchestrator(
-            keyword_providers=[provider, tavily],
+            keyword_providers=facades,
             llm_invocations=(),
-            quotas=self.quotas,
             stages=self.stages,
             store=self.store,
             result_writer=ResultWriter(tmp_path / "results"),
         )
-        self.scheduler = FetchScheduler([provider, tavily], self.quotas, self.stages)
+        self.scheduler = FetchScheduler(facades, self.stages)
         self.fetch_orchestrator = FetchOrchestrator(
             store=self.store, scheduler=self.scheduler, stages=self.stages
         )
@@ -1519,7 +1520,7 @@ async def test_new_provider_search_admits_url_for_fetch_fallback(tmp_path: Path,
         assert (snapshot.raw_content, snapshot.content) == ("", "")
         assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == _NEW_WEB_BODY
         after = workflow.store.get(normalize_url(records[0]["url"]))
-        assert after is not None and after.available
+        assert after is not None and after.status is URLStatus.READY
         assert (after.url, after.abstract, after.raw_content, after.content) == (
             records[0]["url"],
             records[0]["abstract"],
@@ -1532,8 +1533,8 @@ async def test_new_provider_search_admits_url_for_fetch_fallback(tmp_path: Path,
         assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
         assert [call[0].model for call in workflow.llm.text_calls] == ["clean"]
         assert _NEW_WEB_BODY in workflow.llm.text_calls[0][1][-1]["content"]
-        assert workflow.quotas.get_web(name).max_observed_in_use == 1
-        assert workflow.quotas.get_web("tavily").max_observed_in_use == 1
+        assert workflow.capacities[name].max_observed_in_use == 1
+        assert workflow.capacities["tavily"].max_observed_in_use == 1
 
 
 @pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
@@ -1572,14 +1573,14 @@ async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -
     async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
         workflow = _NewWebWorkflow(tmp_path, client, name)
         normalized = normalize_url(_NEW_WEB_TARGET)
-        workflow.store.admit(
+        await workflow.store.admit_candidate(
             normalized, "Existing abstract", raw_content="Existing raw", content="Existing content"
         )
         records = await workflow.search(provider=name)
         assert records == [{"url": _NEW_WEB_TARGET, "abstract": "Existing abstract"}]
         assert await workflow.fetch_orchestrator.url_fetch(records[0]["url"]) == "Existing content"
         snapshot = workflow.store.get(normalized)
-        assert snapshot is not None and snapshot.available
+        assert snapshot is not None and snapshot.status is URLStatus.READY
         assert (snapshot.url, snapshot.abstract, snapshot.raw_content, snapshot.content) == (
             _NEW_WEB_TARGET,
             "Existing abstract",
@@ -1587,9 +1588,9 @@ async def test_new_provider_reuses_prepared_content(tmp_path: Path, name: str) -
             "Existing content",
         )
         assert http.calls == [(name, "search")]
-        assert [call[0].model for call in workflow.llm.json_calls] == ["safety"]
+        assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
         assert not workflow.llm.text_calls
-        assert workflow.quotas.get_web("tavily").max_observed_in_use == 0
+        assert workflow.capacities["tavily"].max_observed_in_use == 0
 
 
 @pytest.mark.parametrize("name", _NEW_WEB_PROVIDERS)
@@ -1686,8 +1687,8 @@ async def test_new_provider_open_websearch_multi_engine_results_use_existing_sta
         assert len(calls) == 1
         assert workflow.provider.name == "open_websearch"
         assert workflow.scheduler.provider_names == ("open_websearch", "tavily")
-        assert workflow.quotas.get_web("open_websearch").max_observed_in_use == 1
-        assert workflow.quotas.get_web("tavily").max_observed_in_use == 0
+        assert workflow.capacities["open_websearch"].max_observed_in_use == 1
+        assert workflow.capacities["tavily"].max_observed_in_use == 0
         fields = [getattr(record, "gateway_fields", {}) for record in caplog.records]
         assert any(item.get("reason") == "duplicate" for item in fields)
         assert any(item.get("phase") == "staging" for item in fields)
@@ -1762,7 +1763,7 @@ async def test_youcom_mcp_search_admission_and_fetch_priority(
         calls.append(("tavily", "fetch"))
     assert http.calls == calls
     after = workflow.store.get(url)
-    assert after is not None and after.available
+    assert after is not None and after.status is URLStatus.READY
     assert (after.abstract, after.raw_content, after.content) == ("New abstract", raw, expected)
     assert [call[0].model for call in workflow.llm.json_calls] == ["judge", "safety"]
     assert raw in workflow.llm.json_calls[0][1][-1]["content"]

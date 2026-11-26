@@ -3,6 +3,7 @@ import gzip
 import json
 from collections.abc import AsyncIterator
 from functools import partial
+from io import StringIO
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, Mock
@@ -15,6 +16,12 @@ from agent_search_gateway.config import load_toml
 from agent_search_gateway.doctor import DoctorCheck, DoctorStatus, _probe_open_websearch_health
 from agent_search_gateway.paths import RuntimePaths
 from tests.doctor._support import environment_name, write_valid_config
+
+
+def _member_health(check: DoctorCheck) -> DoctorCheck:
+    return DoctorCheck(
+        check.status, f"web_providers.open_websearch.credentials[0]: {check.message}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -39,7 +46,7 @@ async def test_doctor_probes_enabled_open_websearch_once(
     # TOML has no null literal. Supply parsed data so explicit None reaches the real resolver.
     data = load_toml(paths.config_file)
     data["web_providers"] = {
-        "open_websearch": {"enable_search": search, "enable_fetch": fetch, **options}
+        "open_websearch": {"enable_search": search, "enable_fetch": fetch, "credentials": [options]}
     }
     monkeypatch.setattr(doctor, "load_toml", lambda path: data)
     transport = httpx.MockTransport(
@@ -51,13 +58,19 @@ async def test_doctor_probes_enabled_open_websearch_once(
 
     report = await doctor.run_doctor(paths, environ={environment_name(): "present"})
 
+    if expected_url is None:
+        probe.assert_not_awaited()
+        assert report.exit_code == 1
+        assert report.checks[0].status is DoctorStatus.FAIL
+        assert "web_providers.open_websearch.credentials[0]" in report.checks[0].message
+        return
     probe.assert_awaited_once_with(expected_url)
     expected = (
         DoctorCheck(DoctorStatus.OK, "open-webSearch daemon healthy")
         if expected_url is not None
         else DoctorCheck(DoctorStatus.FAIL, "open-webSearch daemon unhealthy (invalid_health_url)")
     )
-    assert report.checks[-2] == expected
+    assert report.checks[-2] == _member_health(expected)
 
 
 @pytest.mark.parametrize("healthy", [False, True])
@@ -67,14 +80,20 @@ async def test_doctor_health_failure_is_not_hidden_by_missing_gateway_socket(
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
-        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+        target.write(
+            "[web_providers.open_websearch]\nenable_search = true\n"
+            "[[web_providers.open_websearch.credentials]]\n"
+        )
     status = DoctorStatus.OK if healthy else DoctorStatus.FAIL
     check = DoctorCheck(status, "open-webSearch health result")
     monkeypatch.setattr(doctor, "_probe_open_websearch_health", AsyncMock(return_value=check))
 
     report = await doctor.run_doctor(paths, environ={environment_name(): "present"})
 
-    assert report.checks[-2:] == (check, DoctorCheck(DoctorStatus.INFO, "daemon not running"))
+    assert report.checks[-2:] == (
+        _member_health(check),
+        DoctorCheck(DoctorStatus.INFO, "daemon not running"),
+    )
     assert report.exit_code == (0 if healthy else 1)
 
 
@@ -97,7 +116,10 @@ async def test_doctor_reports_malformed_health_response_and_finishes(
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
-        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+        target.write(
+            "[web_providers.open_websearch]\nenable_search = true\n"
+            "[[web_providers.open_websearch.credentials]]\n"
+        )
 
     response = httpx.Response(code, headers=headers, stream=httpx.ByteStream(body))
     handler = Mock(return_value=response)
@@ -113,7 +135,9 @@ async def test_doctor_reports_malformed_health_response_and_finishes(
     report = await doctor.run_doctor(paths, environ={environment_name(): "present"})
 
     assert report.checks[-2:] == (
-        DoctorCheck(DoctorStatus.FAIL, f"open-webSearch daemon unhealthy ({reason})"),
+        _member_health(
+            DoctorCheck(DoctorStatus.FAIL, f"open-webSearch daemon unhealthy ({reason})")
+        ),
         DoctorCheck(DoctorStatus.INFO, "daemon not running"),
     )
     assert report.exit_code == 1
@@ -290,7 +314,10 @@ async def test_doctor_limits_decoded_health_body_and_finishes(
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
     with paths.config_file.open("a") as target:
-        target.write("[web_providers.open_websearch]\nenable_search = true\n")
+        target.write(
+            "[web_providers.open_websearch]\nenable_search = true\n"
+            "[[web_providers.open_websearch.credentials]]\n"
+        )
 
     envelope = b'{"status":"ok","data":{"daemon":"running"}}'
     compressed = gzip.compress(envelope.ljust(64 * 1024 + extra))
@@ -314,7 +341,10 @@ async def test_doctor_limits_decoded_health_body_and_finishes(
         if extra
         else DoctorCheck(DoctorStatus.OK, "open-webSearch daemon healthy")
     )
-    assert report.checks[-2:] == (expected, DoctorCheck(DoctorStatus.INFO, "daemon not running"))
+    assert report.checks[-2:] == (
+        _member_health(expected),
+        DoctorCheck(DoctorStatus.INFO, "daemon not running"),
+    )
     assert consumed_tail is (extra == 0)
     assert response.is_closed and client.is_closed
 
@@ -433,3 +463,56 @@ async def test_health_cancellation_propagates_and_closes_client(
 
     assert len(requests) == 1
     assert client.is_closed
+
+
+async def test_doctor_checks_each_open_websearch_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    with paths.config_file.open("a") as target:
+        target.write(
+            "[web_providers.open_websearch]\nenable_search = true\nenable_fetch = true\n"
+            '[[web_providers.open_websearch.credentials]]\napi_url = "https://healthy.example.test/base"\n'
+            '[[web_providers.open_websearch.credentials]]\napi_url = "https://failed.example.test/base"\n'
+        )
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == "healthy.example.test":
+            return httpx.Response(200, json={"status": "ok", "data": {"daemon": "running"}})
+        return httpx.Response(
+            503, text="synthetic-private-body", headers={"Authorization": "Bearer synthetic-header"}
+        )
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(respond))
+    )
+    report = await doctor.run_doctor(paths, environ={environment_name(): "synthetic-key"})
+    assert [str(request.url) for request in requests] == [
+        "https://healthy.example.test/base/health",
+        "https://failed.example.test/base/health",
+    ]
+    assert report.exit_code == 1
+    assert report.checks[-3:-1] == (
+        DoctorCheck(
+            DoctorStatus.OK,
+            "web_providers.open_websearch.credentials[0]: open-webSearch daemon healthy",
+        ),
+        DoctorCheck(
+            DoctorStatus.FAIL,
+            "web_providers.open_websearch.credentials[1]: open-webSearch daemon unhealthy (503)",
+        ),
+    )
+    rendered = StringIO()
+    doctor.render_doctor(report, rendered)
+    assert all(
+        value not in repr(report) and value not in rendered.getvalue()
+        for value in (
+            "synthetic-key",
+            "synthetic-private-body",
+            "synthetic-header",
+            "https://failed.example.test",
+        )
+    )

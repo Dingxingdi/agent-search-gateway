@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
 import httpx
@@ -13,11 +14,14 @@ import pytest
 from agent_search_gateway.config import resolve_config
 from agent_search_gateway.daemon import ForegroundDaemon
 from agent_search_gateway.llm.stages import cheap_check
-from agent_search_gateway.models import KeywordSearchRequest, SearchRecord
-from agent_search_gateway.orchestrators import search
+from agent_search_gateway.models import KeywordSearchRequest, SearchRecord, URLStatus
+from agent_search_gateway.orchestrators import fetch
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.protocol import encode_request
-from agent_search_gateway.providers.academic.defaults import build_default_academic_registry
+from agent_search_gateway.providers.academic.defaults import (
+    build_default_academic_registry,
+    build_default_oa_resolver_registry,
+)
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.request_ids import ResultKind
 from agent_search_gateway.result_writer import ResultWriter
@@ -52,14 +56,16 @@ async def _gateway(
     web: tuple[str, ...] = (),
     web_options: dict[str, dict[str, object]] | None = None,
     academic: dict[str, object] | None = None,
+    overrides: dict[str, object] | None = None,
+    fetch_order: list[str] | None = None,
+    environ: dict[str, str] | None = None,
 ) -> AsyncIterator[Runtime]:
-    raw = {
+    raw: dict[str, object] = {
         "web_providers": {
             name: {
                 "enable_search": True,
                 "enable_fetch": True,
-                "api_url": f"https://{name}.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": f"https://{name}.test", "api_key_env": "TEST_KEY"}],
                 **(web_options or {}).get(name, {}),
             }
             for name in web
@@ -69,8 +75,7 @@ async def _gateway(
             "chat": {
                 "protocol": "openai",
                 "api_endpoint": "chat_completions",
-                "api_url": "https://llm.test",
-                "api_key_env": "TEST_KEY",
+                "credentials": [{"api_url": "https://llm.test", "api_key_env": "TEST_KEY"}],
             }
         },
         "global_default_llm": {"provider": "chat", "model": "default"},
@@ -80,31 +85,48 @@ async def _gateway(
         },
         "retry": {"max_attempts": 1},
     }
+    if fetch_order is not None:
+        assert isinstance(raw["web_providers"], dict)
+        raw["web_providers"]["fetch_order"] = fetch_order
+    raw.update(overrides or {})
     config = resolve_config(
         raw,
         build_default_registry(),
-        {"TEST_KEY": "x"},
+        {"TEST_KEY": "x", **(environ or {})},
         academic_registry=build_default_academic_registry(),
+        oa_resolver_registry=build_default_oa_resolver_registry(),
     )
-    clients: list[httpx.AsyncClient] = []
 
-    def client_factory() -> httpx.AsyncClient:
-        client = httpx.AsyncClient(transport=transport)
+    class ObservedClient(httpx.AsyncClient):
+        close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            await super().aclose()
+
+    clients: list[ObservedClient] = []
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        client = ObservedClient(transport=transport, **kwargs)
         clients.append(client)
         return client
 
-    runtime = Runtime.build(config, paths, http_client_factory=client_factory)
+    runtime = await Runtime.build(config, paths, http_client_factory=client_factory)
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
         yield runtime
-    assert all(client.is_closed for client in clients)
+    assert clients and all(client.is_closed and client.close_calls == 1 for client in clients)
     assert not paths.socket_file.exists()
 
 
-def _completion(request: httpx.Request) -> httpx.Response:
+def _completion(request: httpx.Request, reply: str | None = None) -> httpx.Response:
     model = json.loads(request.content)["model"]
-    reply = {"judge": '{"ok":true}', "content_clean": "Clean article", "safety": '{"ok":true}'}[
-        model
-    ]
+    if reply is None:
+        reply = {
+            "judge": '{"ok":true}',
+            "content_clean": "Clean article",
+            "safety": '{"ok":true}',
+            "focus_summary": "Focused summary",
+        }[model]
     return httpx.Response(
         200,
         json={
@@ -149,7 +171,7 @@ async def _keyword(paths: RuntimePaths, provider: str) -> None:
 
 def _assert_no_cached_body(runtime: Runtime) -> None:
     row = runtime.store.get(normalize_url(_TARGET))
-    assert row is not None and row.available
+    assert row is not None and row.status is URLStatus.NEED_FETCH
     assert (row.raw_content, row.content) == ("", "")
 
 
@@ -179,7 +201,7 @@ async def test_firecrawl_metadata_search_then_explicit_fetch(
         },
     )
     cheap = Mock(wraps=cheap_check)
-    monkeypatch.setattr(search, "cheap_check", cheap)
+    monkeypatch.setattr(fetch, "cheap_check", cheap)
     async with _gateway(paths, upstream, web=("firecrawl",)) as runtime:
         await _keyword(paths, "firecrawl")
         _assert_no_cached_body(runtime)
@@ -191,8 +213,8 @@ async def test_firecrawl_metadata_search_then_explicit_fetch(
             "limit": 10,
             "highlights": True,
         }
-        fetch = ["url-fetch", _TARGET]
-        assert await _filtering_cli(paths, fetch) == (0, f"{content}\n", "")
+        fetch_args = ["url-fetch", _TARGET]
+        assert await _filtering_cli(paths, fetch_args) == (0, f"{content}\n", "")
         assert json.loads(calls[1].content) == {
             "url": _TARGET,
             "formats": ["markdown"],
@@ -202,7 +224,7 @@ async def test_firecrawl_metadata_search_then_explicit_fetch(
         row = runtime.store.get(normalize_url(_TARGET))
         assert row is not None and row.content == content
         assert row.raw_content == ("<p>Article</p>" if unexpected_body else "Article")
-        assert await _filtering_cli(paths, fetch) == (0, f"{content}\n", "")
+        assert await _filtering_cli(paths, fetch_args) == (0, f"{content}\n", "")
     assert [(r.method, str(r.url)) for r in calls if str(r.url) != _CHAT] == [
         ("POST", _SEARCH),
         ("POST", _SCRAPE),
@@ -257,7 +279,7 @@ async def test_firecrawl_base64_only_fetch_uses_existing_fallback(
     assert all(marker.encode() not in r.content for r in calls if str(r.url) == _CHAT)
 
 
-async def test_tavily_search_body_still_runs_cheap_check_and_judge(
+async def test_tavily_search_body_defers_cheap_check_and_judge_until_fetch(
     paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://tavily.test/search"
@@ -265,20 +287,23 @@ async def test_tavily_search_body_still_runs_cheap_check_and_judge(
     hit = {"url": _TARGET, "raw_content": "Tavily body", "content": "Abstract"}
     upstream = _transport(calls, {url: httpx.Response(200, json={"results": [hit]})})
     cheap = Mock(wraps=cheap_check)
-    monkeypatch.setattr(search, "cheap_check", cheap)
+    monkeypatch.setattr(fetch, "cheap_check", cheap)
     async with _gateway(paths, upstream, web=("tavily",)) as runtime:
         await _keyword(paths, "tavily")
         row = runtime.store.get(normalize_url(_TARGET))
         assert row is not None and row.raw_content == "Tavily body"
+        assert row.status is URLStatus.NEED_JUDGE
+        cheap.assert_not_called()
+        assert [str(r.url) for r in calls] == [url]
+        assert await _filtering_cli(paths, ["url-fetch", _TARGET]) == (0, "Clean article\n", "")
     cheap.assert_called_once_with("Tavily body")
-    assert [str(r.url) for r in calls] == [url, _CHAT]
-    assert _chat_models(calls) == ["judge"]
+    assert _chat_models(calls) == ["judge", "content_clean", "safety"]
 
 
 def _academic(options: dict[str, object]) -> dict[str, object]:
     return {
-        "arxiv": {"enabled": True, "api_url": _ARXIV, **options},
-        "crossref": {"enabled": True, "api_url": "https://crossref.test"},
+        "arxiv": {"enabled": True, "credentials": [{"api_url": _ARXIV}], **options},
+        "crossref": {"enabled": True, "credentials": [{"api_url": "https://crossref.test"}]},
     }
 
 

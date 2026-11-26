@@ -7,8 +7,8 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Sequence
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from decimal import Decimal
 from tempfile import TemporaryDirectory
@@ -17,6 +17,7 @@ from ...concurrency import CapacityGate
 from ...errors import ErrorCode, ExecutionFailure, ProtocolFailure
 from ...input_limits import InputBudgetUnfit, PreparedInput, fit_messages_to_budget
 from ...observability import log_event, log_upstream_body_preview, make_input_preview_projector
+from ...rate_limit import RateLimitWaitTimeout
 from ..contracts import ChatMessage
 from ..diagnostics import best_effort_diagnostics, safe_diagnostic_fields
 
@@ -303,6 +304,17 @@ def _prepare_prompt(messages: Sequence[ChatMessage], max_bytes: int) -> Prepared
     raise _execution_failure("input_budget_unfit")
 
 
+class _SpawnReady(asyncio.Future[None]):
+    """Forward parent cancellation to a launch that is still waiting for its rate permit."""
+
+    launch: asyncio.Task[asyncio.subprocess.Process] | None = None
+
+    def cancel(self, msg: object = None) -> bool:
+        if not self.done() and self.launch is not None:
+            self.launch.cancel(msg)
+        return super().cancel(msg)
+
+
 async def run_antigravity(
     model: str | None,
     messages: Sequence[ChatMessage],
@@ -311,7 +323,8 @@ async def run_antigravity(
     command: str,
     timeout_seconds: float,
     pass_env: Sequence[str],
-    quota: CapacityGate,
+    quota: CapacityGate | None,
+    acquire_rate_permit: Callable[[], Awaitable[float]] | None = None,
     prompt_max_bytes: int = 98304,
 ) -> str:
     prepared = _prepare_prompt(messages, prompt_max_bytes)
@@ -330,14 +343,13 @@ async def run_antigravity(
     ]
     if model is not None:
         argv.extend(["--model", model])
-    async with quota.lease():
+    async with quota.lease() if quota is not None else nullcontext():
         with TemporaryDirectory(prefix="agent-search-") as directory:
             spawn: asyncio.Task[asyncio.subprocess.Process] | None = None
             spawn_attempted = False
             stdout_capture = bytearray()
             tasks: list[asyncio.Task[None] | asyncio.Task[int]] = []
             succeeded = False
-            started = asyncio.get_running_loop().time()
             process: asyncio.subprocess.Process | None = None
             stdout_count, stderr_count = _ByteCount(), _ByteCount()
             diagnostics: dict[str, object] = {}
@@ -395,21 +407,40 @@ async def run_antigravity(
                 )
                 return fields
 
-            try:
-                async with asyncio.timeout(timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS):
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+            ready = _SpawnReady()
+
+            async def launch() -> asyncio.subprocess.Process:
+                nonlocal started, spawn_attempted
+                try:
                     env = _curated_environment(pass_env)
-                    spawn_attempted = True
-                    spawn = asyncio.create_task(
-                        asyncio.create_subprocess_exec(
-                            *argv,
-                            cwd=directory,
-                            env=env,
-                            start_new_session=True,
-                            stdin=asyncio.subprocess.DEVNULL,
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                    )
+                    if acquire_rate_permit is not None:
+                        await acquire_rate_permit()
+                except RateLimitWaitTimeout:
+                    raise _execution_failure("rate_limit_wait_timeout") from None
+                finally:
+                    if not ready.done():
+                        ready.set_result(None)
+                # Charge the permit and enter subprocess creation on the same loop turn.
+                started = loop.time()
+                spawn_attempted = True
+                return await asyncio.create_subprocess_exec(
+                    *argv,
+                    cwd=directory,
+                    env=env,
+                    start_new_session=True,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+            try:
+                spawn = asyncio.create_task(launch())
+                ready.launch = spawn
+                await ready
+                deadline = started + timeout_seconds + _HARD_TIMEOUT_MARGIN_SECONDS
+                async with asyncio.timeout_at(deadline):
                     process = await asyncio.shield(spawn)
                     assert process.stdout is not None and process.stderr is not None
                     stdout = asyncio.create_task(
@@ -467,8 +498,8 @@ async def run_antigravity(
                     cleanup_failed = True
                     raise
                 finally:
-                    best_effort_diagnostics(record_diagnostic)
                     if spawn_attempted:
+                        best_effort_diagnostics(record_diagnostic)
                         with suppress(Exception):
                             log_upstream_body_preview(
                                 logging.getLogger(__name__),

@@ -1,13 +1,16 @@
+import asyncio
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import UNAVAILABLE_MESSAGE, ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
-from agent_search_gateway.models import LLMInvocation
+from agent_search_gateway.models import LLMInvocation, URLStatus
 from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.orchestrators import fetch as fetch_module
 from agent_search_gateway.orchestrators.fetch import FetchOrchestrator
 from agent_search_gateway.orchestrators.search import SearchOrchestrator
 from agent_search_gateway.providers.contracts import ChatMessage, URLFetchCandidate
@@ -16,7 +19,7 @@ from agent_search_gateway.result_writer import ResultWriter
 from agent_search_gateway.scheduler.fetch import FetchScheduler
 from agent_search_gateway.url_normalization import normalize_url
 from agent_search_gateway.url_store import URLStore
-from tests.support.fakes import FakeURLFetchProvider
+from tests.support.fakes import FakeURLFetchProvider, pooled_web
 from tests.support.http import RecordingJsonExecutor
 
 
@@ -25,11 +28,24 @@ class _FlowClient:
 
     def __init__(self) -> None:
         self.safety_ok = True
-        self.fail_clean = False
-        self.fail_safety = False
-        self.fail_focus = False
+        self.fail_model = ""
+        self.clean_output = "cleaned body"
         self.focus_calls = 0
         self.calls: list[tuple[str, str]] = []
+        self._pauses: dict[str, tuple[asyncio.Event, asyncio.Event]] = {}
+
+    def pause(self, model: str) -> tuple[asyncio.Event, asyncio.Event]:
+        """Return events for observing and releasing a call to this model."""
+        events = asyncio.Event(), asyncio.Event()
+        self._pauses[model] = events
+        return events
+
+    async def _record_call(self, model: str, text: str) -> None:
+        self.calls.append((model, text))
+        if model in self._pauses:
+            entered, release = self._pauses[model]
+            entered.set()
+            await release.wait()
 
     async def complete_json(
         self,
@@ -37,13 +53,13 @@ class _FlowClient:
         messages: Sequence[ChatMessage],
     ) -> Mapping[str, object]:
         text = messages[-1]["content"]
-        self.calls.append((invocation.model, text))
+        await self._record_call(invocation.model, text)
+        if invocation.model == self.fail_model:
+            raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "decision transport")
         if invocation.model == "judge-model":
             if "semantic-reject" in text:
                 return {"ok": False, "reason": "semantic"}
             return {"ok": True}
-        if self.fail_safety:
-            raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "safety transport")
         return {"ok": self.safety_ok, "reason": "unsafe" if not self.safety_ok else ""}
 
     async def complete_text(
@@ -51,15 +67,13 @@ class _FlowClient:
         invocation: LLMInvocation,
         messages: Sequence[ChatMessage],
     ) -> str:
-        self.calls.append((invocation.model, messages[-1]["content"]))
+        await self._record_call(invocation.model, messages[-1]["content"])
+        if invocation.model == self.fail_model:
+            raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "text transport")
         if invocation.model == "clean-model":
-            if self.fail_clean:
-                raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "clean transport")
-            return "cleaned body"
+            return self.clean_output
         if invocation.model == "focus-model":
             self.focus_calls += 1
-            if self.fail_focus:
-                raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "focus transport")
             return f"summary-{self.focus_calls}"
         return "unused"
 
@@ -88,11 +102,7 @@ def _build(
 ) -> FetchOrchestrator:
     stages = _flow_stages(client)
     scheduler = FetchScheduler(
-        providers,
-        ProviderQuotaManager(
-            web_limits={provider.name: 1 for provider in providers},
-            llm_limits={},
-        ),
+        [pooled_web(p, CapacityGate(1)) for p in providers],
         stages,
     )
     return FetchOrchestrator(store=store, scheduler=scheduler, stages=stages)
@@ -130,7 +140,6 @@ async def test_baiduqianfan_agentic_raw_content_uses_existing_clean_and_safety_p
     search = SearchOrchestrator(
         keyword_providers=[adapter],
         llm_invocations=(),
-        quotas=ProviderQuotaManager(web_limits={"baiduqianfan": 1}, llm_limits={}),
         stages=_flow_stages(client),
         store=store,
         result_writer=ResultWriter(tmp_path / "results"),
@@ -142,8 +151,8 @@ async def test_baiduqianfan_agentic_raw_content_uses_existing_clean_and_safety_p
     snapshot = store.get(url)
     assert snapshot is not None and snapshot.abstract == "Admitted abstract"
     assert (snapshot.raw_content, snapshot.content) == (raw_content, "")
-    assert [model for model, _ in client.calls] == ["judge-model"]
-    assert raw_content in client.calls[0][1]
+    assert snapshot.status is URLStatus.NEED_JUDGE
+    assert client.calls == []
 
     webpage_fetch = FakeURLFetchProvider(
         "webpage-fetch",
@@ -163,135 +172,291 @@ async def test_baiduqianfan_agentic_raw_content_uses_existing_clean_and_safety_p
     assert refreshed is not None
     assert refreshed.raw_content == raw_content
     assert refreshed.content == "cleaned body"
-    assert refreshed.available is safety_ok
+    assert refreshed.status is (URLStatus.READY if safety_ok else URLStatus.UNAVAILABLE)
     if not safety_ok:
         assert raw_content not in result and "cleaned body" not in result
         assert await fetch.url_fetch(str(url)) == UNAVAILABLE_MESSAGE
         assert len(client.calls) == 3
 
 
-def _admit(store: URLStore, suffix: str) -> str:
-    url = normalize_url(f"https://example.com/{suffix}")
-    store.admit(url, "known")
-    return str(url)
-
-
-async def test_url_fetch_mutates_state_only_for_accepted_or_semantically_rejected_results() -> None:
+@pytest.mark.parametrize(
+    ("status", "raw", "content", "models"),
+    [
+        (URLStatus.NEED_FETCH, "provider raw", "", ["judge-model", "clean-model", "safety-model"]),
+        (URLStatus.NEED_FETCH, "provider raw", "provider clean", ["judge-model", "safety-model"]),
+        (URLStatus.NEED_JUDGE, "cached raw", "", ["judge-model", "clean-model", "safety-model"]),
+        (URLStatus.NEED_JUDGE, "", "cached clean", ["judge-model", "safety-model"]),
+        (URLStatus.NEED_JUDGE, "cached raw", "cached clean", ["judge-model", "safety-model"]),
+        (URLStatus.NEED_CLEAN, "accepted raw", "", ["clean-model", "safety-model"]),
+        (URLStatus.NEED_SAFETY, "accepted raw", "clean", ["safety-model"]),
+        (URLStatus.READY, "accepted raw", "clean", []),
+        (URLStatus.UNAVAILABLE, "accepted raw", "unsafe", []),
+    ],
+)
+async def test_fetch_resumes_from_url_status(
+    status: URLStatus, raw: str, content: str, models: list[str]
+) -> None:
     store = URLStore()
+    url = normalize_url("https://example.com/state")
+    if status is URLStatus.NEED_JUDGE:
+        snapshot = await store.admit_candidate(url, "known", raw_content=raw, content=content)
+    else:
+        snapshot = store.admit(url, "known")
+        async with store.serialization(url):
+            if status is not URLStatus.NEED_FETCH:
+                snapshot = store.accept_candidate(url, raw_content=raw, content=content)
+            if status is URLStatus.READY:
+                snapshot = store.mark_ready(url)
+            elif status is URLStatus.UNAVAILABLE:
+                snapshot = store.mark_unavailable(url)
+    assert snapshot.status is status
+
     client = _FlowClient()
-    accepted_url = _admit(store, "accepted")
-    accepted_provider = FakeURLFetchProvider(
-        "accepted",
-        URLFetchCandidate(raw_content="raw accepted", content="provider clean"),
-    )
-    accepted_orchestrator = _build(store, client, [accepted_provider])
-    assert await accepted_orchestrator.url_fetch(accepted_url) == "provider clean"
-    accepted = store.get(normalize_url(accepted_url))
-    assert accepted is not None
-    assert accepted.raw_content == "raw accepted"
-    assert accepted.content == "provider clean"
-    assert accepted.available is True
+    provider = FakeURLFetchProvider("fetch", URLFetchCandidate(raw_content=raw, content=content))
+    fetch = _build(store, client, [provider])
+    result = await fetch.url_fetch(str(url))
+    assert [model for model, _ in client.calls] == models
+    assert provider.calls == ([url] if status is URLStatus.NEED_FETCH else [])
 
-    raw_store = URLStore()
-    raw_client = _FlowClient()
-    raw_url = _admit(raw_store, "raw-only")
-    raw_orchestrator = _build(
-        raw_store,
-        raw_client,
-        [FakeURLFetchProvider("raw", URLFetchCandidate(raw_content="raw only"))],
-    )
-    assert await raw_orchestrator.url_fetch(raw_url) == "cleaned body"
-    raw_snapshot = raw_store.get(normalize_url(raw_url))
-    assert raw_snapshot is not None
-    assert raw_snapshot.raw_content == "raw only"
-    assert raw_snapshot.content == "cleaned body"
+    final = store.get(url)
+    assert final is not None
+    if status is URLStatus.UNAVAILABLE:
+        assert result == UNAVAILABLE_MESSAGE
+        assert final is snapshot
+    else:
+        assert result == (content or "cleaned body")
+        assert (final.status, final.raw_content, final.content) == (URLStatus.READY, raw, result)
+        for model, prompt in client.calls:
+            if model == "judge-model":
+                assert prompt.endswith(content or raw)
+            elif model == "clean-model":
+                assert prompt.endswith(raw)
+            else:
+                assert prompt.endswith(result)
 
-    execution_store = URLStore()
-    execution_url = _admit(execution_store, "execution")
-    execution_orchestrator = _build(
-        execution_store,
-        _FlowClient(),
-        [
-            FakeURLFetchProvider(
-                "failure",
-                failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "provider execution"),
-            )
-        ],
-    )
-    with pytest.raises(ExecutionFailure) as execution:
-        await execution_orchestrator.url_fetch(execution_url)
-    assert execution.value.code is ErrorCode.ALL_PROVIDERS_FAILED
-    execution_snapshot = execution_store.get(normalize_url(execution_url))
-    assert execution_snapshot is not None and execution_snapshot.available is True
 
-    semantic_store = URLStore()
-    semantic_url = _admit(semantic_store, "semantic")
-    semantic_orchestrator = _build(
-        semantic_store,
-        _FlowClient(),
-        [FakeURLFetchProvider("semantic", URLFetchCandidate(raw_content="semantic-reject"))],
-    )
-    assert await semantic_orchestrator.url_fetch(semantic_url) == UNAVAILABLE_MESSAGE
-    semantic_snapshot = semantic_store.get(normalize_url(semantic_url))
-    assert semantic_snapshot is not None and semantic_snapshot.available is False
+@pytest.mark.parametrize("rejection", ["cheap", "judge"])
+async def test_cached_rejection_replaces_whole_pair_in_same_fetch(
+    monkeypatch: pytest.MonkeyPatch, rejection: str
+) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/replacement")
+    await store.admit_candidate(url, "known", raw_content="old raw", content="semantic-reject")
+    if rejection == "cheap":
+        monkeypatch.setattr(fetch_module, "cheap_check", lambda candidate: False)
+    client = _FlowClient()
+    provider = FakeURLFetchProvider("replacement", URLFetchCandidate(raw_content="fresh raw"))
 
-    safety_store = URLStore()
-    safety_url = _admit(safety_store, "safety")
-    safety_client = _FlowClient()
-    safety_client.safety_ok = False
-    safety_orchestrator = _build(
-        safety_store,
-        safety_client,
-        [FakeURLFetchProvider("safety", URLFetchCandidate(raw_content="raw", content="content"))],
-    )
-    assert await safety_orchestrator.url_fetch(safety_url) == UNAVAILABLE_MESSAGE
-    safety_snapshot = safety_store.get(normalize_url(safety_url))
-    assert safety_snapshot is not None and safety_snapshot.available is False
+    assert await _build(store, client, [provider]).url_fetch(str(url)) == "cleaned body"
 
-    safety_execution_store = URLStore()
-    safety_execution_url = _admit(safety_execution_store, "safety-execution")
-    safety_execution_client = _FlowClient()
-    safety_execution_client.fail_safety = True
-    safety_execution_orchestrator = _build(
-        safety_execution_store,
-        safety_execution_client,
-        [FakeURLFetchProvider("ok", URLFetchCandidate(raw_content="raw", content="content"))],
+    models = [model for model, _ in client.calls]
+    expected = ["judge-model"] if rejection == "judge" else []
+    assert models == [*expected, "judge-model", "clean-model", "safety-model"]
+    assert client.calls[-3][1].endswith("fresh raw")
+    assert client.calls[-2][1].endswith("fresh raw")
+    assert provider.calls == [url]
+    snapshot = store.get(url)
+    assert snapshot is not None
+    assert (snapshot.status, snapshot.raw_content, snapshot.content) == (
+        URLStatus.READY,
+        "fresh raw",
+        "cleaned body",
     )
-    with pytest.raises(ExecutionFailure) as safety_execution:
-        await safety_execution_orchestrator.url_fetch(safety_execution_url)
-    assert safety_execution.value.code is ErrorCode.LLM_STAGE_FAILED
-    safety_execution_snapshot = safety_execution_store.get(normalize_url(safety_execution_url))
-    assert safety_execution_snapshot is not None and safety_execution_snapshot.available is True
 
-    clean_store = URLStore()
-    clean_url = _admit(clean_store, "clean-execution")
-    clean_client = _FlowClient()
-    clean_client.fail_clean = True
-    clean_orchestrator = _build(
-        clean_store,
-        clean_client,
-        [FakeURLFetchProvider("raw", URLFetchCandidate(raw_content="raw only"))],
-    )
-    with pytest.raises(ExecutionFailure) as clean_execution:
-        await clean_orchestrator.url_fetch(clean_url)
-    assert clean_execution.value.code is ErrorCode.LLM_STAGE_FAILED
-    clean_snapshot = clean_store.get(normalize_url(clean_url))
-    assert clean_snapshot is not None and clean_snapshot.available is True
-    assert clean_snapshot.raw_content == "raw only" and clean_snapshot.content == ""
 
-    focus_store = URLStore()
-    focus_url = _admit(focus_store, "focus")
-    focus_client = _FlowClient()
-    focus_orchestrator = _build(
-        focus_store,
-        focus_client,
-        [FakeURLFetchProvider("focus", URLFetchCandidate(raw_content="raw", content="content"))],
+@pytest.mark.parametrize("with_provider", [False, True])
+async def test_cached_rejection_then_fetch_execution_failure_is_recoverable(
+    with_provider: bool,
+) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/recover")
+    await store.admit_candidate(url, "known", raw_content="old raw", content="semantic-reject")
+    provider = FakeURLFetchProvider(
+        "offline", failure=ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "provider execution")
     )
-    assert await focus_orchestrator.url_fetch(focus_url, "pricing") == "summary-1"
-    assert await focus_orchestrator.url_fetch(focus_url, "pricing") == "summary-2"
-    focus_snapshot = focus_store.get(normalize_url(focus_url))
-    assert focus_snapshot is not None and focus_snapshot.content == "content"
-    focus_client.fail_focus = True
-    with pytest.raises(ExecutionFailure) as focus_failure:
-        await focus_orchestrator.url_fetch(focus_url, "pricing")
-    assert focus_failure.value.code is ErrorCode.LLM_STAGE_FAILED
+    client = _FlowClient()
+    fetch = _build(store, client, [provider] if with_provider else [])
+
+    with pytest.raises(ExecutionFailure) as failure:
+        await fetch.url_fetch(str(url))
+    assert failure.value.code is (
+        ErrorCode.ALL_PROVIDERS_FAILED if with_provider else ErrorCode.NO_URL_FETCH_PROVIDERS
+    )
+    snapshot = store.get(url)
+    assert snapshot is not None
+    assert (snapshot.status, snapshot.raw_content, snapshot.content) == (
+        URLStatus.NEED_FETCH,
+        "",
+        "",
+    )
+    assert provider.calls == ([url] if with_provider else [])
+    assert [model for model, _ in client.calls] == ["judge-model"]
+    assert client.calls[0][1].endswith("semantic-reject")
+
+    await store.admit_candidate(url, "new abstract", content="new content")
+    assert await fetch.url_fetch(str(url)) == "new content"
+    assert [model for model, _ in client.calls[1:]] == ["judge-model", "safety-model"]
+
+
+@pytest.mark.parametrize("source", ["fetch", "safety"])
+async def test_explicit_rejection_stays_unavailable(source: str) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/rejected")
+    store.admit(url, "known")
+    client = _FlowClient()
+    client.safety_ok = False
+    raw = "semantic-reject" if source == "fetch" else "accepted raw"
+    provider = FakeURLFetchProvider("fetch", URLFetchCandidate(raw_content=raw))
+    fetch = _build(store, client, [provider])
+
+    assert await fetch.url_fetch(str(url), "focus") == UNAVAILABLE_MESSAGE
+    snapshot = store.get(url)
+    assert snapshot is not None and snapshot.status is URLStatus.UNAVAILABLE
+    assert await store.admit_candidate(url, "again", content="other") is snapshot
+    assert await fetch.url_fetch(str(url), "focus") == UNAVAILABLE_MESSAGE
+    assert provider.calls == [url]
+    assert [model for model, _ in client.calls] == (
+        ["judge-model"] if source == "fetch" else ["judge-model", "clean-model", "safety-model"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("failed_model", "pending", "content", "retry"),
+    [
+        ("judge-model", URLStatus.NEED_JUDGE, "cached content", ["judge-model", "safety-model"]),
+        ("clean-model", URLStatus.NEED_CLEAN, "", ["clean-model", "safety-model"]),
+        ("blank-clean", URLStatus.NEED_CLEAN, "", ["clean-model", "safety-model"]),
+        ("invalid-clean", URLStatus.NEED_CLEAN, "", ["clean-model", "safety-model"]),
+        ("safety-model", URLStatus.NEED_SAFETY, "cleaned body", ["safety-model"]),
+    ],
+)
+async def test_url_status_stage_failure_resumes_at_first_unfinished_stage(
+    failed_model: str, pending: URLStatus, content: str, retry: list[str]
+) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/stage-failure")
+    client = _FlowClient()
+    client.fail_model = failed_model
+    if failed_model == "blank-clean":
+        client.clean_output = "   "
+    elif failed_model == "invalid-clean":
+        client.clean_output = cast(str, b"unexpected bytes")
+    provider = FakeURLFetchProvider("fetch", URLFetchCandidate(raw_content="initial raw"))
+    if pending is URLStatus.NEED_JUDGE:
+        await store.admit_candidate(url, "known", raw_content="initial raw", content=content)
+    else:
+        store.admit(url, "known")
+    fetch = _build(store, client, [provider])
+
+    with pytest.raises(ExecutionFailure) as failure:
+        await fetch.url_fetch(str(url))
+    assert failure.value.code is ErrorCode.LLM_STAGE_FAILED
+    if failed_model == "judge-model":
+        cause = failure.value.__cause__
+        assert isinstance(cause, ExecutionFailure)
+        assert cause.code is ErrorCode.ALL_PROVIDERS_FAILED
+    snapshot = store.get(url)
+    assert snapshot is not None
+    assert (snapshot.status, snapshot.raw_content, snapshot.content) == (
+        pending,
+        "initial raw",
+        content,
+    )
+    stages = ["judge-model", "clean-model", "safety-model"]
+    assert [model for model, _ in client.calls] == stages[: stages.index(retry[0]) + 1]
+
+    client.calls.clear()
+    client.fail_model = ""
+    client.clean_output = "cleaned body"
+    assert await fetch.url_fetch(str(url)) == (content or "cleaned body")
+    assert [model for model, _ in client.calls] == retry
+    assert provider.calls == ([] if pending is URLStatus.NEED_JUDGE else [url])
+
+
+@pytest.mark.parametrize(
+    ("interrupted", "after_result", "pending", "content", "retry_from"),
+    [
+        ("judge-model", False, URLStatus.NEED_JUDGE, "", "judge-model"),
+        ("clean-model", False, URLStatus.NEED_CLEAN, "", "clean-model"),
+        ("safety-model", False, URLStatus.NEED_SAFETY, "cleaned body", "safety-model"),
+        ("focus-model", False, URLStatus.READY, "cleaned body", "focus-model"),
+        ("judge-model", True, URLStatus.NEED_CLEAN, "", "clean-model"),
+        ("clean-model", True, URLStatus.NEED_SAFETY, "cleaned body", "safety-model"),
+        ("safety-model", True, URLStatus.READY, "cleaned body", "focus-model"),
+    ],
+)
+async def test_stage_cancellation_preserves_last_committed_status(
+    interrupted: str, after_result: bool, pending: URLStatus, content: str, retry_from: str
+) -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/cancel-stage")
+    await store.admit_candidate(url, "known", raw_content="original raw")
+    client = _FlowClient()
+    entered, release = client.pause(interrupted)
+    fetch = _build(store, client, [])
+    stages = ["judge-model", "clean-model", "safety-model", "focus-model"]
+
+    async with asyncio.timeout(5), asyncio.TaskGroup() as tasks:
+        request = tasks.create_task(fetch.url_fetch(str(url), "pricing"))
+        await entered.wait()
+        if after_result:
+            # Wake the completed stage first. Cancellation runs at its next suspension.
+            _, next_release = client.pause(retry_from)
+            release.set()
+            asyncio.get_running_loop().call_soon(request.cancel)
+        else:
+            next_release = release
+            request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+
+    record = store.get(url)
+    assert record is not None
+    assert (record.status, record.raw_content, record.content) == (pending, "original raw", content)
+    attempted = [model for model, _ in client.calls]
+    through_interruption = stages[: stages.index(interrupted) + 1]
+    if after_result:
+        # The next stage may have started when cancellation arrives, but cannot have committed.
+        assert attempted in (through_interruption, [*through_interruption, retry_from])
+    else:
+        assert attempted == through_interruption
+
+    client.calls.clear()
+    next_release.set()
+    async with asyncio.timeout(5):
+        assert await fetch.url_fetch(str(url), "pricing") == "summary-1"
+    assert [model for model, _ in client.calls] == stages[stages.index(retry_from) :]
+    final = store.get(url)
+    assert final is not None
+    assert (final.status, final.raw_content, final.content) == (
+        URLStatus.READY,
+        "original raw",
+        "cleaned body",
+    )
+
+
+async def test_ready_focus_failure_does_not_fallback_to_full_content() -> None:
+    store = URLStore()
+    url = normalize_url("https://example.com/focus")
+    store.admit(url, "known")
+    async with store.serialization(url):
+        store.accept_candidate(url, content="full body")
+        ready = store.mark_ready(url)
+    client = _FlowClient()
+    provider = FakeURLFetchProvider("fetch")
+    fetch = _build(store, client, [provider])
+    client.fail_model = "focus-model"
+
+    with pytest.raises(ExecutionFailure) as failure:
+        await fetch.url_fetch(str(url), "pricing")
+    assert failure.value.code is ErrorCode.LLM_STAGE_FAILED
+    assert store.get(url) is ready
+
+    client.fail_model = ""
+    assert await fetch.url_fetch(str(url), "   ") == "full body"
+    assert await fetch.url_fetch(str(url), "pricing") == "summary-1"
+    assert await fetch.url_fetch(str(url), "pricing") == "summary-2"
+    assert [model for model, _ in client.calls] == ["focus-model"] * 3
+    assert all(prompt.endswith("full body") for _, prompt in client.calls)
+    assert provider.calls == []
+    assert store.get(url) is ready

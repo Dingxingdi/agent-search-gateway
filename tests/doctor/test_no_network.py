@@ -3,6 +3,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agent_search_gateway import doctor
+from agent_search_gateway.config import load_toml
 from agent_search_gateway.doctor import run_doctor
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.runtime import Runtime
@@ -72,3 +74,53 @@ async def test_doctor_agent_default_model_and_missing_command_stay_local(
     assert report.exit_code == 0
     assert report.checks[0].message == "configuration valid"
     assert not paths.socket_file.exists() and not paths.results_dir.exists()
+
+
+async def test_doctor_disabled_and_unreferenced_credentials_stay_local(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = RuntimePaths.from_home(tmp_path)
+    write_valid_config(paths.config_file)
+    data = load_toml(paths.config_file)
+    dormant = {
+        "api_key_env": "MISSING_ENV",
+        "contact_email_env": "MISSING_CONTACT",
+        "api_url": "https://unused.example.test",
+    }
+    data["web_providers"] = {
+        "open_websearch": {
+            "enable_search": False,
+            "enable_fetch": False,
+            "credentials": [{"api_url": "https://unused.example.test"}],
+        },
+        "tavily": {"enable_search": False, "credentials": [{"api_key_env": "MISSING_ENV"}]},
+    }
+    data["academic_providers"] = {"openalex": {"enabled": False, "credentials": [dormant]}}
+    data["oa_resolvers"] = {
+        "unpaywall": {
+            "enabled": False,
+            "credentials": [
+                {"contact_email_env": "MISSING_CONTACT", "api_url": "https://unused.example.test"}
+            ],
+        }
+    }
+    llm = data["llm_providers"]
+    assert isinstance(llm, dict)
+    llm["unused"] = {
+        "protocol": "openai",
+        "api_endpoint": "chat_completions",
+        "credentials": [{"api_key_env": "MISSING_ENV"}],
+    }
+    monkeypatch.setattr(doctor, "load_toml", lambda path: data)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("doctor must not build Runtime or probe dormant credentials")
+
+    monkeypatch.setattr(Runtime, "build", forbidden)
+    monkeypatch.setattr(httpx, "AsyncClient", forbidden)
+    report = await run_doctor(paths, environ={environment_name(): "[REDACTED_SECRET]"})
+    assert report.exit_code == 0
+    assert "MISSING_ENV" not in repr(report)
+    assert "MISSING_CONTACT" not in repr(report)
+    assert "unused.example.test" not in repr(report)
+    assert "credentials[0]: configuration valid" in repr(report)

@@ -3,7 +3,7 @@
 from collections.abc import Mapping, Sequence
 
 from agent_search_gateway.academic.aggregator import PaperAggregator
-from agent_search_gateway.concurrency import ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation, OAResolution
@@ -27,6 +27,7 @@ from tests.support.fakes import (
     FakeLLMClient,
     FakeOAResolver,
     FakeURLFetchProvider,
+    pooled_web,
 )
 
 
@@ -148,11 +149,6 @@ class AcceptanceRuntime:
                 license="cc-by",
             )
         )
-        quotas = ProviderQuotaManager(
-            web_limits={"keyword": 2, "fetch": 2},
-            llm_limits={},
-            academic_limits={"openalex": 2, "crossref": 2, "core": 2},
-        )
         client = _AcceptanceLLMClient()
         judge = LLMInvocation("llm", "judge-model", {})
         safety = LLMInvocation("llm", "safety-model", {})
@@ -171,7 +167,6 @@ class AcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=[keyword_provider],
             llm_invocations=[search],
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=result_writer,
@@ -180,7 +175,6 @@ class AcceptanceRuntime:
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=self.academic_providers,
-            quotas=quotas,
             aggregator=paper_aggregator,
             resolver=self.oa_resolver,
             store=store,
@@ -188,7 +182,7 @@ class AcceptanceRuntime:
         )
         self.fetch_orchestrator = FetchOrchestrator(
             store=store,
-            scheduler=FetchScheduler([self.fetch_provider], quotas, stages),
+            scheduler=FetchScheduler([pooled_web(self.fetch_provider, CapacityGate(2))], stages),
             stages=stages,
         )
         self.close_calls = 0
@@ -252,7 +246,6 @@ class DebugAcceptanceRuntime:
                 ),
             ],
         )
-        quotas = ProviderQuotaManager(web_limits={"keyword": 2}, llm_limits={})
         invocation = LLMInvocation("judge", "judge-model", {})
         stages = LLMStages(
             {"judge": _DebugAcceptanceLLMClient()},
@@ -265,14 +258,12 @@ class DebugAcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=[self.keyword_provider],
             llm_invocations=(),
-            quotas=quotas,
             stages=stages,
             store=store,
             result_writer=result_writer,
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=(),
-            quotas=quotas,
             aggregator=PaperAggregator(()),
             resolver=None,
             store=store,
@@ -280,7 +271,7 @@ class DebugAcceptanceRuntime:
         )
         self.fetch_orchestrator = FetchOrchestrator(
             store=store,
-            scheduler=FetchScheduler([], quotas, stages),
+            scheduler=FetchScheduler([], stages),
             stages=stages,
         )
         self.close_calls = 0
@@ -351,11 +342,6 @@ class FilteringAcceptanceRuntime:
         self.fetch_provider = FakeURLFetchProvider(
             "fetch", URLFetchCandidate(raw_content="Raw fetched content", content="Fetched content")
         )
-        self.quotas = ProviderQuotaManager(
-            web_limits={"alpha": 2, "beta": 2, "fetch": 2},
-            llm_limits={name: 2 for name in self.llm_clients},
-            academic_limits={name: 2 for name in ("arxiv", "openalex")},
-        )
         self.oa_resolver = FakeOAResolver()
         result_writer = ResultWriter(paths.results_dir)
         aggregator = PaperAggregator(
@@ -364,7 +350,6 @@ class FilteringAcceptanceRuntime:
         self.search_orchestrator = SearchOrchestrator(
             keyword_providers=self.keyword_providers,
             llm_invocations=self.llm_invocations,
-            quotas=self.quotas,
             stages=stages,
             store=self.store,
             result_writer=result_writer,
@@ -373,7 +358,6 @@ class FilteringAcceptanceRuntime:
         )
         self.paper_search_orchestrator = PaperSearchOrchestrator(
             providers=self.academic_providers,
-            quotas=self.quotas,
             aggregator=aggregator,
             resolver=self.oa_resolver,
             store=self.store,
@@ -381,7 +365,7 @@ class FilteringAcceptanceRuntime:
         )
         self.fetch_orchestrator = FetchOrchestrator(
             store=self.store,
-            scheduler=FetchScheduler([self.fetch_provider], self.quotas, stages),
+            scheduler=FetchScheduler([pooled_web(self.fetch_provider, CapacityGate(2))], stages),
             stages=stages,
         )
         self.close_calls = 0

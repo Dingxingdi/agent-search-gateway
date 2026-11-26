@@ -1,7 +1,11 @@
 """Contract-realistic provider and LLM fakes."""
 
-from collections.abc import Mapping, Sequence
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+from agent_search_gateway.concurrency import CapacityGate
+from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
 from agent_search_gateway.errors import ExecutionFailure
 from agent_search_gateway.models import LLMInvocation, OAResolution
 from agent_search_gateway.providers.contracts import (
@@ -9,7 +13,10 @@ from agent_search_gateway.providers.contracts import (
     KeywordSearchHit,
     PaperSearchHit,
     URLFetchCandidate,
+    WebAdapter,
 )
+from agent_search_gateway.providers.pooled import PooledWebProvider
+from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.url_normalization import NormalizedURL
 
 
@@ -128,3 +135,22 @@ class FakeLLMClient:
 
     async def aclose(self) -> None:
         self.close_calls += 1
+
+
+def pooled_web(
+    adapter: WebAdapter,
+    capacity: CapacityGate | None = None,
+    rate: RateGate | None = None,
+    *,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> PooledWebProvider:
+    return PooledWebProvider(
+        CredentialPool(
+            "web",
+            adapter.name,
+            [CredentialMember(adapter, capacity, rate)],
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+    )

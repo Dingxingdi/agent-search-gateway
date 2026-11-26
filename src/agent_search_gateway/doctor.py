@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from .config import ResolvedWebProviderConfig, load_toml, resolve_config
+from .config import ResolvedCredential, load_toml, resolve_config
 from .errors import ConfigFailure
 from .observability import normalize_log_reason
 from .paths import RuntimePaths
@@ -50,7 +50,7 @@ class DoctorReport:
 @dataclass(frozen=True, slots=True)
 class _DoctorConfiguration:
     checks: tuple[DoctorCheck, ...]
-    open_websearch: ResolvedWebProviderConfig | None = None
+    open_websearch: tuple[ResolvedCredential, ...] = ()
 
 
 DirectoryProbe = Callable[[Path], DoctorCheck]
@@ -157,9 +157,15 @@ async def run_doctor(
     checks.append(directory_probe(paths.socket_file.parent))
     checks.append(directory_probe(paths.results_dir))
     checks.append(directory_probe(paths.logs_dir))
-    if config.open_websearch is not None:
-        api_url = config.open_websearch.options.get("api_url", "http://127.0.0.1:3210")
-        checks.append(await _probe_open_websearch_health(api_url))
+    for index, credential in enumerate(config.open_websearch):
+        api_url = credential.options.get("api_url", "http://127.0.0.1:3210")
+        health = await _probe_open_websearch_health(api_url)
+        checks.append(
+            DoctorCheck(
+                health.status,
+                f"web_providers.open_websearch.credentials[{index}]: {health.message}",
+            )
+        )
     checks.append(_socket_check(paths.socket_file, await socket_probe(paths.socket_file)))
     return DoctorReport(tuple(checks))
 
@@ -210,6 +216,21 @@ def probe_directory_writable(path: Path) -> DoctorCheck:
     return probed
 
 
+def _credential_limits_summary(credential: ResolvedCredential) -> str:
+    capacity = (
+        str(credential.max_concurrency) if credential.max_concurrency is not None else "unlimited"
+    )
+    policy = credential.rate_policy
+    windows = ", ".join(
+        f"{window.requests} requests/{window.period_seconds}s" for window in policy.windows
+    )
+    rate_limits = f"[{windows}]" if windows else "none"
+    interval = (
+        str(policy.min_interval_seconds) if policy.min_interval_seconds is not None else "none"
+    )
+    return f"max_concurrency={capacity}, rate_limits={rate_limits}, min_interval_seconds={interval}"
+
+
 def _configuration_checks(
     config_file: Path,
     environ: Mapping[str, str],
@@ -238,34 +259,45 @@ def _configuration_checks(
         )
 
     checks: list[DoctorCheck] = [DoctorCheck(DoctorStatus.OK, "configuration valid")]
-    env_names = {
-        provider.api_key_env
-        for provider in config.web.providers
-        if provider.api_key_env is not None
-    }
-    env_names.update(provider.api_key_env for provider in config.llm.providers)
-    for provider in config.academic.providers:
-        if provider.api_key_env is not None:
-            env_names.add(provider.api_key_env)
-        if provider.contact_email_env is not None:
-            env_names.add(provider.contact_email_env)
-    if config.oa_resolver is not None:
-        if config.oa_resolver.api_key_env is not None:
-            env_names.add(config.oa_resolver.api_key_env)
-        if config.oa_resolver.contact_email_env is not None:
-            env_names.add(config.oa_resolver.contact_email_env)
+    env_names: set[str] = set()
+    provider_groups = (
+        ("web_providers", config.web.providers),
+        ("academic_providers", config.academic.providers),
+        ("llm_providers", config.llm.providers),
+        ("oa_resolvers", (config.oa_resolver,) if config.oa_resolver is not None else ()),
+    )
+    for namespace, providers in provider_groups:
+        for provider in providers:
+            for index, credential in enumerate(provider.credentials):
+                checks.append(
+                    DoctorCheck(
+                        DoctorStatus.OK,
+                        f"{namespace}.{provider.name}.credentials[{index}]: configuration valid",
+                    )
+                )
+                checks.append(
+                    DoctorCheck(
+                        DoctorStatus.INFO,
+                        f"{namespace}.{provider.name}.credentials[{index}]: "
+                        f"{_credential_limits_summary(credential)}",
+                    )
+                )
+                if credential.api_key_env is not None:
+                    env_names.add(credential.api_key_env)
+                if credential.contact_email_env is not None:
+                    env_names.add(credential.contact_email_env)
     checks.extend(
         DoctorCheck(DoctorStatus.OK, f"environment variable {name} is set")
         for name in sorted(env_names)
     )
     open_websearch = next(
         (
-            provider
+            provider.credentials
             for provider in config.web.providers
             if provider.name == "open_websearch"
             and (provider.enable_search or provider.enable_fetch)
         ),
-        None,
+        (),
     )
     return _DoctorConfiguration(tuple(checks), open_websearch)
 

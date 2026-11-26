@@ -1,36 +1,43 @@
 import asyncio
 
-from agent_search_gateway.concurrency import CapacityGate, ProviderQuotaManager
+from agent_search_gateway.concurrency import CapacityGate, ProviderQuotaManager, make_capacity_gate
 from agent_search_gateway.config import ResolvedRatePolicy
+from agent_search_gateway.credential_pool import CredentialMember, CredentialPool
 from agent_search_gateway.rate_limit import RateGate
 from agent_search_gateway.request_ids import bind_request_id
 from tests.support.logging import structured_test_logger
 
 
+def test_omitted_capacity_creates_no_waiting_gate() -> None:
+    quotas = ProviderQuotaManager(agent_limits={"unlimited": None, "limited": 2})
+    assert quotas.get_agent("unlimited") is None
+    limited = quotas.get_agent("limited")
+    assert limited is not None and limited.limit == 2
+
+
 async def test_rate_namespaces_isolate_same_named_providers_and_capacity() -> None:
-    quotas = ProviderQuotaManager(
-        web_limits={"shared": 1}, llm_limits={"shared": 1}, agent_limits={"shared": 1}
-    )
     policy = ResolvedRatePolicy(min_interval_seconds=10)
-    web, academic, oa = RateGate(policy), RateGate(policy), RateGate(policy)
-    quotas.register_rate("web", "shared", web)
-    quotas.register_rate("academic", "shared", academic)
-    quotas.register_rate("oa", "shared", oa)
-    assert quotas.get_rate("web", "shared") is web
-    assert quotas.get_rate("academic", "shared") is academic
-    assert quotas.get_rate("oa", "shared") is oa
-    assert quotas.get_rate("web", "missing") is None
+    members = {
+        namespace: CredentialMember("shared", CapacityGate(1), RateGate(policy))
+        for namespace in ("web", "academic", "oa", "llm")
+    }
+    pools = {
+        namespace: CredentialPool(namespace, "shared", [member])
+        for namespace, member in members.items()
+    }
+    web = members["web"].rate
+    assert web is not None
     await web.permit(timeout_seconds=0)
-    assert web.next_available_in_seconds() > 0
-    assert academic.next_available_in_seconds() == oa.next_available_in_seconds() == 0
-    async with quotas.get_llm("shared").lease(), quotas.get_agent("shared").lease():
-        assert quotas.get_llm("shared").in_use == quotas.get_agent("shared").in_use == 1
+    assert await pools["web"].try_reserve(set()) is None
+    for namespace in ("academic", "oa", "llm"):
+        reservation = await pools[namespace].try_reserve(set())
+        assert reservation is not None and reservation.member is members[namespace]
+        await reservation.release()
 
 
 async def test_web_search_and_fetch_share_capacity_while_llm_capacity_is_separate() -> None:
-    quotas = ProviderQuotaManager(web_limits={"shared": 1}, llm_limits={"shared": 1})
-    web_gate = quotas.get_web("shared")
-    llm_gate = quotas.get_llm("shared")
+    web_gate = CapacityGate(1)
+    llm_gate = CapacityGate(1)
 
     first_web_entered = asyncio.Event()
     release_first_web = asyncio.Event()
@@ -73,12 +80,7 @@ async def test_web_search_and_fetch_share_capacity_while_llm_capacity_is_separat
 
 async def test_quota_debug_events_cover_acquire_wait_try_release_and_cancellation() -> None:
     logger, stream = structured_test_logger("tests.quota.events")
-    quotas = ProviderQuotaManager(
-        web_limits={"shared": 1},
-        llm_limits={},
-        logger=logger,
-    )
-    gate = quotas.get_web("shared")
+    gate = CapacityGate(1, provider="shared", quota_kind="web", logger=logger)
     entered = asyncio.Event()
     release = asyncio.Event()
 
@@ -146,44 +148,42 @@ async def test_quota_debug_events_cover_acquire_wait_try_release_and_cancellatio
 
 async def test_academic_capacity_is_separate_and_logs_academic_quota_kind() -> None:
     logger, stream = structured_test_logger("tests.quota.academic")
-    quotas = ProviderQuotaManager(
-        web_limits={"shared": 1},
-        llm_limits={"shared": 1},
-        academic_limits={"shared": 2},
-        logger=logger,
-    )
-    academic_gate = quotas.get_academic("shared")
+    academic_gate = CapacityGate(2, provider="shared", quota_kind="academic", logger=logger)
+    web_gate, llm_gate = CapacityGate(1), CapacityGate(1)
     assert academic_gate.limit == 2
     async with academic_gate.lease():
         assert academic_gate.in_use == 1
-        assert quotas.get_web("shared").in_use == 0
-        assert quotas.get_llm("shared").in_use == 0
+        assert web_gate.in_use == 0
+        assert llm_gate.in_use == 0
     assert "quota_kind=academic" in stream.getvalue()
 
 
-def test_omitted_academic_limits_preserve_existing_constructor_behavior() -> None:
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={})
-    try:
-        quotas.get_academic("missing")
-    except KeyError:
-        pass
-    else:
-        raise AssertionError("missing academic quota must not be synthesized")
+def test_omitted_credential_limit_has_no_member_gate() -> None:
+    member = CredentialMember("shared", make_capacity_gate(None))
+    assert member.capacity is None
 
 
 async def test_agent_quota_is_independent_of_same_named_llm_quota() -> None:
-    assert hasattr(ProviderQuotaManager, "get_agent"), "Agent requires its own quota namespace"
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={"same": 1}, agent_limits={"same": 1})
+    quotas = ProviderQuotaManager(agent_limits={"same": 1})
     gate = quotas.get_agent("same")
-    async with gate.lease(), asyncio.timeout(1), quotas.get_llm("same").lease():
-        assert gate.in_use == 1
-        assert quotas.get_llm("same").in_use == 1
+    assert gate is not None
+    member = CredentialMember("same", CapacityGate(1))
+    pool = CredentialPool("llm", "same", [member])
+    async with gate.lease(), asyncio.timeout(1):
+        reservation = await pool.try_reserve(set())
+        assert reservation is not None
+        try:
+            assert gate.in_use == 1
+            assert member.capacity is not None and member.capacity.in_use == 1
+        finally:
+            await reservation.release()
     assert gate.in_use == 0
 
 
 async def test_agent_quota_waiter_cancellation_and_release() -> None:
-    quotas = ProviderQuotaManager(web_limits={}, llm_limits={}, agent_limits={"a": 1, "b": 2})
+    quotas = ProviderQuotaManager(agent_limits={"a": 1, "b": 2})
     gate = quotas.get_agent("a")
+    assert gate is not None
     attempted, entered = asyncio.Event(), asyncio.Event()
 
     async def waiter() -> None:
@@ -202,5 +202,7 @@ async def test_agent_quota_waiter_cancellation_and_release() -> None:
         await waiter()
     assert entered.is_set()
     assert gate.in_use == 0
-    async with quotas.get_agent("b").lease(), quotas.get_agent("b").lease():
-        assert quotas.get_agent("b").in_use == 2
+    other_gate = quotas.get_agent("b")
+    assert other_gate is not None
+    async with other_gate.lease(), other_gate.lease():
+        assert other_gate.in_use == 2

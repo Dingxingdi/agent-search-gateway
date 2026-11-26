@@ -6,7 +6,6 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agent_search_gateway.concurrency import CapacityGate, ProviderQuotaManager
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure, InputFailure
 from agent_search_gateway.llm.stages import LLMStages
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
@@ -83,7 +82,6 @@ def _orchestrator(
     return SearchOrchestrator(
         keyword_providers=(),
         llm_invocations=invocations,
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
         stages=stages,
         store=store or URLStore(),
         result_writer=ResultWriter(tmp_path / "results"),
@@ -205,7 +203,6 @@ async def test_llm_search_debug_events_cover_invocations_parse_failures_and_pers
     orchestrator = SearchOrchestrator(
         keyword_providers=(),
         llm_invocations=(good, malformed, failed),
-        quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
         stages=stages,
         store=URLStore(),
         result_writer=ResultWriter(tmp_path / "llm-debug-results"),
@@ -293,7 +290,6 @@ async def test_protocol_retry_has_one_provider_terminal_outcome(
             api_url="https://llm.example.test",
             secret=SecretValue("secret"),
             executor=HttpJsonExecutor(http_client, policy, provider_name="openai", logger=logger),
-            quota=CapacityGate(1),
             retry_policy=policy,
             sleep=no_sleep,
             logger=logger,
@@ -309,7 +305,6 @@ async def test_protocol_retry_has_one_provider_terminal_outcome(
         orchestrator = SearchOrchestrator(
             keyword_providers=(),
             llm_invocations=(invocation,),
-            quotas=ProviderQuotaManager(web_limits={}, llm_limits={}),
             stages=stages,
             store=URLStore(),
             result_writer=ResultWriter(tmp_path / "results"),

@@ -9,7 +9,6 @@ from collections.abc import Callable, Sequence
 
 from ..academic.aggregator import PaperAggregator
 from ..academic.enrichment import enrich_paper_records
-from ..concurrency import ProviderQuotaManager
 from ..errors import ErrorCode, ExecutionFailure, InputFailure
 from ..models import PaperRecord
 from ..observability import elapsed_ms, log_event
@@ -42,7 +41,6 @@ class PaperSearchOrchestrator:
         self,
         *,
         providers: Sequence[AcademicSearchProvider],
-        quotas: ProviderQuotaManager,
         aggregator: PaperAggregator,
         resolver: OAResolver | None,
         store: URLStore,
@@ -51,7 +49,6 @@ class PaperSearchOrchestrator:
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.providers = tuple(providers)
-        self.quotas = quotas
         self.aggregator = aggregator
         self.resolver = resolver
         self.store = store
@@ -132,8 +129,7 @@ class PaperSearchOrchestrator:
             stage="paper_search",
         )
         try:
-            async with self.quotas.get_academic(provider.name).lease():
-                hits = await provider.search(query)
+            hits = await provider.search(query)
             if not isinstance(hits, list):
                 raise TypeError("academic provider search result must be a list")
             if any(not isinstance(hit, PaperSearchHit) for hit in hits):

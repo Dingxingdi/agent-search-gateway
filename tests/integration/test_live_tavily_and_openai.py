@@ -3,7 +3,6 @@ import os
 import httpx
 import pytest
 
-from agent_search_gateway.concurrency import CapacityGate
 from agent_search_gateway.models import LLMInvocation, RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
@@ -25,7 +24,7 @@ async def test_live_tavily_search_response_shape() -> None:
     if not private_value:
         pytest.skip(f"{_TAVILY_ENV} is not set")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(limits=httpx.Limits(max_connections=None)) as client:
         executor = HttpJsonExecutor(
             client,
             _POLICY,
@@ -51,7 +50,7 @@ async def test_live_openai_chat_response_shape() -> None:
     if not private_value:
         pytest.skip(f"{_OPENAI_ENV} is not set")
 
-    client = httpx.AsyncClient()
+    client = httpx.AsyncClient(limits=httpx.Limits(max_connections=None))
     executor = HttpJsonExecutor(
         client,
         _POLICY,
@@ -62,7 +61,6 @@ async def test_live_openai_chat_response_shape() -> None:
         api_url="https://api.openai.com",
         secret=SecretValue(private_value),
         executor=executor,
-        quota=CapacityGate(1),
         retry_policy=_POLICY,
     )
     try:

@@ -4,9 +4,9 @@ Use this reference when selecting settings for your account. It covers the 25 We
 
 ## Reading the settings
 
-`N/T` means `{ requests = N, period_seconds = T }` in the provider's `rate_limits` array. Each window counts physical HTTP attempts over the preceding T seconds, including Search, Fetch and retries that use the same provider. All windows apply together. `min_interval_seconds` sets a separate minimum time between starts. `max_concurrency` limits simultaneous work independently. A provider with no rate settings has no local frequency limit. The example settings live in [config.example.toml](../config.example.toml).
+`N/T` means `{ requests = N, period_seconds = T }` in each HTTP credential's `rate_limits` array. Each window counts physical HTTP attempts over the preceding T seconds, including Search, Fetch, internal branches and retries that use the same member. All windows apply together. `min_interval_seconds` sets a separate minimum time between starts. `max_concurrency` limits concurrent logical operations, including their retries. Every limit is independently optional; omitted limits are unrestricted. There is no default or provider-wide/global limit. The example settings live in [config.example.toml](../config.example.toml).
 
-Limits apply within one running gateway. Other processes, keys and applications can consume the same upstream allowance. Choose settings for the product, account and endpoints you actually use. Monthly credits, dollar budgets and included usage describe billing and do not supply a request frequency.
+Limits apply independently per credential within one running gateway. The provider may impose shared account, organization, endpoint or IP limits; configuring multiple credentials does not multiply those upstream allowances. Other processes, keys and applications can consume the same upstream allowance. Choose settings for the product, account and endpoints you actually use. Monthly credits, dollar budgets and included usage describe billing and do not supply a request frequency.
 
 ## Provider reference
 
@@ -53,6 +53,8 @@ The example file omits these four providers. To enable one, copy its table into 
 [web_providers.zenrows]
 enable_search = false
 enable_fetch = true
+
+[[web_providers.zenrows.credentials]]
 api_url = "https://api.zenrows.com"
 api_key_env = "ZENROWS_API_KEY"
 max_concurrency = 5
@@ -60,6 +62,8 @@ max_concurrency = 5
 [web_providers.decodo]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.decodo.credentials]]
 api_url = "https://scraper-api.decodo.com"
 api_key_env = "DECODO_BASIC_CREDENTIAL"
 rate_limits = [{ requests = 10, period_seconds = 1 }]
@@ -67,6 +71,8 @@ rate_limits = [{ requests = 10, period_seconds = 1 }]
 [web_providers.scrapingdog]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.scrapingdog.credentials]]
 api_url = "https://api.scrapingdog.com"
 api_key_env = "SCRAPINGDOG_API_KEY"
 max_concurrency = 1
@@ -74,6 +80,8 @@ max_concurrency = 1
 [web_providers.scrapegraphai]
 enable_search = true
 enable_fetch = true
+
+[[web_providers.scrapegraphai.credentials]]
 api_url = "https://v2-api.scrapegraphai.com"
 api_key_env = "SCRAPEGRAPHAI_API_KEY"
 rate_limits = [{ requests = 10, period_seconds = 60 }]

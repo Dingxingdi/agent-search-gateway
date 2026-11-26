@@ -16,7 +16,7 @@ from agent_search_gateway.providers.http import (
     HttpStatusFailure,
     ProviderResponseFailure,
 )
-from agent_search_gateway.rate_limit import RateGate, initial_rate_budget
+from agent_search_gateway.rate_limit import RateGate, SelectionBudget, initial_rate_budget
 from tests.support.controlled import ManualClock
 from tests.support.logging import structured_test_logger, without_debug_body_previews
 
@@ -372,6 +372,7 @@ async def test_retry_rate_timeout_has_only_the_first_real_send_preview() -> None
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+    assert caught.value.code == ErrorCode.ALL_PROVIDERS_FAILED
     assert caught.value.reason == "rate_limit_wait_timeout"
     (line,) = [s for s in stream.getvalue().splitlines() if "event=upstream_body_preview " in s]
     assert "attempt=1" in line and "response_body_preview=first" in line
@@ -3131,7 +3132,7 @@ async def test_retry_uses_a_fresh_rate_budget_after_the_scoped_first_attempt(
         )
 
         async def fetch() -> str:
-            with initial_rate_budget(gate, remaining_seconds=0, waited_seconds=0.5):
+            with initial_rate_budget(gate, SelectionBudget(0, 0.5)):
                 return await executor.request_text("GET", "https://example.test", stage="fetch")
 
         task = asyncio.create_task(fetch())
@@ -3167,7 +3168,7 @@ async def test_zero_remaining_first_attempt_budget_rejects_a_contended_permit_im
         executor = HttpJsonExecutor(
             client, RetryPolicy(2, 0, 0, 0.5), provider_name="test", rate_gate=gate
         )
-        with initial_rate_budget(gate, remaining_seconds=0, waited_seconds=0.5):
+        with initial_rate_budget(gate, SelectionBudget(0, 0.5)):
             async with asyncio.timeout(1):
                 with pytest.raises(ExecutionFailure) as failure:
                     await executor.request_text("GET", "https://example.test", stage="fetch")

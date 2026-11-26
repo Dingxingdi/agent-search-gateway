@@ -24,7 +24,7 @@ from tests.support.agent_cli import write_fake_cli
 from tests.support.agent_search import agent_orchestrator, paper_markdown, web_markdown
 
 
-def build_agent_acceptance(
+async def build_agent_acceptance(
     directory: Path,
     entries: list[tuple[str, str | None]],
     *,
@@ -82,11 +82,13 @@ def build_agent_acceptance(
 [web_providers.jina]
 enable_search = false
 enable_fetch = true
+[[web_providers.jina.credentials]]
 api_url = "https://fetch.example.test"
 
 [llm_providers.fetch]
 protocol = "openai"
 api_endpoint = "chat_completions"
+[[llm_providers.fetch.credentials]]
 api_url = "https://llm.example.test"
 api_key_env = "ENV_D"
 
@@ -136,12 +138,14 @@ max_attempts = 1
         )
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolve_config(
-            load_toml(paths.config_file), build_default_registry(), {"ENV_D": "[REDACTED_SECRET]"}
+            load_toml(paths.config_file), build_default_registry(), {"ENV_D": "example"}
         ),
         paths,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), **kwargs
+        ),
     )
     return paths, runtime, evidence, calls
 
@@ -215,7 +219,7 @@ async def test_agent_cli_receives_response_after_old_socket_deadline(
 
 @pytest.mark.parametrize("scope", ["web", "paper", "all"])
 async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, scope: str) -> None:
-    paths, runtime, evidence, http_calls = build_agent_acceptance(
+    paths, runtime, evidence, http_calls = await build_agent_acceptance(
         tmp_path, [("a", None)], allow_pin=False
     )
     daemon = ForegroundDaemon(paths, runtime_factory=lambda: runtime)
@@ -260,7 +264,8 @@ async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, s
                 "URL was not admitted by search\n",
             )
             assert len(http_calls) == before
-        assert runtime.quotas.get_agent("a").in_use == 0
+        gate = runtime.quotas.get_agent("a")
+        assert gate is not None and gate.in_use == 0
     assert not paths.socket_file.exists()
 
 
@@ -271,7 +276,7 @@ async def test_agent_cli_socket_to_fake_cli_and_followup_fetch(tmp_path: Path, s
 async def test_large_search_preserves_selected_schema_and_empty_success(
     tmp_path: Path, kind: str, scope: str, empty: bool
 ) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path, [("a", "selected"), ("b", "unused")]
     )
     cap, provider, model = (
@@ -327,17 +332,28 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agent_search_gateway.providers.agent import antigravity_cli
+    from tests.doctor._support import environment_name, write_valid_config
     from tests.providers.agent.test_antigravity_lifecycle import assert_clean, hanging_cli
-    from tests.runtime.test_agent_runtime_assembly import agent_config
-    from tests.runtime.test_runtime_assembly import _CountingAsyncClient, _environment
     from tests.support.agent_cli import force_cleanup, wait_for_json
 
     command, ready = hanging_cli(tmp_path, ignore_term=True)
     paths = RuntimePaths.from_home(tmp_path)
-    runtime = Runtime.build(
-        resolve_config(agent_config(str(command)), build_default_registry(), _environment()),
+    write_valid_config(paths.config_file)
+    raw = load_toml(paths.config_file)
+    raw["agent_providers"] = {
+        "primary": {"harness": "antigravity", "command": str(command), "max_concurrency": 1}
+    }
+    raw["search_agent"] = {"providers": [{"provider": "primary"}]}
+
+    def unexpected_http(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("Agent search must use its CLI")
+
+    runtime = await Runtime.build(
+        resolve_config(raw, build_default_registry(), {environment_name(): "offline"}),
         paths,
-        http_client_factory=_CountingAsyncClient,
+        http_client_factory=lambda **kwargs: httpx.AsyncClient(
+            transport=httpx.MockTransport(unexpected_http), **kwargs
+        ),
     )
     monkeypatch.setattr(antigravity_cli, "_TERMINATE_GRACE_SECONDS", 0.05)
     state: dict[str, object] = {}
@@ -349,7 +365,9 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
-        assert_clean(state, runtime.quotas.get_agent("primary"))
+        gate = runtime.quotas.get_agent("primary")
+        assert gate is not None
+        assert_clean(state, gate)
         assert not list(paths.results_dir.glob("*.jsonl"))
     finally:
         task.cancel()
@@ -360,7 +378,7 @@ async def test_cancel_large_agent_search_workflow_reaps_process_and_releases_quo
 
 
 async def test_agent_default_only_model_selector_starts_no_process(tmp_path: Path) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path, [("a", None)], allow_pin=False
     )
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
@@ -375,7 +393,7 @@ async def test_agent_default_only_model_selector_starts_no_process(tmp_path: Pat
 async def test_agent_pinned_selection_duplicate_entries_and_followup_are_independent(
     tmp_path: Path,
 ) -> None:
-    paths, runtime, evidence, calls = build_agent_acceptance(
+    paths, runtime, evidence, calls = await build_agent_acceptance(
         tmp_path,
         [("a", None), ("a", None), ("a", "m1"), ("b", "m2")],
     )
@@ -402,7 +420,7 @@ async def test_agent_pinned_selection_duplicate_entries_and_followup_are_indepen
 async def test_agent_partial_success_and_all_failure_write_only_valid_results(
     tmp_path: Path,
 ) -> None:
-    paths, runtime, _, _ = build_agent_acceptance(tmp_path, [("a", None)])
+    paths, runtime, _, _ = await build_agent_acceptance(tmp_path, [("a", None)])
     async with _running_daemon(ForegroundDaemon(paths, runtime_factory=lambda: runtime)):
         code, out, err = await invoke(paths, ["agent-search", "partial", "--scope", "all"])
         assert code == 0 and err == ""

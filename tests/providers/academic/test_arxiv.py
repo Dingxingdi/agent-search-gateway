@@ -250,7 +250,7 @@ async def test_runtime_arxiv_options_reach_real_http_request(
     raw["academic_providers"] = {
         "arxiv": {
             "enabled": True,
-            "api_url": "https://arxiv.example.test/query",
+            "credentials": [{"api_url": "https://arxiv.example.test/query"}],
             **options,
         }
     }
@@ -268,17 +268,17 @@ async def test_runtime_arxiv_options_reach_real_http_request(
         requests.append(request)
         return httpx.Response(200, text=body)
 
-    runtime = Runtime.build(
+    runtime = await Runtime.build(
         resolved,
         RuntimePaths.from_home(tmp_path),
         registry=web_registry,
         academic_registry=academic_registry,
         oa_resolver_registry=resolver_registry,
-        http_client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(handler)),
     )
     try:
         [provider] = runtime.academic_search_providers
-        assert isinstance(provider, ArxivProvider)
+        assert provider.name == "arxiv"
         hits = await provider.search('图谱 "neural networks" 50% %22')
     finally:
         await runtime.aclose()
@@ -464,7 +464,6 @@ async def test_arxiv_registry_constructs_resolved_search_options(custom_options:
     registry = build_default_academic_registry()
     options: dict[str, object] = (
         {
-            "api_url": "https://arxiv.example.test/query",
             "query_fields": ["abs", "ti"],
             "max_results": 100,
             "sort_by": "lastUpdatedDate",
@@ -473,11 +472,18 @@ async def test_arxiv_registry_constructs_resolved_search_options(custom_options:
         if custom_options
         else {}
     )
+    credential = {"api_url": "https://arxiv.example.test/query"} if custom_options else {}
     [config] = resolve_academic_provider_config(
-        {"academic_providers": {"arxiv": {"enabled": True, **options}}}, registry, {}
+        {
+            "academic_providers": {
+                "arxiv": {"enabled": True, "credentials": [credential], **options}
+            }
+        },
+        registry,
+        {},
     ).providers
     executor = RecordingJsonExecutor([(FIXTURES / "search.xml").read_text()])
-    provider = registry.require("arxiv").factory(executor=executor, **config.options)
+    provider = registry.require("arxiv").factory(executor=executor, **config.credentials[0].options)
     assert isinstance(provider, ArxivProvider)
     assert provider._query_fields == (("abs", "ti") if custom_options else ("ti", "abs"))
     assert provider._max_results == (100 if custom_options else 10)
@@ -509,7 +515,7 @@ def test_arxiv_resolved_options_snapshot_lists_before_factory(enabled: bool) -> 
     from agent_search_gateway.providers.academic.defaults import build_default_academic_registry
 
     fields = ["abs", "ti"]
-    table = {"enabled": enabled, "query_fields": fields}
+    table = {"enabled": enabled, "query_fields": fields, "credentials": [{}]}
     registry = build_default_academic_registry()
     [config] = resolve_academic_provider_config(
         {"academic_providers": {"arxiv": table}}, registry, {}

@@ -6,6 +6,8 @@ from typing import Literal
 
 from .contracts import ProviderCapabilities
 
+WEB_ENDPOINT_KEYS = frozenset({"api_url", "search_api_url", "fetch_api_url"})
+
 WebStage = Literal["search", "fetch"]
 WebProviderFactory = Callable[..., object]
 
@@ -19,6 +21,11 @@ class WebProviderRegistration:
     requires_api_key: bool = True
     supports_optional_api_key: bool = False
     validate_config: Callable[[Mapping[str, object], bool], None] | None = None
+    credential_override_keys: frozenset[str] = frozenset()
+
+    @property
+    def credential_option_keys(self) -> frozenset[str]:
+        return self.allowed_config_keys & (WEB_ENDPOINT_KEYS | self.credential_override_keys)
 
 
 class ProviderRegistry:
