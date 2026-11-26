@@ -372,6 +372,7 @@ async def test_retry_rate_timeout_has_only_the_first_real_send_preview() -> None
             finally:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+    assert caught.value.code == ErrorCode.ALL_PROVIDERS_FAILED
     assert caught.value.reason == "rate_limit_wait_timeout"
     (line,) = [s for s in stream.getvalue().splitlines() if "event=upstream_body_preview " in s]
     assert "attempt=1" in line and "response_body_preview=first" in line

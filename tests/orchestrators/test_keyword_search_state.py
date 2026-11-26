@@ -284,6 +284,49 @@ async def test_keyword_search_admits_metadata_without_a_candidate(
     assert (record.raw_content, record.content) == ("", "")
 
 
+@pytest.mark.parametrize(
+    ("raw", "content", "cached_pair", "result"),
+    [
+        ("valid raw", "\ud800", ("valid raw", ""), "cleaned body"),
+        ("\udfff", "valid content", ("", "valid content"), "valid content"),
+        ("\ud800", "broken\udfff", ("", ""), "fetched content"),
+    ],
+    ids=["raw-only", "content-only", "both-invalid"],
+)
+async def test_keyword_search_with_invalid_utf8_body_can_be_fetched(
+    tmp_path: Path, raw: str, content: str, cached_pair: tuple[str, str], result: str
+) -> None:
+    url = normalize_url("https://example.org/invalid-body")
+    provider = FakeKeywordSearchProvider(
+        "web", [KeywordSearchHit(url, title="Title", raw_content=raw, content=content)]
+    )
+    search, store, search_client, _ = _build_keyword(tmp_path, [provider])
+    path = Path(await search.keyword_search("query", request_id="ac000003"))
+    cached = store.get(url)
+
+    fetch_provider = FakeURLFetchProvider(
+        "fetch", URLFetchCandidate(raw_content="fetched raw", content="fetched content")
+    )
+    client = _FlowClient()
+    fetch = _build_fetch(store, client, [fetch_provider])
+    fetched = await fetch.url_fetch(str(url))
+
+    assert json.loads(path.read_text()) == {"url": url, "abstract": "Title"}
+    assert search_client.json_calls == search_client.text_calls == []
+    assert cached is not None
+    assert (cached.raw_content, cached.content) == cached_pair
+    assert cached.status is (URLStatus.NEED_JUDGE if any(cached_pair) else URLStatus.NEED_FETCH)
+    assert fetch_provider.calls == ([] if any(cached_pair) else [url])
+    assert fetched == result
+    assert [model for model, _ in client.calls] == (
+        ["judge-model", "clean-model", "safety-model"]
+        if cached_pair[0]
+        else ["judge-model", "safety-model"]
+    )
+    final = store.get(url)
+    assert final is not None and final.status is URLStatus.READY
+
+
 class _OrderedProvider:
     def __init__(
         self,
@@ -314,7 +357,7 @@ async def test_keyword_admission_uses_declared_provider_order(tmp_path: Path) ->
     first = _OrderedProvider(
         "first",
         [
-            KeywordSearchHit(url, snippet="First abstract"),
+            KeywordSearchHit(url, snippet="First abstract", raw_content="\ud800"),
             KeywordSearchHit(url, snippet="First body", raw_content="first raw"),
             KeywordSearchHit(url, snippet="Later hit", content="later clean"),
         ],

@@ -17,6 +17,10 @@ The first public release is `v0.1.0`.
 - Search retains naturally returned body candidates without running body validation stages or requesting full text. Fetch advances explicit URL states, rejects cached candidates without mixing body pairs, and reuses READY content and its Safety result. Focus summaries remain request-local; admission, unavailable responses and the absence of refresh/TTL remain unchanged.
 - Doctor validates and labels every configured HTTP credential separately, reports its configured or unlimited concurrency and rate limits, and runs only existing applicable health checks without paid Search/Fetch probes.
 
+### Fixed
+
+- Discard natural search body fields that cannot be encoded as UTF-8 while preserving usable metadata and any valid body field from the same result, so later Fetch can proceed.
+- Return `LLM_STAGE_FAILED` consistently when an LLM credential's rate wait times out, including during physical HTTP retries.
 
 ## [2.0.0] - 2026-11-24
 

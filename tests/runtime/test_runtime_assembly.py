@@ -9,7 +9,7 @@ import pytest
 
 from agent_search_gateway.config import resolve_config
 from agent_search_gateway.credential_pool import CredentialPool
-from agent_search_gateway.errors import ConfigFailure
+from agent_search_gateway.errors import ConfigFailure, ErrorCode, ExecutionFailure
 from agent_search_gateway.llm.prompts import (
     content_clean_messages,
     focus_summary_messages,
@@ -212,6 +212,47 @@ async def test_runtime_llm_caps_each_stage_request(
         assert user["content"].endswith("TAIL")
         assert "[... truncated ...]" in user["content"]
         assert "OMITTED" not in user["content"]
+
+
+async def test_url_fetch_judge_rate_timeout_on_retry_and_pool_selection(tmp_path: Path) -> None:
+    raw = _config()
+    raw["web_providers"] = {
+        "jina": {"enable_fetch": True, "credentials": [{"api_url": "https://jina.test"}]}
+    }
+    llm = raw["llm_providers"]
+    assert isinstance(llm, dict)
+    llm["primary"]["credentials"][0]["min_interval_seconds"] = 3600
+    raw["retry"] = {"max_attempts": 2, "base_delay_seconds": 0.001, "request_timeout_seconds": 0.03}
+    sends: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "jina.test":
+            sends.append("fetch")
+            return httpx.Response(200, text="Article body")
+        assert request.url.path == "/v1/chat/completions"
+        sends.append("judge")
+        return httpx.Response(503)
+
+    registry = build_default_registry()
+    runtime = await Runtime.build(
+        resolve_config(raw, registry, _environment()),
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=lambda **_: httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+    )
+    target = normalize_url("https://example.test/article")
+    runtime.store.admit(target, "Abstract")
+    errors = []
+    try:
+        for _ in range(2):
+            with pytest.raises(ExecutionFailure) as caught:
+                await runtime.fetch_orchestrator.url_fetch(target)
+            errors.append((caught.value.code, caught.value.reason))
+    finally:
+        await runtime.aclose()
+
+    assert sends == ["fetch", "judge", "fetch"]
+    assert errors == [(ErrorCode.LLM_STAGE_FAILED, "rate_limit_wait_timeout")] * 2
 
 
 async def test_runtime_search_and_fetch_share_one_rate_gate(

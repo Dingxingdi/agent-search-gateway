@@ -142,12 +142,14 @@ class HttpJsonExecutor:
         *,
         provider_name: str,
         rate_gate: RateGate | None = None,
+        rate_limit_error_code: ErrorCode = ErrorCode.ALL_PROVIDERS_FAILED,
         logger: logging.Logger | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._rate_gate = rate_gate
+        self._rate_limit_error_code = rate_limit_error_code
         self._retry_policy = retry_policy
         self._provider_name = provider_name
         self._logger = logger or logging.getLogger(__name__)
@@ -795,7 +797,7 @@ class HttpJsonExecutor:
                 **context,
             )
             raise ExecutionFailure(
-                ErrorCode.ALL_PROVIDERS_FAILED,
+                self._rate_limit_error_code,
                 f"{self._provider_name}/{stage}: {reason}",
                 reason=reason,
             ) from exc

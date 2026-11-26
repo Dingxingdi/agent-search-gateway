@@ -52,6 +52,17 @@ class _StagedKeyword:
     content: str = ""
 
 
+def _usable_keyword_body(text: str) -> str:
+    """Keep the original body only if Fetch can send it to the LLM."""
+    if not text.strip():
+        return ""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return ""
+    return text
+
+
 class SearchOrchestrator:
     def __init__(
         self,
@@ -687,8 +698,8 @@ class SearchOrchestrator:
             url=url,
             abstract=abstract,
             provider=provider,
-            raw_content=hit.raw_content if hit.raw_content.strip() else "",
-            content=hit.content if hit.content.strip() else "",
+            raw_content=_usable_keyword_body(hit.raw_content),
+            content=_usable_keyword_body(hit.content),
         )
 
     def _log_provider_failure(

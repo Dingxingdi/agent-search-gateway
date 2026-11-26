@@ -167,6 +167,9 @@ class _HTTPAssembly:
         provider: ProviderConfig,
         create_adapter: Callable[[ResolvedCredential, HttpJsonExecutor], Adapter],
     ) -> tuple[CredentialPool[Adapter], Adapter]:
+        error_code = (
+            ErrorCode.LLM_STAGE_FAILED if namespace == "llm" else ErrorCode.ALL_PROVIDERS_FAILED
+        )
         members: list[CredentialMember[Adapter]] = []
         for index, credential in enumerate(provider.credentials):
             identity = CredentialIdentity(namespace, provider.name, index)
@@ -187,7 +190,11 @@ class _HTTPAssembly:
                 )
             )
             executor = HttpJsonExecutor(
-                client, self.retry, provider_name=provider.name, rate_gate=rate
+                client,
+                self.retry,
+                provider_name=provider.name,
+                rate_gate=rate,
+                rate_limit_error_code=error_code,
             )
             adapter = create_adapter(credential, executor)
             members.append(CredentialMember(adapter, capacity, rate))
@@ -204,9 +211,7 @@ class _HTTPAssembly:
             members,
             strategy=provider.credential_strategy,
             request_timeout_seconds=self.retry.request_timeout_seconds,
-            error_code=ErrorCode.LLM_STAGE_FAILED
-            if namespace == "llm"
-            else ErrorCode.ALL_PROVIDERS_FAILED,
+            error_code=error_code,
         )
         return pool, members[0].adapter
 
