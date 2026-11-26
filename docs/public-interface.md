@@ -4,7 +4,7 @@
 
 ## Supported user-facing interfaces
 
-The `2.x` compatibility policy covers these public interfaces.
+The `3.x` compatibility policy covers these public interfaces.
 
 - the `agent-search-gateway` executable and the commands documented in the README and `--help` output;
 - the configuration path and documented TOML fields, including supported provider settings omitted from the selected examples in `config.example.toml`;
@@ -153,7 +153,7 @@ adapter, and does not rewrite LLM, Agent, or paper-search URLs.
 
 Doctor validates every enabled or referenced credential separately, including later members, and reports namespace/provider/index labels. A successful member cannot hide another member's configuration or health failure. Existing applicable health checks do not perform paid Search or Fetch or measure balances.
 
-`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `2.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
+`doctor` messages and DEBUG events are intended for operators, but their exact wording, event set, ordering, and metadata fields may evolve within the `3.x` series. Automation should prefer result files and documented command outcomes over parsing diagnostic text.
 
 DEBUG diagnostics cover Web search/Fetch, academic/OA, HTTP, LLM, and Agent operations.
 HTTP attempts, received responses, scheduled retries, and terminal HTTP failures are

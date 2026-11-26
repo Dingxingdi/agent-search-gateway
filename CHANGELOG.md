@@ -8,6 +8,8 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-26
+
 ### Changed
 
 - **Breaking configuration change.** HTTP Web, academic, OA and LLM providers now require ordered `[[namespace.provider.credentials]]` arrays. Move existing endpoint, environment-variable authentication and limit fields into each member. Old provider-level fields and `default_max_concurrency` are rejected, including mixed configurations. User files are never converted automatically; write previous concurrency values explicitly to preserve them.
