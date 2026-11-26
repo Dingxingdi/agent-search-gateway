@@ -117,6 +117,17 @@ async def test_search_candidate_preserves_selected_and_terminal_states(status: U
     assert after.abstract == "First abstract"
 
 
+@pytest.mark.parametrize("status", [URLStatus.READY, URLStatus.UNAVAILABLE])
+async def test_terminal_candidate_admission_while_url_is_locked(status: URLStatus) -> None:
+    store, before = await _store_at(status)
+    async with store.serialization(before.url), asyncio.timeout(1):
+        after = await store.admit_candidate(before.url, "Later abstract", content="later body")
+        assert after is before
+        with pytest.raises(ValueError, match="non-empty abstract"):
+            await store.admit_candidate(before.url, " ", content="later body")
+    assert store.get(before.url) is before
+
+
 @pytest.mark.parametrize("from_search", [False, True])
 @pytest.mark.parametrize(
     ("raw_content", "content", "expected"),

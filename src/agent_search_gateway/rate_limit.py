@@ -94,11 +94,12 @@ class RateGate:
                     waited = now - started
                     if before_reserve is not None:
                         before_reserve(waited)
-                        now = self._monotonic()
+                    self._log("rate_gate_acquired", waited_ms=seconds_to_ms(waited))
+                    # Dispatch preparation and synchronous logging can delay the physical send.
+                    now = self._monotonic()
                     for _, sent in self._windows:
                         sent.append(now)
                     self._last_sent = now
-                    self._log("rate_gate_acquired", waited_ms=seconds_to_ms(waited))
                     return waited
                 if now >= deadline:
                     self._log("rate_gate_wait_timeout", waited_ms=seconds_to_ms(now - started))

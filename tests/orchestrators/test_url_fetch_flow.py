@@ -55,7 +55,7 @@ class _FlowClient:
         text = messages[-1]["content"]
         await self._record_call(invocation.model, text)
         if invocation.model == self.fail_model:
-            raise ExecutionFailure(ErrorCode.LLM_STAGE_FAILED, "decision transport")
+            raise ExecutionFailure(ErrorCode.ALL_PROVIDERS_FAILED, "decision transport")
         if invocation.model == "judge-model":
             if "semantic-reject" in text:
                 return {"ok": False, "reason": "semantic"}
@@ -351,6 +351,10 @@ async def test_url_status_stage_failure_resumes_at_first_unfinished_stage(
     with pytest.raises(ExecutionFailure) as failure:
         await fetch.url_fetch(str(url))
     assert failure.value.code is ErrorCode.LLM_STAGE_FAILED
+    if failed_model == "judge-model":
+        cause = failure.value.__cause__
+        assert isinstance(cause, ExecutionFailure)
+        assert cause.code is ErrorCode.ALL_PROVIDERS_FAILED
     snapshot = store.get(url)
     assert snapshot is not None
     assert (snapshot.status, snapshot.raw_content, snapshot.content) == (

@@ -106,6 +106,46 @@ async def test_agent_rate_counts_invocation_start(
     assert starts == expected
 
 
+async def test_busy_event_loop_preserves_spacing_between_concurrent_cli_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    starts: list[float] = []
+
+    async def advance(seconds: float) -> None:
+        clock.now += seconds
+
+    def busy_callback() -> None:
+        clock.now += 0.75
+
+    async def spawn(*argv: str, **kwargs: object) -> asyncio.subprocess.Process:
+        starts.append(clock.now)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    rate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=0.5), monotonic=clock.monotonic, sleep=advance
+    )
+    run = partial(
+        adapter.run_antigravity,
+        provider_name="alias",
+        command="fake",
+        timeout_seconds=1,
+        pass_env=(),
+        quota=None,
+        acquire_rate_permit=partial(rate.permit, timeout_seconds=10),
+    )
+    first = asyncio.create_task(run("a", []))
+    asyncio.get_running_loop().call_soon(busy_callback)
+    second = asyncio.create_task(run("b", []))
+    outcomes = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert all(
+        isinstance(exc, ExecutionFailure) and exc.reason == "spawn_failure" for exc in outcomes
+    )
+    assert starts == [0.75, 1.25]
+
+
 async def test_agent_rate_wait_timeout_releases_capacity_without_spawn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -140,6 +180,46 @@ async def test_agent_rate_wait_timeout_releases_capacity_without_spawn(
     assert caught.value.reason == "rate_limit_wait_timeout"
     assert clock.now == 2 and capacity.in_use == 0
     assert rate.next_available_in_seconds() == 8
+
+
+async def test_cancel_when_agent_rate_wait_wakes_keeps_the_permit_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = ManualClock()
+    asleep = asyncio.Event()
+    wake: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def sleep(seconds: float) -> None:
+        asleep.set()
+        await wake
+
+    async def forbidden(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        pytest.fail("cancelled rate wait must not launch the CLI")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    rate = RateGate(
+        ResolvedRatePolicy(min_interval_seconds=1), monotonic=clock.monotonic, sleep=sleep
+    )
+    await rate.permit(timeout_seconds=0)
+    task = asyncio.create_task(
+        adapter.run_antigravity(
+            None,
+            [],
+            provider_name="alias",
+            command="fake",
+            timeout_seconds=1,
+            pass_env=(),
+            quota=None,
+            acquire_rate_permit=partial(rate.permit, timeout_seconds=5),
+        )
+    )
+    await asleep.wait()
+    clock.now = 1
+    wake.set_result(None)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert rate.next_available_in_seconds() == 0
 
 
 async def test_repeated_cancellation_during_agent_rate_wait_releases_capacity() -> None:

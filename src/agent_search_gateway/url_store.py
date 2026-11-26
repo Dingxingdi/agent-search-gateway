@@ -48,6 +48,10 @@ class URLStore:
         content: str = "",
     ) -> URLRecord:
         """Cache the first whole natural candidate, rereading after locking."""
+        existing = self._records.get(url)
+        if existing is not None and existing.status in {URLStatus.READY, URLStatus.UNAVAILABLE}:
+            return self.admit(url, abstract)
+
         async with self.serialization(url):
             raw_content, content = _body_pair(raw_content, content)
             existing = self.admit(url, abstract)

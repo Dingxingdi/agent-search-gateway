@@ -178,6 +178,18 @@ def test_llm_credential_strategy_defaults_and_valid_values(
     assert resolve_llm_config(data, _environment()).providers[0].credential_strategy == expected
 
 
+@pytest.mark.parametrize("key", ["credentials_strategy", "max_concurency"])
+def test_referenced_llm_alias_rejects_unknown_options(key: str) -> None:
+    data = _config()
+    _primary(data)[key] = "fill_first"
+
+    with pytest.raises(ConfigFailure, match=r"llm_providers.primary.*unknown") as caught:
+        resolve_llm_config(data, _environment())
+
+    assert caught.value.code is ErrorCode.CONFIG_ERROR
+    assert "fill_first" not in str(caught.value)
+
+
 @pytest.mark.parametrize("value", ["fill_out", "unknown", "", None, True, 1, [], {}])
 def test_llm_credential_strategy_rejects_invalid_values(value: object) -> None:
     data = _config()

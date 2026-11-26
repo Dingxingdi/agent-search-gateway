@@ -6,9 +6,9 @@ Search and Fetch remain independent capabilities of the same provider.
 ## Replace the existing You.com table
 
 The [main example configuration](../config.example.toml) retains its original
-disabled keyed REST table. Choose either that REST configuration or this free
-MCP configuration. In your existing configuration, replace the entire
-`[web_providers.youcom]` table with:
+disabled REST configuration. To use only free MCP, remove every existing
+`[[web_providers.youcom.credentials]]` entry, including all REST members, and
+replace the provider and its members with the following configuration.
 
 ```toml
 [web_providers.youcom]
@@ -61,9 +61,13 @@ public daily allowance as a tracked gateway balance.
 Free MCP uses the shared HTTP executor and existing retry policy. Each member's
 capacity and rate gates are independently optional: omitting limits creates no
 gates and inherits no provider or global cap. The fragment deliberately has no
-limits. Even this keyless endpoint requires a nonempty credentials array. Failures follow the existing
-Search fan-out and Fetch fallback behavior through other configured providers.
-The gateway never automatically switches a free MCP failure to paid You.com REST.
+limits. Even this keyless endpoint requires a nonempty credentials array.
+
+A free-only You.com pool uses MCP for every You.com attempt. Other configured
+providers still participate in Search fan-out and Fetch fallback. If you include
+a paid REST member in the same pool, `round_robin` can select it before any MCP
+failure. With either strategy, a terminal MCP execution failure can fall back to
+an untried REST member and incur charges.
 
 Redirects are never followed. With the locked HTTPX 0.28.1, an invalid `Location`
 can fail before the original redirect status is exposed. That case follows the

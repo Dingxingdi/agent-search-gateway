@@ -216,6 +216,21 @@ def probe_directory_writable(path: Path) -> DoctorCheck:
     return probed
 
 
+def _credential_limits_summary(credential: ResolvedCredential) -> str:
+    capacity = (
+        str(credential.max_concurrency) if credential.max_concurrency is not None else "unlimited"
+    )
+    policy = credential.rate_policy
+    windows = ", ".join(
+        f"{window.requests} requests/{window.period_seconds}s" for window in policy.windows
+    )
+    rate_limits = f"[{windows}]" if windows else "none"
+    interval = (
+        str(policy.min_interval_seconds) if policy.min_interval_seconds is not None else "none"
+    )
+    return f"max_concurrency={capacity}, rate_limits={rate_limits}, min_interval_seconds={interval}"
+
+
 def _configuration_checks(
     config_file: Path,
     environ: Mapping[str, str],
@@ -258,6 +273,13 @@ def _configuration_checks(
                     DoctorCheck(
                         DoctorStatus.OK,
                         f"{namespace}.{provider.name}.credentials[{index}]: configuration valid",
+                    )
+                )
+                checks.append(
+                    DoctorCheck(
+                        DoctorStatus.INFO,
+                        f"{namespace}.{provider.name}.credentials[{index}]: "
+                        f"{_credential_limits_summary(credential)}",
                     )
                 )
                 if credential.api_key_env is not None:

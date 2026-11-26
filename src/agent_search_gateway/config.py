@@ -748,6 +748,14 @@ def _resolve_referenced_llm_providers(
         if name not in referenced:
             continue
         table = _require_mapping(raw_value, f"llm_providers.{name}")
+        if set(table) - {
+            "protocol",
+            "api_endpoint",
+            "use_proxy",
+            "credentials",
+            "credential_strategy",
+        }:
+            raise _config_error(f"{label} contains an unknown provider option")
         use_proxy = _resolve_use_proxy(table, f"llm_providers.{name}")
         protocol = _required_string(table, "protocol", f"llm_providers.{name}")
         endpoint = _required_string(table, "api_endpoint", f"llm_providers.{name}")

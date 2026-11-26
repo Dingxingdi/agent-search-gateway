@@ -115,14 +115,19 @@ class FetchOrchestrator:
 
     async def _judge_cached_candidate(self, snapshot: URLRecord) -> URLRecord:
         candidate = snapshot.content or snapshot.raw_content
-        if not cheap_check(candidate):
-            reason = "cheap_check"
-        elif not (await self._stages.judge(candidate)).ok:
+        reason = "cheap_check"
+        if cheap_check(candidate):
+            try:
+                decision = await self._stages.judge(candidate)
+            except ExecutionFailure as exc:
+                raise ExecutionFailure(
+                    ErrorCode.LLM_STAGE_FAILED, "Judge LLM stage failed"
+                ) from exc
+            if decision.ok:
+                return self._store.accept_candidate(
+                    snapshot.url, raw_content=snapshot.raw_content, content=snapshot.content
+                )
             reason = "judge_rejected"
-        else:
-            return self._store.accept_candidate(
-                snapshot.url, raw_content=snapshot.raw_content, content=snapshot.content
-            )
         rejected = self._store.reject_candidate(snapshot.url)
         self._log_rejected(snapshot.url, reason)
         return rejected

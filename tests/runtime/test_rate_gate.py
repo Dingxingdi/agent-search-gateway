@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import math
 from itertools import count
 
@@ -9,7 +10,7 @@ from agent_search_gateway.concurrency import CapacityGate, make_capacity_gate
 from agent_search_gateway.config import ResolvedRatePolicy, ResolvedRateWindow
 from agent_search_gateway.errors import ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
-from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.observability import CredentialIdentity, SecretValue
 from agent_search_gateway.providers.http import HttpJsonExecutor
 from agent_search_gateway.providers.web.baiduqianfan import BaiduQianfanAdapter
 from agent_search_gateway.rate_limit import (
@@ -151,6 +152,52 @@ async def test_min_interval_applies_from_clock_zero(with_window: bool) -> None:
         assert not waiting.done()
         await clock.advance_to(opening)
         assert waiting.done() and waiting.result() == opening - started
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ResolvedRatePolicy(min_interval_seconds=0.5),
+        ResolvedRatePolicy((ResolvedRateWindow(1, 0.5),)),
+    ],
+    ids=["min-interval", "rolling-window"],
+)
+async def test_slow_acquisition_logging_preserves_physical_request_spacing(
+    policy: ResolvedRatePolicy, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = ManualClock()
+    sends: list[float] = []
+
+    class SlowFirstAcquisition(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if getattr(record, "gateway_event", None) == "rate_gate_acquired" and not sends:
+                clock.now += 0.75
+
+    logger = logging.getLogger("agent_search_gateway.rate_limit")
+    caplog.set_level(logging.DEBUG, logger=logger.name)
+    monkeypatch.setattr(logger, "handlers", [SlowFirstAcquisition()])
+    gate = RateGate(
+        policy,
+        monotonic=clock.monotonic,
+        sleep=clock.sleep,
+        identity=CredentialIdentity("web", "test", 0),
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sends.append(clock.now)
+        return httpx.Response(200, text="ok")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        executor = HttpJsonExecutor(
+            client, RetryPolicy(1, 0, 0, 5), provider_name="test", rate_gate=gate
+        )
+        await executor.request_text("GET", "https://example.test", stage="fetch")
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(executor.request_text("GET", "https://example.test", stage="fetch"))
+            await clock.advance_to(0.75)
+            await clock.advance_to(1.25)
+
+    assert sends == [0.75, 1.25]
 
 
 async def test_simultaneous_callers_receive_one_permit_per_second() -> None:
