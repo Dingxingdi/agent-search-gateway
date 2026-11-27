@@ -38,6 +38,27 @@ agent-search-gateway start --debug
 
 A healthy response confirms daemon liveness only. Search engine and browser readiness, cloud API key validity, permissions, quotas and service availability, and Agent executable availability and login remain unverified. Some Web provider option values, including their types, are validated when the runtime is built.
 
+### MCP client setup
+
+To use the optional MCP server, run this from the source checkout:
+
+```bash
+uv tool install '.[mcp]'
+```
+
+Run `agent-search-gateway start` in its own foreground process. Run the MCP server on the same host under the same trusted OS account so both use the default runtime paths. The daemon owns provider configuration and credentials. Its lifecycle is independent of MCP: tool discovery works while the daemon is down, but tool execution requires a running daemon. Starting or closing the MCP server never starts, stops, or restarts the daemon.
+
+| Client transport | Setup |
+|---|---|
+| STDIO (default) | Set the client’s command to `agent-search-gateway-mcp` and its arguments to `[]`. The client launches the process. To select STDIO explicitly, use `["--transport", "stdio"]`. |
+| Streamable HTTP | Start `agent-search-gateway-mcp --transport streamable-http` in a separate process. Configure the client with the default URL `http://127.0.0.1:8765/mcp`. |
+
+Remote clients receive the complete result text and need no access to local result paths. The gateway preserves the search JSONL (including an empty success) and returns Fetch text literally, even if it resembles a filename. The gateway does not truncate results, though a client's rendering or event-size limits may apply. See the [tool signatures and error contract](docs/public-interface.md#mcp-server).
+
+CLI and MCP callers share URL admission, cached bodies and paid provider quotas in a single trust domain. Restarting the daemon loses in-memory state, so a new search must admit a URL before Fetch can use it again. Client cancellation, disconnection or exit can leave daemon work running. If execution outcome is unknown, do not retry automatically: another call can incur duplicate charges.
+
+**Remote HTTP access.** Keep the backend on loopback and restrict access to a trusted reverse proxy or secure tunnel on the same host. That boundary must provide authentication, TLS and external access restrictions. Validate the external Host and any Origin **before** forwarding an approved backend Host and, if translation is necessary, its corresponding backend Origin. Never discard or rewrite an unvalidated Origin. The backend accepts only `127.0.0.1:*`, `localhost:*`, and `[::1]:*` as Host patterns, with the matching `http://` Origins. The wildcard matches the port only. DNS rebinding protection stays enabled even on a non-loopback bind, which emits a warning on stderr. Binding another address does not enable external hostnames, native authentication or tenant isolation.
+
 ## Configuration and runtime paths
 
 `config.example.toml` contains a selection of supported providers. ZenRows, Decodo, ScrapingDog, and ScrapeGraphAI remain supported but are omitted from this template. Its request timeout is 180.0 seconds; the runtime fallback when that setting is omitted remains 30.0 seconds. Changes to the template do not rewrite an existing user configuration. The daemon loads configuration at startup; edit your existing file and restart it normally for changes to take effect.
@@ -717,7 +738,7 @@ Expected provider/retry/semantic failures are logged as concise events without t
 
 ## Public interface and compatibility
 
-The CLI commands, documented configuration, stdout contracts, result-file schemas, and runtime paths are the supported interfaces for the current `3.x` line. Python module imports and the local socket wire protocol remain internal implementation details. See [the public interface and compatibility policy](docs/public-interface.md) before building automation against the project.
+The CLI commands, MCP command and tools, documented configuration, stdout contracts, result-file schemas, and runtime paths are the supported interfaces for the current `3.x` line. Python module imports and the local socket wire protocol remain internal implementation details. See [the public interface and compatibility policy](docs/public-interface.md) before building automation against the project.
 
 A static documentation site and generated internal Python reference are built in CI and published from the default branch at the [project documentation address](https://dingxingdi.github.io/agent-search-gateway/).
 
@@ -725,15 +746,17 @@ A static documentation site and generated internal Python reference are built in
 
 Development and CI remain lockfile-driven. `uv sync --locked` is intentionally separate from the end-user `uv tool install .` flow because lint, type-check, documentation, and test dependencies belong to the repository development environment.
 
-Run the default no-network development checks with:
+Run the locked development checks from the source checkout:
 
 ```bash
-uv sync --locked --all-groups
-uv run ruff format --check src tests scripts
-uv run ruff check .
-uv run mypy src tests scripts
-uv run pytest -v
-uv run python scripts/build_docs.py
+uv sync --locked --all-groups --extra mcp
+uv run --extra mcp ruff format --check src tests scripts
+uv run --extra mcp ruff check .
+uv run --extra mcp mypy src tests scripts
+WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest -v
+uv audit --locked --preview-features audit-command
+uv run --group docs --extra mcp python scripts/build_docs.py
+uv build
 ```
 
 The default test suite uses fakes, local Unix sockets, and mock transports and does not require provider credentials.

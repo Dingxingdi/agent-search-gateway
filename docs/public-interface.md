@@ -7,6 +7,7 @@
 The `3.x` compatibility policy covers these public interfaces.
 
 - the `agent-search-gateway` executable and the commands documented in the README and `--help` output;
+- the optional `agent-search-gateway-mcp` command, documented tool arguments and MCP text/error contracts;
 - the configuration path and documented TOML fields, including supported provider settings omitted from the selected examples in `config.example.toml`;
 - the rule that credential-bearing configuration fields name environment variables instead of storing credential values;
 - the successful business-command stdout contract described in the README;
@@ -18,6 +19,24 @@ The top-level `--version` and `-v` flags print `agent-search-gateway <version>` 
 Changes to those interfaces require tests, documentation, and a changelog entry.
 
 The request-scoped `--provider` flag on `keyword-search`, `paper-search`, and `llm-search`, and the independent `--model` flag on `llm-search`, are supported CLI interfaces. Selection is exact and case-sensitive within the enabled search-provider or configured search-invocation namespace; LLM providers are configuration aliases, not protocol names. Both LLM filters select their intersection. Omitted filters preserve default behavior, and invalid selections fail without falling back to unselected backends. Filters do not apply to `url-fetch` or change normal post-search processing.
+
+### MCP server
+
+The optional `agent-search-gateway-mcp` executable uses STDIO by default (`--transport stdio`). Its stdout carries only protocol messages, and diagnostics go to stderr. With `--transport streamable-http`, connect to `http://127.0.0.1:8765/mcp` by default. Only HTTP accepts `--host` and `--port` (1–65535). Start the daemon separately for business calls. Both transports expose the same five tools and no management tools.
+
+| Tool and arguments | Operation |
+|---|---|
+| `keyword_search(query, provider=null)` | Search enabled web providers by keyword. |
+| `paper_search(query, provider=null)` | Search enabled academic providers. |
+| `llm_search(prompt, scope="web", provider=null, model=null)` | Search with configured LLM invocations. |
+| `agent_search(prompt, scope="web", provider=null, model=null)` | Search with configured Agent invocations. |
+| `url_fetch(url, focus=null)` | Fetch a URL already admitted by search in the current daemon, optionally focused on a topic. |
+
+Arguments are named JSON fields with strict types. The required `query`, `prompt`, or `url` must be a nonblank string. The allowed `scope` strings are `web` (default), `paper`, and `all`. Omit `provider`, `model`, or `focus` or pass JSON `null` to use the default. A supplied provider or model must be a string and is matched exactly and case-sensitively after trimming. A blank selector is rejected. Supplying both filters selects their intersection. Focus is trimmed, and a blank focus is equivalent to null.
+
+A successful call returns one `TextContent` with `isError` false. Each search returns the complete JSONL text, preserving row order, whitespace, and final newlines. An empty search returns the empty string. Fetch returns the daemon's literal text, including the successful unavailable message `URL unavailable: it may have failed content validation or been flagged as unsafe.` Fetch text is never interpreted as a filename.
+
+Unknown tools and schema violations (including extra fields, wrong types, or an invalid scope) produce a JSON-RPC `INVALID_PARAMS` error. Business failures return one `TextContent` with `isError` true, safe guidance, and the existing gateway error code when applicable. For example, fetching a URL that search has not admitted returns `url_not_admitted`. For client configuration, lifecycle and the HTTP trust boundary, see [MCP client setup](../README.md#mcp-client-setup).
 
 ### HTTP provider configuration
 
@@ -198,7 +217,7 @@ The following implementation details may change without deprecation unless expli
 - in-memory admission, body, and unavailable-state representation;
 - test helpers and design-document code samples.
 
-The package is currently distributed as a CLI application, not as a stable Python SDK. Consumers should invoke the CLI rather than importing internal modules.
+Consumers can automate the gateway through its CLI or the documented MCP tools.
 
 ## Versioning
 
