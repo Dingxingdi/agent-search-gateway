@@ -32,15 +32,15 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - name: Sync locked environment
-        run: uv sync --locked --group dev
+        run: uv sync --locked --group dev --extra mcp
       - name: Audit locked dependencies
         run: uv audit --locked --preview-features audit-command
       - name: Check formatting
-        run: uv run ruff format --check src tests scripts
+        run: uv run --extra mcp ruff format --check src tests scripts
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --extra mcp ruff check .
       - name: Type-check
-        run: uv run mypy src tests scripts
+        run: uv run --extra mcp mypy src tests scripts
 
   tests:
     name: Tests (${{ matrix.os }}, Python ${{ matrix.python-version }})
@@ -77,9 +77,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
       - name: Sync locked environment
-        run: uv sync --locked --group dev --python "$PYTHON_VERSION"
+        run: uv sync --locked --group dev --extra mcp --python "$PYTHON_VERSION"
       - name: Test
-        run: uv run pytest -v
+        run: uv run --extra mcp pytest -v
 
   docs:
     name: Documentation build
@@ -99,9 +99,9 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       - name: Sync locked documentation environment
-        run: uv sync --locked --group docs
+        run: uv sync --locked --group docs --extra mcp
       - name: Build documentation
-        run: uv run python scripts/build_docs.py
+        run: uv run --group docs --extra mcp python scripts/build_docs.py
       - name: Verify documentation artifact
         run: |
           test -f site/index.html
@@ -135,6 +135,20 @@ jobs:
           uv tool install --force dist/*.whl
           "$UV_TOOL_BIN_DIR/agent-search-gateway" --help
           "$UV_TOOL_BIN_DIR/agent-search-gateway" start --help
+          "$UV_TOOL_DIR/agent-search-gateway/bin/python" tests/mcp/wheel_smoke.py --mode base --bin-dir "$UV_TOOL_BIN_DIR"
+      - name: Smoke-test the built wheel with the MCP extra
+        env:
+          UV_TOOL_DIR: ${{ runner.temp }}/agent-search-gateway-mcp-tools
+          UV_TOOL_BIN_DIR: ${{ runner.temp }}/agent-search-gateway-mcp-bin
+        run: |
+          mcp_wheel_requirement="$(python - <<'PY'
+          from pathlib import Path
+          wheel, = Path("dist").glob("*.whl")
+          print("agent-search-gateway[mcp] @ " + wheel.resolve().as_uri())
+          PY
+          )"
+          uv tool install --force "$mcp_wheel_requirement"
+          "$UV_TOOL_DIR/agent-search-gateway/bin/python" tests/mcp/wheel_smoke.py --mode mcp --bin-dir "$UV_TOOL_BIN_DIR"
 
   secret-scan:
     name: Secret scan
