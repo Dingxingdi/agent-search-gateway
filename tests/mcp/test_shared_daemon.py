@@ -592,7 +592,17 @@ async def test_cancel_after_upstream_send_closes_socket_without_replay(
     paths = RuntimePaths.from_home(mcp_home)
     upstream = _SearchBarrier(["abandoned"])
     received: list[tuple[Request, asyncio.Task[object]]] = []
+    readers: dict[asyncio.Task[object], asyncio.StreamReader] = {}
     dispatch = ForegroundDaemon._dispatch
+    handle_connection = ForegroundDaemon._handle_connection
+
+    async def observe_connection(
+        daemon: ForegroundDaemon, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        connection = asyncio.current_task()
+        assert connection is not None
+        readers[connection] = reader
+        await handle_connection(daemon, reader, writer)
 
     async def observe(daemon: ForegroundDaemon, request: Request) -> Response:
         # Dispatch runs in the accepted Unix connection's task, which owns writer cleanup.
@@ -602,6 +612,7 @@ async def test_cancel_after_upstream_send_closes_socket_without_replay(
         return await dispatch(daemon, request)
 
     monkeypatch.setattr(ForegroundDaemon, "_dispatch", observe)
+    monkeypatch.setattr(ForegroundDaemon, "_handle_connection", observe_connection)
     async with (
         asyncio.timeout(25),
         _gateway(paths, httpx.MockTransport(upstream.respond), web=("firecrawl",)),
@@ -615,11 +626,15 @@ async def test_cancel_after_upstream_send_closes_socket_without_replay(
                 abandoned.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await abandoned
+                ((request, connection),) = received
+                assert request == KeywordSearchRequest("abandoned")
+                # Observe peer EOF before frontend teardown or releasing the held dispatch.
+                assert await asyncio.wait_for(readers[connection].read(1), timeout=5) == b""
+                assert not connection.done()
+                assert upstream.in_flight == 1 and not upstream.release.is_set()
         finally:
             upstream.release.set()
 
-        ((request, connection),) = received
-        assert request == KeywordSearchRequest("abandoned")
         await asyncio.wait_for(asyncio.shield(connection), timeout=5)
         (original,) = paths.results_dir.glob("keyword-*.jsonl")
         written = original.read_bytes()
