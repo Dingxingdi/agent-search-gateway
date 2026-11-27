@@ -15,12 +15,12 @@ The project uses Semantic Versioning and publishes GitHub Releases containing a 
 4. Run the complete local gate:
 
    ```bash
-   uv sync --locked --all-groups
-   uv run ruff format --check src tests scripts
-   uv run ruff check .
-   uv run mypy src tests scripts
-   uv run pytest -v
-   uv run python scripts/build_docs.py
+   uv sync --locked --all-groups --extra mcp
+   uv run --extra mcp ruff format --check src tests scripts
+   uv run --extra mcp ruff check .
+   uv run --extra mcp mypy src tests scripts
+   uv run --extra mcp pytest -v
+   uv run --group docs --extra mcp python scripts/build_docs.py
    uv build
    ```
 

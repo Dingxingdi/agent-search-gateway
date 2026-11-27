@@ -8,9 +8,15 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-27
+
 ### Added
 
 - Added the optional `agent-search-gateway-mcp` command for STDIO and Streamable HTTP. Its five tools use the existing daemon and return full search JSONL or literal Fetch text to clients.
+
+### Fixed
+
+- Include the optional MCP dependencies in release verification and documentation builds.
 
 ## [3.0.0] - 2026-11-26
 
