@@ -16,21 +16,21 @@ The project targets Unix-like systems and Python 3.11 or newer. Install [uv](htt
 ```bash
 git clone https://github.com/Dingxingdi/agent-search-gateway.git
 cd agent-search-gateway
-uv sync --locked --all-groups
+uv sync --locked --all-groups --extra mcp
 ```
 
-The normal test suite uses fakes, local Unix sockets, and mock transports. It does not require provider credentials or network access.
+The full development suite includes MCP coverage, so it requires the `mcp` extra. The normal test suite uses fakes, local Unix sockets, and mock transports. It does not require provider credentials or network access.
 
 ## Required checks
 
 Run the same checks used by continuous integration:
 
 ```bash
-uv run ruff format --check src tests scripts
-uv run ruff check .
-uv run mypy src tests scripts
-uv run pytest -v
-uv run python scripts/build_docs.py
+uv run --extra mcp ruff format --check src tests scripts
+uv run --extra mcp ruff check .
+uv run --extra mcp mypy src tests scripts
+uv run --extra mcp pytest -v
+uv run --group docs --extra mcp python scripts/build_docs.py
 ```
 
 For packaging changes, also run:

@@ -19,12 +19,18 @@ from agent_search_gateway.paths import RuntimePaths
 from tests.mcp._support import RecordingClient, running_http
 
 
-async def test_http_endpoint_discovers_tools_and_calls_without_daemon_probe(mcp_home: Path) -> None:
+@pytest.mark.parametrize("backend_host", [None, "127.0.0.1", "localhost", "[::1]"])
+async def test_http_endpoint_discovers_tools_and_calls_without_daemon_probe(
+    mcp_home: Path, backend_host: str | None
+) -> None:
     rpc = RecordingClient(SuccessResponse("hello\n"))
     server = gateway_server.create_server(GatewayAdapter(RuntimePaths.from_home(mcp_home), rpc))
+    headers = (
+        {} if backend_host is None else {"Host": backend_host, "Origin": f"http://{backend_host}"}
+    )
     async with (
         running_http(gateway_server.create_http_app(server, "127.0.0.1")) as url,
-        httpx2.AsyncClient(trust_env=False) as http,
+        httpx2.AsyncClient(trust_env=False, headers=headers) as http,
     ):
         transport = streamable_http_client(f"{url}/mcp", http_client=http)
         async with Client(transport, cache=None) as client:

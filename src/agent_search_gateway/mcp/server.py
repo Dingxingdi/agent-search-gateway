@@ -128,7 +128,7 @@ async def _run_stdio(server: Server[dict[str, object]]) -> None:
 
 
 def create_http_app(server: Server[dict[str, object]], host: str) -> Starlette:
-    hosts = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+    hosts = ["127.0.0.1", "localhost", "[::1]", "127.0.0.1:*", "localhost:*", "[::1]:*"]
     security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=hosts,
