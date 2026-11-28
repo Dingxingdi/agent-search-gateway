@@ -32,6 +32,7 @@ from agent_search_gateway.providers.pooled import (
     PooledOAResolver,
     PooledWebProvider,
 )
+from agent_search_gateway.providers.web.langsearch import LangSearchAdapter
 from agent_search_gateway.rate_limit import RateGate, SelectionBudget, consume_initial_rate_budget
 from agent_search_gateway.url_normalization import NormalizedURL, normalize_url
 
@@ -164,6 +165,71 @@ async def test_typed_facades_preserve_success_and_failure_contracts(
         calls[1].assert_not_awaited()
     if kind == "llm":
         prepare.assert_called_once_with(*args)
+
+
+def _langsearch_pages(*items: object) -> dict[str, object]:
+    return {"code": 200, "data": {"webPages": {"value": items}}}
+
+
+@pytest.mark.parametrize(
+    "first_status, first_payload, expected_hosts, expected_hits",
+    [
+        pytest.param(200, _langsearch_pages(), ["a.test"], [], id="empty"),
+        pytest.param(
+            200,
+            _langsearch_pages({}, {"url": "https://first.test/page", "name": "First"}),
+            ["a.test"],
+            [KeywordSearchHit("https://first.test/page", title="First")],
+            id="mixed",
+        ),
+        pytest.param(200, _langsearch_pages({}, None), ["a.test"], [], id="all-rejected"),
+        pytest.param(
+            503,
+            {},
+            ["a.test", "a.test", "b.test"],
+            [KeywordSearchHit("https://second.test/page")],
+            id="http-retry-exhausted",
+        ),
+        pytest.param(
+            200,
+            {"code": 401},
+            ["a.test", "b.test"],
+            [KeywordSearchHit("https://second.test/page")],
+            id="failed-business-envelope",
+        ),
+    ],
+)
+async def test_langsearch_pool_falls_back_only_after_member_failure(
+    first_status: int,
+    first_payload: dict[str, object],
+    expected_hosts: list[str],
+    expected_hits: list[KeywordSearchHit],
+) -> None:
+    hosts: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        hosts.append(request.url.host)
+        if request.url.host == "a.test":
+            return httpx.Response(first_status, json=first_payload)
+        assert request.url.host == "b.test"
+        return httpx.Response(200, json=_langsearch_pages({"url": "https://second.test/page"}))
+
+    retry = RetryPolicy(2, 0.01, 0.02, 1.0)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+        members: list[CredentialMember[WebAdapter]] = [
+            CredentialMember(
+                LangSearchAdapter(
+                    name="langsearch",
+                    api_url=f"https://{host}",
+                    secret=SecretValue("fixture"),
+                    http_executor=HttpJsonExecutor(http, retry, provider_name="langsearch"),
+                )
+            )
+            for host in ("a.test", "b.test")
+        ]
+        pool = CredentialPool[WebAdapter]("web", "langsearch", members, strategy="fill_first")
+        assert await PooledWebProvider(pool).search("fixture query") == expected_hits
+    assert hosts == expected_hosts
 
 
 def _physical_client(

@@ -11,18 +11,30 @@ from agent_search_gateway.runtime import Runtime
 from tests.doctor._support import environment_name, write_valid_config
 
 
-@pytest.mark.parametrize("configured", [False, True], ids=["unconfigured", "disabled"])
+@pytest.mark.parametrize(
+    "web_provider",
+    [None, "open_websearch", "langsearch"],
+    ids=["unconfigured", "disabled", "langsearch"],
+)
 async def test_doctor_without_enabled_open_websearch_skips_runtime_and_http_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    configured: bool,
+    web_provider: str | None,
 ) -> None:
     paths = RuntimePaths.from_home(tmp_path)
     write_valid_config(paths.config_file)
-    if configured:
+    if web_provider == "open_websearch":
         with paths.config_file.open("a") as target:
             target.write(
                 "[web_providers.open_websearch]\nenable_search = false\nenable_fetch = false\n"
+            )
+    elif web_provider == "langsearch":
+        with paths.config_file.open("a") as target:
+            target.write(
+                "[web_providers.langsearch]\nenable_search = true\nenable_fetch = false\n"
+                "[[web_providers.langsearch.credentials]]\n"
+                'api_url = "https://langsearch.example.test"\n'
+                'api_key_env = "TEST_LANGSEARCH"\n'
             )
 
     def forbidden_runtime_build(*args: object, **kwargs: object) -> Runtime:
@@ -35,12 +47,19 @@ async def test_doctor_without_enabled_open_websearch_skips_runtime_and_http_clie
     monkeypatch.setattr(Runtime, "build", forbidden_runtime_build)
     monkeypatch.setattr(httpx, "AsyncClient", ForbiddenClient)
 
+    langsearch_value = "synthetic-doctor-member-value"
     report = await run_doctor(
         paths,
-        environ={environment_name(): "opaque-runtime-value-7391"},
+        environ={
+            environment_name(): "opaque-runtime-value-7391",
+            "TEST_LANGSEARCH": langsearch_value,
+        },
     )
 
     assert report.exit_code == 0
+    if web_provider == "langsearch":
+        assert "web_providers.langsearch.credentials[0]: configuration valid" in repr(report)
+        assert langsearch_value not in repr(report)
     assert not paths.debug_log_file.exists()
     assert not paths.results_dir.exists()
     assert not paths.socket_file.exists()
