@@ -88,6 +88,7 @@ class _Evidence:
         ):
             self.category = "unexpected_request"
             raise ValueError("unexpected request")
+        self.http_status = self.received = None
         self.attempts += 1
 
     async def response(self, response: httpx.Response) -> None:

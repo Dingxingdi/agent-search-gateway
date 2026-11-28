@@ -147,6 +147,30 @@ async def test_failures_report_safe_evidence_without_another_query(
     assert report["admitted"] == 0 and report["cleanup"]
 
 
+@pytest.mark.parametrize("first_status", [429, 503])
+async def test_retry_transport_failure_does_not_reuse_previous_http_status(
+    paths: RuntimePaths, first_status: int, capsys: pytest.CaptureFixture[str]
+) -> None:
+    attempts = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(first_status)
+        raise httpx.ConnectError("connection failed", request=request)
+
+    factory = _client_factory(httpx.MockTransport(respond))
+
+    with pytest.raises(pytest.fail.Exception, match="Could not verify LangSearch retrieval"):
+        await _run(_ENV, paths, factory)
+    report = json.loads(capsys.readouterr().out)
+    assert report["category"] == "transport_or_workflow"
+    assert report["http_status"] is None and report["received"] is None
+    assert report["attempts"] == attempts == 2 and report["queries"] == 1
+    assert report["admitted"] == 0 and report["cleanup"]
+
+
 async def test_budget_cancels_slow_request_and_closes_daemon(
     paths: RuntimePaths, capsys: pytest.CaptureFixture[str]
 ) -> None:
