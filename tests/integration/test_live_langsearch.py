@@ -173,10 +173,12 @@ async def _run(
                     else:
                         evidence.category = "provider_or_schema"
                     break
-                assert evidence.http_status == 200 and evidence.received is not None
+                if evidence.http_status != 200 or evidence.received is None:
+                    raise ValueError("search response evidence is incomplete")
                 evidence.admitted = _admitted(Path(stdout.getvalue().strip()), paths, runtime)
                 if evidence.admitted:
-                    assert evidence.admitted <= evidence.received
+                    if evidence.admitted > evidence.received:
+                        raise ValueError("admitted results exceed received candidates")
                     evidence.empty_bodies = True
                     evidence.category = "verified"
                     break
