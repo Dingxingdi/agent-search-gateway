@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 
 import httpx
@@ -18,6 +19,209 @@ from tests.support.http import RecordingJsonExecutor
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures/providers/langsearch/search.json"
 _MISSING = object()
+
+
+async def test_langsearch_accepts_all_rejected_candidates(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    results = [
+        None,
+        {},
+        {"url": ""},
+        {"url": 7},
+        {"url": "https://bad-title.example.test/", "name": []},
+        {"url": "https://bad-snippet.example.test/", "snippet": False},
+    ]
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": results}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert await adapter.search("query") == []
+
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "langsearch",
+            "stage": "search",
+            "phase": "adapter",
+            "received": 6,
+            "accepted": 0,
+            "rejected": 6,
+            "rejection_counts": {"missing_url": 2, "invalid_record": 4},
+            "processed": 6,
+            "unprocessed": 0,
+            "rewritten": 0,
+        }
+    ]
+
+
+async def test_langsearch_reports_candidate_counts(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
+    results = [
+        {"url": "https://first.example.test/", "name": "First", "snippet": "First snippet"},
+        None,
+        {},
+        {"url": ""},
+        {"url": 7},
+        {"url": "https://bad-title.example.test/", "name": []},
+        {"url": "https://second.example.test/", "name": "Second", "snippet": "Second snippet"},
+        {"url": "https://bad-snippet.example.test/", "snippet": False},
+    ]
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": results}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert len(await adapter.search("query")) == 2
+
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "langsearch",
+            "stage": "search",
+            "phase": "adapter",
+            "received": 8,
+            "accepted": 2,
+            "rejected": 6,
+            "rejection_counts": {"missing_url": 2, "invalid_record": 4},
+            "processed": 8,
+            "unprocessed": 0,
+            "rewritten": 0,
+        }
+    ]
+
+
+async def test_langsearch_keeps_valid_candidates_in_order() -> None:
+    results = [
+        {"url": "https://first.example.test/", "name": "First", "snippet": "First snippet"},
+        None,
+        {},
+        {"url": ""},
+        {"url": 7},
+        {"url": "https://bad-title.example.test/", "name": []},
+        {"url": "https://second.example.test/", "name": "Second", "snippet": "Second snippet"},
+        {"url": "https://bad-snippet.example.test/", "snippet": False},
+    ]
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": results}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert await adapter.search("query") == [
+        KeywordSearchHit("https://first.example.test/", "First", "First snippet"),
+        KeywordSearchHit("https://second.example.test/", "Second", "Second snippet"),
+    ]
+
+
+async def test_langsearch_preserves_duplicate_urls() -> None:
+    url = "HTTPS://Example.TEST/Page#Section"
+    results = [
+        {"url": url, "name": "First", "snippet": "First snippet"},
+        {"url": url, "name": "Second", "snippet": "Second snippet"},
+    ]
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": results}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert await adapter.search("query") == [
+        KeywordSearchHit(url, "First", "First snippet"),
+        KeywordSearchHit(url, "Second", "Second snippet"),
+    ]
+
+
+async def test_langsearch_ignores_response_body_fields() -> None:
+    result = {
+        "url": "https://example.test/",
+        "name": "Title",
+        "text": "Text must not become a snippet",
+        "raw_content": "Raw body",
+        "content": "Body",
+        "date": "2026-11-28",
+        "datePublished": "2026-11-28",
+        "extra": {"metadata": "ignored"},
+    }
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": [result]}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    hits = await adapter.search("query")
+
+    assert hits == [KeywordSearchHit("https://example.test/", "Title", "")]
+    assert hits[0].raw_content == hits[0].content == ""
+
+
+@pytest.mark.parametrize("field", ["name", "snippet"])
+@pytest.mark.parametrize("value", [_MISSING, None, ""], ids=["missing", "null", "empty"])
+async def test_langsearch_defaults_missing_metadata(field: str, value: object) -> None:
+    result: dict[str, object] = {
+        "url": "https://example.test/",
+        "name": "Title",
+        "snippet": "Snippet",
+    }
+    if value is _MISSING:
+        del result[field]
+    else:
+        result[field] = value
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor(
+            [{"code": 200, "data": {"webPages": {"value": [result]}}}]
+        ),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert await adapter.search("query") == [
+        KeywordSearchHit(
+            "https://example.test/",
+            "" if field == "name" else "Title",
+            "" if field == "snippet" else "Snippet",
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -101,7 +305,8 @@ async def test_langsearch_rejects_invalid_success_envelope(
     assert str(caught.value) == f"langsearch/search: {reason}"
 
 
-async def test_langsearch_accepts_empty_results() -> None:
+async def test_langsearch_accepts_empty_results(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.DEBUG)
     payload = json.loads(_FIXTURE.read_text(encoding="utf-8"))
     payload["data"]["webPages"]["value"] = []
     registration = build_default_registry().require("langsearch")
@@ -114,6 +319,26 @@ async def test_langsearch_accepts_empty_results() -> None:
     assert isinstance(adapter, KeywordSearchProvider)
 
     assert await adapter.search("query") == []
+
+    summaries = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_candidates_summary"
+    ]
+    assert summaries == [
+        {
+            "provider": "langsearch",
+            "stage": "search",
+            "phase": "adapter",
+            "received": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "rejection_counts": {},
+            "processed": 0,
+            "unprocessed": 0,
+            "rewritten": 0,
+        }
+    ]
 
 
 @pytest.mark.parametrize(
