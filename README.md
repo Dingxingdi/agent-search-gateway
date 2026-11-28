@@ -116,7 +116,7 @@ For each HTTP credential, optionally set `rate_limits` to an array of `{ request
 
 Initial member selection and first-permit waiting share a per-provider `[retry].request_timeout_seconds` budget for capacity and rate. Subsequent physical attempts retain their normal rate-wait timeout. Execution, HTTP retries/backoff, and Judge are outside that selection budget. Fetch tries the first provider in priority order with an available member; when none is available it waits for availability rather than dispatching duplicate network requests. A returned body rejected by Judge advances to the next logical provider, not another member of the same provider.
 
-The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 32 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing credential entries to adopt the settings that fit your account.
+The [provider rate reference](docs/provider-rate-limits.md) gives account and endpoint conditions, sources and optional configurations for all 33 registered Web, academic and OA services. Some limits are unpublished. The count describes source coverage and does not certify live success. Edit your existing credential entries to adopt the settings that fit your account.
 
 Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the complete serialized LLM JSON body, and `agent_prompt_bytes` defaults to **98304** for the single serialized Agent prompt argument. Both measure UTF-8 bytes. Token counts depend on the model. For oversized input the gateway keeps approximately 80% of the retained variable text from its head and 20% from its tail, with an omission marker. It preserves the system instructions, template and protected user focus. If the protected content and required framing cannot fit, preparation fails with `input_budget_unfit` before any send or spawn.
 
@@ -149,6 +149,7 @@ Under `[input_limits]`, `llm_request_body_bytes` defaults to **131072** for the 
 | Yuanbao | yes | no |
 | Zhihu | yes | no |
 | Baidu Qianfan | yes | no |
+| LangSearch | yes | no |
 
 Parallel accepts optional Search mode `turbo`, `fast`, `basic`, or `advanced`, plus independent Search and Extract fetch policies. Extract always requests full content internally, while Search result count is left to Parallel's provider default. When enabling Parallel, set `api_key_env` to the name of the environment variable that holds the credential.
 
@@ -282,6 +283,24 @@ limit cannot guarantee free billing quotas or prevent charges.
 
 Web Search supplies summaries only. Agentic Search can naturally return web-page `raw_content`; Search retains that candidate without cheap_check, Judge, Clean, or Safety. The first explicit Fetch judges it, cleans raw-only content if needed, and checks safety. Media results retain an HTTP(S) link, title, and snippet; the gateway does not
 download or transcribe media.
+
+#### LangSearch
+
+LangSearch calls the REST Web Search endpoint with `count=10` and omits `contents`.
+Results contain URLs, titles and snippets. Use the gateway's explicit Fetch command
+to retrieve a page body through an enabled Fetch provider.
+
+The example disables LangSearch by default. Copy its `[web_providers.langsearch]`
+and credential blocks into your configuration if needed, set `enable_search = true`,
+export `LANGSEARCH_API_KEY` in the daemon environment, then restart the daemon.
+LangSearch supports the existing `credential_strategy` and `use_proxy` settings.
+
+The example limits each credential member to five requests per second. Check your
+account's actual rate before enabling multiple members. API keys and MCP clients
+on the same account share its quota. Local request windows count requests and
+cannot enforce upstream tokens per minute (TPM) or tokens per day (TPD).
+If a 429 reflects exhausted daily quota, short retries can continue to fail until
+the quota resets.
 
 #### Enabling Zhihu and Yuanbao
 
@@ -818,6 +837,23 @@ requests, one to Web Search and one to Agentic Search. Retries consume additiona
 requests. The two APIs may share a free allowance, and calls may incur charges.
 Both branches must successfully parse their results. A verified empty result is
 valid for either branch.
+
+To check LangSearch with `LANGSEARCH_API_KEY` set, run this single file:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run --extra mcp pytest tests/integration/test_live_langsearch.py -v -rs -rP
+```
+
+Avoid running the entire `tests/integration` directory with this opt-in enabled,
+because other live checks can call additional providers. The test starts a private
+daemon with temporary socket and result paths, runs `keyword-search` with
+`--provider langsearch`, and closes its clients and socket on exit. It requests
+10 results without page bodies. A pass requires a successful LangSearch HTTP
+request and at least one admitted HTTP(S) URL whose title or snippet supplies
+the abstract. Each returned URL must still need Fetch and have empty body fields.
+A valid empty response permits one alternate query. Two empty responses leave
+positive retrieval unverified and fail the check. A missing key skips it.
+The 90-second search budget includes retries and any upstream retry delay.
 
 For the keyless You.com free MCP check, select its dedicated case:
 

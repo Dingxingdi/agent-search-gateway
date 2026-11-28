@@ -155,11 +155,13 @@ def test_documented_rate_reference_covers_registered_non_llm_providers() -> None
     ]
     names = [cells[0].strip().strip("`") for cells in rows]
     assert set(names) == expected
-    assert len(rows) == len(expected) == 32
+    assert len(rows) == len(expected) == 33
     for name, product, mode, upstream, local, sources, checked in rows:
         assert all(cell.strip() for cell in (product, mode, upstream, local)), name
         assert re.search(r"\]\(https://[^)]+\)", sources), name
-        expected_date = "2026-11-21" if name.strip() == "`baiduqianfan`" else "2026-11-19"
+        expected_date = {"baiduqianfan": "2026-11-21", "langsearch": "2026-11-28"}.get(
+            name.strip().strip("`"), "2026-11-19"
+        )
         assert checked.strip() == expected_date, name
 
 
@@ -189,6 +191,7 @@ def test_example_input_limits_and_provider_rate_policies() -> None:
         "firecrawl": [(10, 60)],
         "jina": [(20, 60)],
         "keenable": [(10, 1)],
+        "langsearch": [(5, 1)],
         "linkup": [(10, 1)],
         "openalex": [(30, 1)],
         "parallel": [(600, 60)],
@@ -609,6 +612,7 @@ def test_new_web_provider_examples_are_disabled_and_complete() -> None:
     assert isinstance(web, dict)
     expected = {
         "baiduqianfan": ("https://qianfan.baidubce.com", "BAIDUQIANFAN_API_KEY"),
+        "langsearch": ("https://api.langsearch.com", "LANGSEARCH_API_KEY"),
         "doubao": ("https://open.feedcoopapi.com/search_api", "DOUBAO_" + "API_KEY"),
         "youcom": ("https://ydc-index.io", "YDC_" + "API_KEY"),
         "keenable": ("https://api.keenable.ai", "KEENABLE_" + "API_KEY"),
@@ -664,6 +668,31 @@ def test_zhihu_example_explains_account_quotas_and_explicit_limits() -> None:
     assert {"max_concurrency", "rate_limits", "min_interval_seconds"}.isdisjoint(web["zhihu"])
     [member] = web["zhihu"]["credentials"]
     assert "rate_limits" not in member and "min_interval_seconds" not in member
+
+
+def test_langsearch_example_enables_search_with_its_member_rate_window() -> None:
+    data = load_toml(_ROOT / "config.example.toml")
+    web = data["web_providers"]
+    assert isinstance(web, dict)
+    assert "langsearch" in web
+    table = web["langsearch"]
+    data["web_providers"] = {"langsearch": table}
+    environment = _stub_environment(data)
+    key_env = "LANGSEARCH_API_KEY"
+    environment.pop(key_env, None)
+    registry = build_default_registry()
+    [disabled] = resolve_config(data, registry, environment).web.providers
+    assert disabled.credentials == ()
+
+    table["enable_search"] = True
+    environment[key_env] = "example"
+    [enabled] = resolve_config(data, registry, environment).web.providers
+    assert enabled.enable_search and not enabled.enable_fetch
+    [member] = enabled.credentials
+    assert member.api_key_env == key_env
+    assert [(w.requests, w.period_seconds) for w in member.rate_policy.windows] == [(5, 1)]
+    assert member.max_concurrency is None
+    assert member.rate_policy.min_interval_seconds is None
 
 
 def test_baiduqianfan_example_can_enable_search_with_its_configured_key() -> None:
@@ -901,6 +930,7 @@ def test_example_provider_selection_omits_only_requested_templates() -> None:
         "keenable",
         "open_websearch",
         "baiduqianfan",
+        "langsearch",
         "yuanbao",
         "zhihu",
     }
@@ -1015,6 +1045,7 @@ def test_example_config_and_readme_document_all_new_provider_contracts() -> None
         "Yuanbao": ("yes", "no"),
         "Zhihu": ("yes", "no"),
         "Baidu Qianfan": ("yes", "no"),
+        "LangSearch": ("yes", "no"),
     }
     for display_name, (search_label, fetch_label) in expected_rows.items():
         assert f"| {display_name} | {search_label} | {fetch_label} |" in readme

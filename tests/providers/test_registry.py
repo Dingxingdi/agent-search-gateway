@@ -13,6 +13,7 @@ from agent_search_gateway.providers.web.decodo import DecodoAdapter
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.jina import JinaReaderAdapter
 from agent_search_gateway.providers.web.keenable import KeenableAdapter
+from agent_search_gateway.providers.web.langsearch import LangSearchAdapter
 from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.scrape_do import ScrapeDoAdapter
 from agent_search_gateway.providers.web.scrapegraphai import ScrapeGraphAIAdapter
@@ -220,9 +221,19 @@ def test_default_registry_adds_four_dual_capability_providers() -> None:
 
 def test_default_registry_adds_one_baiduqianfan_search_only_provider() -> None:
     registrations = build_default_registry().list_in_registration_order()
-    assert [item.name for item in registrations[24:]] == ["baiduqianfan"]
+    assert [item.name for item in registrations[24:]] == ["baiduqianfan", "langsearch"]
     [registration] = [item for item in registrations if item.name == "baiduqianfan"]
     assert registration.factory is BaiduQianfanAdapter
     assert registration.capabilities == ProviderCapabilities(search=True, fetch=False)
     assert registration.requires_api_key is True
     assert registration.allowed_config_keys == frozenset({"api_url"})
+
+
+def test_langsearch_registration_contract() -> None:
+    registrations = build_default_registry().list_in_registration_order()
+    [registration] = [item for item in registrations if item.name == "langsearch"]
+    assert registration.factory is LangSearchAdapter
+    assert registration.capabilities == ProviderCapabilities(search=True, fetch=False)
+    assert registration.requires_api_key is True
+    assert registration.supports_optional_api_key is False
+    assert registration.allowed_config_keys == registration.credential_option_keys == {"api_url"}

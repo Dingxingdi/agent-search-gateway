@@ -16,8 +16,11 @@ from agent_search_gateway.config import resolve_config
 from agent_search_gateway.errors import ConfigFailure, ErrorCode
 from agent_search_gateway.paths import RuntimePaths
 from agent_search_gateway.providers.defaults import build_default_registry
+from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.pooled import PooledWebProvider
 from agent_search_gateway.providers.web.doubao import DoubaoAdapter
 from agent_search_gateway.providers.web.keenable import KeenableAdapter
+from agent_search_gateway.providers.web.langsearch import LangSearchAdapter
 from agent_search_gateway.providers.web.open_websearch import OpenWebSearchAdapter
 from agent_search_gateway.providers.web.youcom import YouComAdapter
 from agent_search_gateway.rate_limit import make_rate_gate
@@ -589,6 +592,125 @@ async def test_baiduqianfan_without_rate_limits_has_no_hidden_three_request_wind
         assert not clock.sleepers
     finally:
         await runtime.aclose()
+
+
+@pytest.mark.parametrize("configured", [False, True], ids=["absent", "disabled"])
+async def test_inactive_langsearch_skips_runtime_construction(
+    tmp_path: Path,
+    client_factory: _ClientFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    configured: bool,
+) -> None:
+    def forbidden_adapter(*args: object, **kwargs: object) -> None:
+        raise AssertionError("Inactive LangSearch adapter must not be constructed")
+
+    monkeypatch.setattr(LangSearchAdapter, "__init__", forbidden_adapter)
+    web: dict[str, object] = {}
+    if configured:
+        web["langsearch"] = {
+            "enable_search": False,
+            "enable_fetch": False,
+            "credentials": [{"api_key_env": "MISSING"}],
+        }
+    runtime = await _build_runtime(tmp_path, web, client_factory)
+    try:
+        assert runtime.web_search_providers == ()
+        assert runtime.web_fetch_providers == ()
+        assert len(client_factory.clients) == 2  # Only the two LLM clients.
+    finally:
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+async def test_langsearch_runtime_injects_the_member_executor_and_rate_gate(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    endpoint = "https://langsearch.example.test/gateway"
+    runtime = await _build_runtime(
+        tmp_path,
+        {
+            "langsearch": _provider_config(
+                "langsearch",
+                enable_fetch=False,
+                api_url=endpoint,
+                rate_limits=[{"requests": 5, "period_seconds": 1}],
+            )
+        },
+        client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        assert search.name == "langsearch"
+        assert runtime.web_fetch_providers == ()
+        member = only_member(search)
+        adapter = member.adapter
+        assert isinstance(adapter, LangSearchAdapter)
+        assert adapter._api_url == endpoint
+        assert adapter._secret.reveal() == "x"
+        assert isinstance(adapter._http, HttpJsonExecutor)
+        assert adapter._http._provider_name == "langsearch"
+        assert member.rate is not None
+        assert adapter._http._rate_gate is member.rate
+        assert adapter._http._client in client_factory.clients
+    finally:
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
+
+
+async def test_langsearch_runtime_rotates_unlimited_credentials_as_one_search_provider(
+    tmp_path: Path, client_factory: _ClientFactory
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"code": 200, "data": {"webPages": {"value": []}}})
+
+    client_factory.transport = httpx.MockTransport(respond)
+    web: dict[str, object] = {
+        "langsearch": {
+            "enable_search": True,
+            "enable_fetch": False,
+            "credentials": [
+                {"api_url": "https://first.test", "api_key_env": "FIRST"},
+                {"api_url": "https://second.test", "api_key_env": "SECOND"},
+            ],
+        }
+    }
+    registry = build_default_registry()
+    config = resolve_config(
+        _config(web), registry, {"FIRST": "one", "SECOND": "two", "TEST_LLM": "example"}
+    )
+    [resolved] = config.web.providers
+    for credential in resolved.credentials:
+        assert credential.max_concurrency is None
+        assert credential.rate_policy.windows == ()
+        assert credential.rate_policy.min_interval_seconds is None
+
+    runtime = await Runtime.build(
+        config,
+        RuntimePaths.from_home(tmp_path),
+        registry=registry,
+        http_client_factory=client_factory,
+    )
+    try:
+        [search] = runtime.web_search_providers
+        assert search.name == "langsearch"
+        assert runtime.web_fetch_providers == ()
+        assert isinstance(search, PooledWebProvider)
+        assert all(
+            member.rate is None and member.capacity is None for member in search._pool._members
+        )
+        for query in ("first query", "second query"):
+            assert await search.search(query) == []
+        assert [(str(r.url), r.headers["authorization"]) for r in requests] == [
+            ("https://first.test/v1/web-search", "Bearer one"),
+            ("https://second.test/v1/web-search", "Bearer two"),
+        ]
+    finally:
+        await runtime.aclose()
+        await runtime.aclose()
+    assert all(client.close_calls == 1 for client in client_factory.clients)
 
 
 def _youcom_mcp_config(**options: object) -> dict[str, object]:

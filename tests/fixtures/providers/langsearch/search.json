@@ -1,0 +1,24 @@
+{
+  "code": 200,
+  "data": {
+    "webPages": {
+      "value": [
+        {
+          "url": "https://first.example.test/",
+          "name": "First title",
+          "snippet": "First snippet",
+          "datePublished": "2025-01-01"
+        },
+        {
+          "url": "https://second.example.test/",
+          "name": "Second title",
+          "snippet": "Second snippet"
+        }
+      ]
+    }
+  },
+  "usage": {
+    "total_tokens": 7
+  },
+  "log_id": "fixture"
+}

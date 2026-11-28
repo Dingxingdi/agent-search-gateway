@@ -1,4 +1,4 @@
-from collections import UserString
+from collections import UserDict, UserString
 
 import pytest
 
@@ -595,7 +595,7 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan", "langsearch"])
 @pytest.mark.parametrize(
     ("provider_data", "environment", "error_match"),
     [
@@ -633,6 +633,27 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
             "unknown config key",
         ),
         (
+            {
+                "enable_search": True,
+                "credentials": [{"api_key_env": "SERVICE_KEY", "unknown": True}],
+            },
+            {"SERVICE_KEY": "synthetic-service-value"},
+            "unknown credential option",
+        ),
+        (
+            {
+                "enable_search": True,
+                "credentials": [
+                    {
+                        "api_key_env": "SERVICE_KEY",
+                        "rate_limits": [{"requests": 0, "period_seconds": 1}],
+                    }
+                ],
+            },
+            {"SERVICE_KEY": "synthetic-service-value"},
+            r"rate_limits\[0\]\.requests",
+        ),
+        (
             {"enable_search": False, "enable_fetch": False, "unknown": True},
             {},
             "unknown config key",
@@ -645,6 +666,8 @@ def test_resolve_web_provider_config_rejects_invalid_enabled_provider(
         "unsupported-fetch",
         "invalid-rate-limits",
         "unknown-option",
+        "unknown-credential-option",
+        "invalid-rate-window",
         "disabled-unknown-option",
     ],
 )
@@ -664,7 +687,7 @@ def test_service_key_search_config_rejects_invalid_provider(
     assert caught.value.code is ErrorCode.CONFIG_ERROR
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan", "langsearch"])
 @pytest.mark.parametrize("api_url", [None, "https://service.example.test/gateway"])
 def test_service_key_search_config_preserves_only_explicit_options(
     provider_name: str,
@@ -692,12 +715,16 @@ def test_service_key_search_config_preserves_only_explicit_options(
     assert dict(provider.credentials[0].options) == options
 
 
-@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan"])
+@pytest.mark.parametrize("provider_name", ["yuanbao", "zhihu", "baiduqianfan", "langsearch"])
 @pytest.mark.parametrize("api_key_env", [None, "UNAVAILABLE_SERVICE_KEY"])
 def test_disabled_service_key_search_provider_skips_credentials(
     provider_name: str,
     api_key_env: str | None,
 ) -> None:
+    class UnreadableEnvironment(UserDict[str, str]):
+        def __getitem__(self, key: str) -> str:
+            raise AssertionError(f"Disabled provider read environment variable {key}")
+
     provider_data: dict[str, object] = {
         "enable_search": False,
         "enable_fetch": False,
@@ -710,7 +737,7 @@ def test_disabled_service_key_search_provider_skips_credentials(
     resolved = resolve_web_provider_config(
         {"web_providers": {provider_name: provider_data}},
         build_default_registry(),
-        {},
+        UnreadableEnvironment(),
     )
 
     [provider] = resolved.providers

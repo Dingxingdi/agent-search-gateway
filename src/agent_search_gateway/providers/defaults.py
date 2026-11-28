@@ -12,6 +12,7 @@ from .web.exa import ExaAdapter
 from .web.firecrawl import FirecrawlAdapter
 from .web.jina import JinaReaderAdapter
 from .web.keenable import KeenableAdapter
+from .web.langsearch import LangSearchAdapter
 from .web.linkup import LinkupAdapter
 from .web.open_websearch import OpenWebSearchAdapter
 from .web.parallel import ParallelAdapter
@@ -188,6 +189,12 @@ def build_default_registry() -> ProviderRegistry:
             "baiduqianfan",
             ProviderCapabilities(search=True, fetch=False),
             BaiduQianfanAdapter,
+            frozenset({"api_url"}),
+        ),
+        WebProviderRegistration(
+            "langsearch",
+            ProviderCapabilities(search=True, fetch=False),
+            LangSearchAdapter,
             frozenset({"api_url"}),
         ),
     )
