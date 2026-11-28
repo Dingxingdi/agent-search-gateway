@@ -1,7 +1,7 @@
 # Error Handling: LangSearch Web Search Provider
 
 - Date: 2026-11-28
-- Status: Draft for review
+- Status: Implemented; see the [implementation and verification record](../plans/20261128-langsearch.md).
 - Base: v3.1.0 / 5f70c12
 - Architecture: ../architectures/20261128-langsearch.md
 - Testing: ../testings/20261128-langsearch.md

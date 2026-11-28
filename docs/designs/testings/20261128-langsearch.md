@@ -1,7 +1,7 @@
 # Testing: LangSearch Web Search Provider
 
 - Date: 2026-11-28
-- Status: Draft for review; no tests executed in this design phase
+- Status: Implemented; see the [implementation and verification record](../plans/20261128-langsearch.md).
 - Base: v3.1.0 / 5f70c12
 - Architecture: ../architectures/20261128-langsearch.md
 - Error handling: ../error-handlings/20261128-langsearch.md

@@ -1,10 +1,10 @@
 # Architecture: LangSearch Web Search Provider
 
 - Date: 2026-11-28
-- Status: Draft for review; design only, no implementation
+- Status: Implemented; see the [implementation and verification record](../plans/20261128-langsearch.md).
 - Base commit: 5f70c12 (v3.1.0)
 - Branch: design-langsearch-20261128
-- Companion drafts: ../error-handlings/20261128-langsearch.md and ../testings/20261128-langsearch.md
+- Companion specifications: ../error-handlings/20261128-langsearch.md and ../testings/20261128-langsearch.md
 - Constraint: minimum intrusion, low coupling, reuse existing provider infrastructure.
 
 ## 1. Scope & Assumptions
