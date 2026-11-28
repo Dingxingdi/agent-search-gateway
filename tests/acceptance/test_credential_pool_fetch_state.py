@@ -40,6 +40,71 @@ def paths(tmp_path: Path) -> RuntimePaths:
 _RETRY = {"max_attempts": 2, "base_delay_seconds": 0.001, "max_delay_seconds": 0.001}
 
 
+@pytest.mark.parametrize("provider_args", [[], ["--provider", "langsearch"]])
+async def test_langsearch_search_requires_explicit_fetch(
+    paths: RuntimePaths, provider_args: list[str]
+) -> None:
+    search_url = "https://langsearch.test/v1/web-search"
+    fetch_url = "https://jina.test"
+    body = "Fetched article"
+    calls: list[httpx.Request] = []
+    stages: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.method == "POST"
+        endpoint = str(request.url)
+        if endpoint == search_url:
+            assert json.loads(request.content) == {"query": "article", "count": 10}
+            row = {
+                "url": _TARGET,
+                "name": "Article",
+                "snippet": "Abstract",
+                "text": "Ignored search text",
+                "content": "Ignored search content",
+            }
+            return httpx.Response(200, json={"code": 200, "data": {"webPages": {"value": [row]}}})
+        if endpoint == fetch_url:
+            assert json.loads(request.content) == {"url": _TARGET}
+            return httpx.Response(200, text=body)
+        assert endpoint == _CHAT
+        stages.append(json.loads(request.content)["model"])
+        return _completion(request)
+
+    async with _gateway(
+        paths,
+        httpx.MockTransport(respond),
+        web=("langsearch", "jina"),
+        web_options={
+            "langsearch": {"enable_fetch": False},
+            "jina": {"enable_search": False, "credentials": [{"api_url": fetch_url}]},
+        },
+    ) as runtime:
+        path = _successful_path(
+            await _filtering_cli(paths, ["keyword-search", "article", *provider_args])
+        )
+        assert json.loads(path.read_text()) == {"url": _TARGET, "abstract": "Abstract"}
+        record = runtime.store.get(normalize_url(_TARGET))
+        assert record is not None and record.status is URLStatus.NEED_FETCH
+        assert (record.raw_content, record.content) == ("", "")
+        assert [provider.name for provider in runtime.web_fetch_providers] == ["jina"]
+        assert [str(request.url) for request in calls] == [search_url]
+        assert stages == []
+
+        fetch_args = ["url-fetch", _TARGET]
+        assert await _filtering_cli(paths, fetch_args) == (0, body + "\n", "")
+        ready = runtime.store.get(normalize_url(_TARGET))
+        assert ready is not None and ready.status is URLStatus.READY
+        assert (ready.raw_content, ready.content) == (body, body)
+        assert stages == ["judge", "safety"]
+        assert [str(request.url) for request in calls] == [search_url, fetch_url, _CHAT, _CHAT]
+
+        completed_calls = list(calls)
+        assert await _filtering_cli(paths, fetch_args) == (0, body + "\n", "")
+        assert calls == completed_calls
+        assert runtime.store.get(normalize_url(_TARGET)) == ready
+
+
 async def test_ordered_fetch_exhausts_member_retry_before_fallback(paths: RuntimePaths) -> None:
     calls: list[str] = []
 
