@@ -7,7 +7,12 @@ import pytest
 
 from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
-from agent_search_gateway.observability import SecretValue
+from agent_search_gateway.observability import (
+    DiagnosticText,
+    KeyValueFormatter,
+    SecretRedactor,
+    SecretValue,
+)
 from agent_search_gateway.providers.contracts import (
     KeywordSearchHit,
     KeywordSearchProvider,
@@ -15,7 +20,10 @@ from agent_search_gateway.providers.contracts import (
 )
 from agent_search_gateway.providers.defaults import build_default_registry
 from agent_search_gateway.providers.http import HttpJsonExecutor
+from agent_search_gateway.providers.web import langsearch
 from tests.support.http import RecordingJsonExecutor
+from tests.support.logging import without_debug_body_previews
+from tests.support.web_diagnostics import assert_safe_response_diagnostic
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures/providers/langsearch/search.json"
 _MISSING = object()
@@ -393,3 +401,196 @@ async def test_langsearch_sends_json_content_type() -> None:
         )
         assert isinstance(adapter, KeywordSearchProvider)
         assert len(await adapter.search("query")) == 2
+
+
+def _http_adapter(
+    client: httpx.AsyncClient, *, max_attempts: int = 1
+) -> langsearch.LangSearchAdapter:
+    return langsearch.LangSearchAdapter(
+        name="langsearch",
+        api_url="https://langsearch.example.test",
+        secret=SecretValue("PRIVATE_AUTH"),
+        http_executor=HttpJsonExecutor(
+            client, RetryPolicy(max_attempts, 0, 0, 5), provider_name="langsearch"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "category", "semantic"),
+    [
+        (b"{", "decode", "unknown"),
+        (b"[]", "invalid_envelope", "unknown"),
+        (b"{}", "invalid_envelope", "unknown"),
+        (b'{"code":true}', "invalid_envelope", "unknown"),
+        (b'{"code":200.0}', "invalid_envelope", "unknown"),
+        (b'{"code":"200","data":{"webPages":{"value":[]}}}', "invalid_envelope", "unknown"),
+        (b'{"code":200,"data":[]}', "invalid_envelope", "unknown"),
+        (b'{"code":200,"data":{"webPages":null}}', "invalid_envelope", "unknown"),
+        (b'{"code":200,"data":{"webPages":{"value":{}}}}', "invalid_envelope", "unknown"),
+        (b'{"code":403}', "provider_response", "error"),
+        (b'{"code":"quota_exceeded"}', "provider_response", "error"),
+        (b'{"code":200,"data":{"webPages":{"value":[]}}}', None, "success"),
+        (
+            b'{"code":200,"data":{"webPages":{"value":[{"url":"https://example.test"}]}}}',
+            None,
+            "success",
+        ),
+    ],
+)
+async def test_langsearch_classifies_response_diagnostics(
+    caplog: pytest.LogCaptureFixture, body: bytes, category: str | None, semantic: str
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=body))
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = _http_adapter(client)
+        if semantic == "success":
+            await adapter.search("query")
+        else:
+            with pytest.raises(ExecutionFailure):
+                await adapter.search("query")
+
+    diagnostic, _ = assert_safe_response_diagnostic(caplog, semantic)
+    if category is None:
+        assert diagnostic["response_kind"] == "object"
+    else:
+        assert diagnostic["category"] == category
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "msg", "selected"),
+    [
+        (403, "denied", "PRIVATE_FALLBACK", "denied"),
+        ("QUOTA", "", "PRIVATE_FALLBACK", ""),
+        (429, {"text": "PRIVATE_OBJECT"}, "try later", "try later"),
+        ("E_LIMIT", ["PRIVATE_LIST"], {"text": "PRIVATE_OBJECT"}, None),
+        (
+            403,
+            _MISSING,
+            "PRIVATE_AUTH " + "界" * 550 + "PRIVATE_TAIL",
+            "PRIVATE_AUTH " + "界" * 550 + "PRIVATE_TAIL",
+        ),
+    ],
+    ids=["prefer-message", "empty-message", "fallback-msg", "invalid-messages", "bounded-redacted"],
+)
+async def test_langsearch_selects_safe_error_message(
+    caplog: pytest.LogCaptureFixture,
+    code: int | str,
+    message: object,
+    msg: object,
+    selected: str | None,
+) -> None:
+    payload = {
+        "code": code,
+        "msg": msg,
+        "usage": {"cost": "PRIVATE_USAGE"},
+        "log_id": "PRIVATE_LOG_ID",
+        "error": {"message": "PRIVATE_NESTED"},
+    }
+    if message is not _MISSING:
+        payload["message"] = message
+    caplog.set_level(logging.DEBUG)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ExecutionFailure) as caught:
+            await _http_adapter(client).search("query")
+
+    assert caught.value.message == "langsearch/search: code must be the integer 200"
+    expected = {"upstream_code": DiagnosticText(str(code), 128)}
+    if selected is not None:
+        expected["upstream_message"] = DiagnosticText(selected, 512)
+    assert caught.value.diagnostics == expected
+    [diagnostic] = [
+        vars(record)["gateway_fields"]
+        for record in caplog.records
+        if getattr(record, "gateway_event", None) == "provider_response_diagnostic"
+    ]
+    assert {k: v for k, v in diagnostic.items() if k.startswith("upstream_")} == expected
+    assert {"usage", "log_id", "error", "msg", "message"}.isdisjoint(diagnostic)
+    formatter = KeyValueFormatter(SecretRedactor([SecretValue("PRIVATE_AUTH")]))
+    rendered = without_debug_body_previews("\n".join(formatter.format(r) for r in caplog.records))
+    assert "PRIVATE_" not in rendered
+    if selected and len(selected) > 512:
+        assert "<redacted>" in rendered
+        assert "…" in rendered
+        assert "upstream_message_truncated=true" in rendered
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "code", "reason"),
+    [
+        (200, b"{", ErrorCode.PROTOCOL_ERROR, "response was not valid JSON"),
+        (
+            401,
+            b'{"code":200,"data":{"webPages":{"value":[]}}}',
+            ErrorCode.ALL_PROVIDERS_FAILED,
+            "HTTP status 401",
+        ),
+        (200, b'{"code":429}', ErrorCode.ALL_PROVIDERS_FAILED, "code must be the integer 200"),
+    ],
+)
+async def test_langsearch_http_and_business_failures_send_once(
+    status: int, body: bytes, code: ErrorCode, reason: str
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        with pytest.raises(ExecutionFailure) as caught:
+            await _http_adapter(client, max_attempts=2).search("query")
+    assert len(requests) == 1
+    assert caught.value.code == code
+    assert caught.value.message == f"langsearch/search: {reason}"
+    if status == 401:
+        assert caught.value.diagnostics["category"] == "http_status"
+        assert caught.value.diagnostics["semantic_result"] == "error"
+
+
+async def test_langsearch_executor_retries_http_429() -> None:
+    requests: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(429, json={"code": 429})
+        return httpx.Response(200, json={"code": 200, "data": {"webPages": {"value": []}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+        assert await _http_adapter(client, max_attempts=2).search("query") == []
+    assert len(requests) == 2
+
+
+async def test_langsearch_diagnostic_error_preserves_business_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(root: object) -> dict[str, object]:
+        raise RuntimeError("unavailable diagnostics")
+
+    monkeypatch.setattr(langsearch, "_error_fields", unavailable)
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"code": 403}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        with pytest.raises(ExecutionFailure) as caught:
+            await _http_adapter(client).search("query")
+
+    assert caught.value.code == ErrorCode.ALL_PROVIDERS_FAILED
+    assert caught.value.message == "langsearch/search: code must be the integer 200"
+    assert caught.value.diagnostics == {}
+
+
+async def test_langsearch_response_diagnostic_error_preserves_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable(response: httpx.Response) -> dict[str, object]:
+        raise RuntimeError("unavailable diagnostics")
+
+    monkeypatch.setattr(langsearch, "_search_response_diagnostics", unavailable)
+    payload = {"code": 200, "data": {"webPages": {"value": [{"url": "https://example.test/"}]}}}
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    async with httpx.AsyncClient(transport=transport) as client:
+        assert await _http_adapter(client).search("query") == [
+            KeywordSearchHit("https://example.test/", "", "")
+        ]
