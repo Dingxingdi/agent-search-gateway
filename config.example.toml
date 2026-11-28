@@ -248,6 +248,15 @@ rate_limits = [{ requests = 3, period_seconds = 1 }]
 api_url = "https://qianfan.baidubce.com"
 api_key_env = "BAIDUQIANFAN_API_KEY"
 
+[web_providers.langsearch]
+enable_search = false
+enable_fetch = false
+
+[[web_providers.langsearch.credentials]]
+api_url = "https://api.langsearch.com"
+api_key_env = "LANGSEARCH_API_KEY"
+rate_limits = [{ requests = 5, period_seconds = 1 }]
+
 [web_providers.yuanbao]
 enable_search = true
 enable_fetch = false
