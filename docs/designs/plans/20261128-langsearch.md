@@ -665,7 +665,7 @@ uv build
 
 ## 执行记录（2026-11-28）
 
-**状态：Task 1–7 的实现及离线验收完成；真实 LangSearch 检索尚未验证。** 实网专用测试已执行，但 LocalHost 的命令环境与常规登录环境均未提供非空的 LANGSEARCH_API_KEY，测试在创建客户端前跳过，真实上游请求数为 0。这里的完成复选框包含“记录实网阻碍”，不表示实网检索已经通过。
+**状态：Task 1–7 的实现、离线验收及真实 LangSearch 检索验收均已完成。** 首次实网测试因执行环境缺少凭证而跳过；用户设置 LANGSEARCH_API_KEY 后，原样重跑专用测试，结果为 1 passed。一次真实请求收到 HTTP 200，返回并准入 10 个结果，正文为空，客户端与 socket 完成清理。
 
 ### 逐项提交与验证
 
@@ -677,13 +677,13 @@ uv build
 | Task 4 | 6935dfc | 分类、字段选择及诊断异常隔离经过 RED/GREEN；聚焦 486 passed；最终全套 6155 passed / 20 skipped。 |
 | Task 5 | f47a7c4 | 既有配置、运行时、凭证池及 doctor 接入回归首次即绿，聚焦 819 passed；全套 6184 passed / 20 skipped；无生产改动。 |
 | Task 6 | 9359512 | 默认选择和显式选择两种 socket/CLI 验收首次即绿；搜索 NEED_FETCH、Jina 显式 Fetch 和 READY 缓存均验证；全套 6186 passed / 20 skipped。 |
-| Task 7 | 9a631eb | 17 项离线 smoke 验证通过；组合检查 55 passed / 1 skipped；最终全套 6203 passed / 21 skipped；专用实网测试因缺少凭证跳过。 |
+| Task 7 | 9a631eb | 17 项离线 smoke 验证通过；组合检查 55 passed / 1 skipped；最终全套 6203 passed / 21 skipped；首次实网因缺少凭证跳过，补充凭证后复验 1 passed。 |
 
 Task 1–7 按顺序由独立实现子代理完成并自审。独立只读审阅检查了 Task 1–4 的生产实现、共享 helper 边界和测试断言，未发现可操作缺陷。
 
 ### 最终质量门
 
-以下结果对应实现提交 9a631eb 的同一生产代码与测试状态；后续仅回写本执行记录，没有重复运行已经通过的全套测试。
+下表的离线及静态检查结果对应实现提交 9a631eb 的同一生产代码与测试状态。用户补充凭证后仅重跑专用实网测试并回写记录，没有改动生产代码或测试，也没有重复运行已经通过的全套离线测试。
 
 | 检查 | 结果 |
 |---|---|
@@ -695,10 +695,11 @@ Task 1–7 按顺序由独立实现子代理完成并自审。独立只读审阅
 | 文档构建 | 退出码 0；site/index.html 与 site/api/agent_search_gateway.html 存在，首页没有未替换的版本占位符。 |
 | uv build | wheel 与 sdist 构建成功；wheel 内的 agent_search_gateway/providers/web/langsearch.py 与当前源码字节一致。 |
 | 差异检查 | git diff --check 通过；相对 9c9361c 的生产改动只有 langsearch.py 与 defaults.py，后者仅增加 import 和末尾注册。pyproject.toml、uv.lock 未变。 |
+| 专用 LangSearch 实网复验 | 1 passed，3.66 秒，退出码 0；1 次真实请求，HTTP 200，10 个结果全部准入，正文为空，资源清理成功。 |
 
 示例保持默认禁用，凭证引用为 LANGSEARCH_API_KEY，启用后的成员窗口为 5 requests / 1 second；服务数量为 26 Web / 33 合计，没有隐含并发上限。真实运行时测试已验证多凭证只暴露一个逻辑 provider、空结果不切换凭证、HTTP 重试耗尽与业务失败沿用既有 fallback、所有客户端正常关闭。
 
-### 实网限制与复验命令
+### 实网复验（已通过）
 
 执行过的专用命令：
 
@@ -706,6 +707,12 @@ Task 1–7 按顺序由独立实现子代理完成并自审。独立只读审阅
 env WEB_SEARCH_RUN_INTEGRATION=1 uv run --extra mcp pytest tests/integration/test_live_langsearch.py -v -rs -rP
 ~~~
 
-结果为 1 skipped。对 LocalHost 普通命令、登录环境和登录环境中的同名工具路由变量均仅检查非空状态，未打印凭证。真实 HTTP 发送为 0，因而没有阳性实网检索证据。
+首次执行结果为 1 skipped，原因是执行环境未提供非空凭证，真实 HTTP 发送为 0；该次结果未被当作检索成功。用户设置 API Key 后，于 2026-11-28 原样重跑上面的专用命令，得到 1 passed in 3.66s，退出码 0。
 
-当 LANGSEARCH_API_KEY 已实际传入 LocalHost 执行环境后，可原样重跑该命令。测试会使用独立配置、daemon、socket 和结果目录，内部 CLI 明确选择 langsearch；只有成功上游调用、可准入 URL、有效元数据、空正文以及资源清理同时成立才会通过。所有离线 smoke 测试均使用合成凭证和 MockTransport；其中的模拟 HTTP 200 与 URL 准入证据没有被当作实网成功。
+本次真实请求的安全标量报告为：
+
+~~~json
+{"admitted": 10, "attempts": 1, "category": "verified", "cleanup": true, "empty_bodies": true, "http_status": 200, "queries": 1, "received": 10}
+~~~
+
+本次复验使用独立配置、daemon、socket 和结果目录，内部生产 CLI 明确选择 langsearch。成功上游调用、可准入 URL、有效元数据、空正文以及资源清理的断言均通过；只执行了 1 条查询，没有使用备用查询。测试没有打印凭证或原始上游响应。此前的 17 项离线 smoke 验证继续作为失败、隔离和取消行为的回归证据，本次结果补齐了真实服务的阳性检索证据。
