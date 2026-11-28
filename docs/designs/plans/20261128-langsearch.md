@@ -14,7 +14,7 @@
 
 - 工作树：/home/agent/agent-search-gateway/.worktrees/design-langsearch-20261128。
 - 分支：design-langsearch-20261128；计划依据设计提交 9c9361c，其实现基线为 5f70c12 / v3.1.0。继续使用此工作树。
-- 本文是待执行的实施计划。复选框不表示实现或测试已经完成。
+- 本文保留原实施步骤，并以复选框记录实际完成状态；逐项提交、验收结果和实网限制见文末执行记录。
 - 生产修改仅允许新增 src/agent_search_gateway/providers/web/langsearch.py，以及修改 src/agent_search_gateway/providers/defaults.py 的 import 和末尾注册项。
 - 不修改其他适配器、common.py、config.py、runtime.py、credential_pool.py、HTTP executor、编排器、CLI、daemon、MCP、公共模型、依赖或锁文件。
 - 仅 Search；不加入 Fetch、rerank、SDK、MCP client、正文检索、供应商可选参数、账号额度跟踪或新重试策略。示例默认禁用。
@@ -97,7 +97,7 @@ uv sync --locked --all-groups --extra mcp
 
 注册全集与文档表格由现有测试绑定，因此这些伴随更新属于同一个可验收改动。只做新增 LangSearch 所必需的文档与枚举更新。
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 首先新增 test_langsearch_posts_metadata_only_request，通过 build_default_registry().get("langsearch") 取得注册项并断言非空，再用 factory 构造真实适配器。用 KeywordSearchProvider 协议收窄类型后调用 search，不 mock search 或 registry。
 
@@ -115,7 +115,7 @@ Expected：
 
 再逐项添加注册和文档契约断言：langsearch 唯一、位于 baiduqianfan 后、Search=True/Fetch=False、requires_api_key=True、supports_optional_api_key=False、allowed_config_keys 与 credential_option_keys 均为 {"api_url"}。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py::test_langsearch_posts_metadata_only_request -v
@@ -123,7 +123,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：registry.get("langsearch") 返回 None，注册存在性断言失败。新文档/枚举断言分别因缺少 LangSearch 项而失败；不把 collection、语法或 fixture 拼写错误作为 RED。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 LangSearchAdapter.__init__ stores name, api_url, secret and injected JsonRequester
@@ -166,7 +166,7 @@ rate_limits = [{ requests = 5, period_seconds = 1 }]
 
 在上述 credentials 表中设置 api_key_env，其值必须是环境变量名称 LANGSEARCH_API_KEY，而非实际令牌。示例不设置 max_concurrency 或 min_interval_seconds。README 与 rate 行解释：只调用 REST Search；固定 count=10，省略 contents；需要显式启用后重启 daemon；既有 credential_strategy/use_proxy 可用；5 RPS 是成员配置示例，同账号 keys/MCP 共享上游额度，实际账号可能不同，TPM/TPD 不由本地请求窗口保证。429 耗尽日额度时不能承诺短退避恢复。CHANGELOG 只加 Unreleased 记录，不发布版本。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py tests/providers/test_registry.py tests/runtime/test_runtime_assembly.py tests/docs/test_documented_config.py -v
@@ -174,7 +174,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：成功请求、注册与文档契约全部 PASS。然后执行前述全套回归；实网测试保持 skip。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅整理新模块的命名、导入和 fixture；保持通用 helper、其他适配器与核心不变。保留“正文为空”的明确断言。重新运行本任务测试；如发生代码重构，完成全套回归后再继续。
 
@@ -186,7 +186,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 - Test: tests/providers/web/test_langsearch.py
 - Docs: docs/designs/error-handlings/20261128-langsearch.md（只读依据）
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 逐项加入 test_langsearch_rejects_invalid_success_envelope 的参数用例：
 
@@ -201,7 +201,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 保持一份 valid envelope，每个参数只替换一个被测层级。另加 test_langsearch_accepts_empty_results。对失败使用 pytest.raises(ExecutionFailure)，断言现有 ErrorCode.ALL_PROVIDERS_FAILED 及本地、稳定的错误上下文，不断言任意上游原文。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py -k "invalid_success_envelope or empty_results" -v
@@ -209,7 +209,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：Task 1 的成功路径不能正确拒绝全部错误类型，出现“未抛出预期异常”或错误异常类型的行为失败。若某个用例已由共享 helper 覆盖，记录初始通过，继续尚未覆盖的用例，不删除有效检查制造失败。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 root = require_object(payload, provider, "search", "response")
@@ -224,7 +224,7 @@ parse results, including valid []
 
 使用 isinstance(code, int) 且显式排除 bool，或等价的严格整数检查；不得用 int(code)、宽松 ==200 或 truthiness。不得通过 get(..., []) 隐藏缺失层级。HTTP 状态与 JSON decode 已由 executor 处理，本步不加 response_inspector、新异常类型或重试循环。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py -v
@@ -232,7 +232,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：所有信封边界和正常/空结果 PASS。随后执行全套回归。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 仅消除新模块内已经出现的重复，保持字段名 data.webPages.value、search stage 和异常类型一致。重跑适配器测试；有重构时再完成全套回归。
 
@@ -246,7 +246,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 - Read: src/agent_search_gateway/providers/web/brave.py、common.py
 - Read: src/agent_search_gateway/providers/diagnostics.py
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 新增以下单行为用例：
 
@@ -259,7 +259,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 计数用例可使用恰好八条记录：合法 A、null、{}、{"url": ""}、{"url": 7}、合法 URL 但 name=[]、合法 B、合法 URL 但 snippet=False。预期 received=8、accepted=2、rejected=6、rejection_counts={"missing_url": 2, "invalid_record": 4}、processed=8、unprocessed=0、rewritten=0。另验证 value=[] 时只记录一次全零计数。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py -k "metadata or body_fields or candidates or duplicate or counts" -v
@@ -267,7 +267,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：此前实现尚未具备完整候选容错或计数，行为断言失败。每次只补当前用例要求，不改变合法信封与空成功的含义。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 ~~~text
 counts = CandidateCounts(len(results))
@@ -291,7 +291,7 @@ return hits
 
 不修改 keyword_hits_from_results 为它增加 title_key 参数，不复制 URL 归一化、有效性过滤、去重或入库逻辑。非空 URL 的最终有效性由编排器判断。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py tests/providers/web/test_anysearch.py tests/providers/web/test_brave.py -v
@@ -299,7 +299,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：候选容错、可选元数据、空正文、保序及计数全部 PASS，已有参考适配器不受影响。随后执行全套回归。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 新模块内确有重复时提取小的局部映射函数；不抽取跨供应商通用层。重跑本任务测试；有重构时再完成全套回归。
 
@@ -312,7 +312,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 - Read: tests/support/web_diagnostics.py、tests/support/logging.py
 - Read: tests/providers/test_http_executor.py、tests/observability/test_provider_diagnostics.py
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 使用真实 HttpJsonExecutor、httpx.MockTransport 及 RetryPolicy(1, 0, 0, 5)。RecordingJsonExecutor 不执行 response_diagnostics 回调，不能用于证明以下行为。
 
@@ -342,7 +342,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 - HTTP 200 携带失败业务码：即使 HTTP retry.max_attempts=2，也只有一次本成员物理发送；解析失败发生在 executor 返回 JSON 后。
 - 局部诊断提取意外抛出普通异常时，不能遮蔽原本的 ExecutionFailure。有效搜索不因诊断失败而失败；复用已有 best-effort 测试惯例，不复制整套取消与日志矩阵。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py -k "diagnostic or error_message or http or decode or business" -v
@@ -350,7 +350,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：尚未连接的 LangSearch response extractor 无法提供所需分类和 message/msg 选择；相关断言失败。共享 executor 已经支持的错误分支可以初始为绿。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 在 langsearch.py 内新增 _search_response_diagnostics(response: httpx.Response) -> Mapping[str, object]，通过 request_json 的 response_diagnostics 参数注入。
 
@@ -380,7 +380,7 @@ semantic failure:
 
 不加入 SDK、HTTP 客户端、response decoder、供应商重试循环、特殊 429 处理或新的退避参数。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/test_langsearch.py tests/providers/test_http_executor.py tests/observability/test_provider_diagnostics.py tests/observability/test_redaction.py -v
@@ -388,7 +388,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 预期：分类、msg fallback、安全字段和 HTTP/业务错误边界全部 PASS。随后执行全套回归。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只整理新模块里的重复状态判断与安全字段选择，保持真正的响应验证为权威路径、诊断为 best effort。重跑本任务测试；有重构时再完成全套回归。
 
@@ -403,7 +403,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 - Read: tests/runtime/conftest.py、src/agent_search_gateway/providers/pooled.py
 - Production: 预期无需额外修改
 
-- [ ] **Step 1: Write the failing test / focused reuse regression**
+- [x] **Step 1: Write the failing test / focused reuse regression**
 
 配置：在现有三个 Search-only 参数表追加 langsearch，复用 test_service_key_search_config_rejects_invalid_provider、test_service_key_search_config_preserves_only_explicit_options、test_disabled_service_key_search_provider_skips_credentials。覆盖缺 api_key_env、缺/空环境值、不支持 Fetch、未知配置/凭证选项、不合法窗口、禁用时不读取秘密。策略和 endpoint 的验证保持原有组件边界：配置解析接受的可省略字段不等于适配器构造也可省略，不新设 LangSearch 默认值。
 
@@ -426,7 +426,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/providers/web/t
 
 doctor：复用 ForbiddenClient / forbidden_runtime_build 的测试方式，以合法环境引用启用 LangSearch 后 run_doctor 通过；不创建 HTTP 客户端、不构造 Runtime、不发送供应商请求、不输出合成 secret。此配置不启用 open_websearch，避免混入它已有的健康检查。
 
-- [ ] **Step 2: Run test to verify it fails or confirm existing behavior**
+- [x] **Step 2: Run test to verify it fails or confirm existing behavior**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_config_web_providers.py tests/runtime/test_new_web_runtime_assembly.py tests/runtime/test_pooled_providers.py tests/doctor/test_no_network.py -v
@@ -434,17 +434,17 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_confi
 
 这些是既有机制的接入回归，Task 1–4 正确时应直接通过。若失败，记录实际失败断言，区分 fixture 漏填 api_url、错误能力开关和真实产品缺陷；不修改核心来迎合错误测试设置。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 预期只扩展测试参数或添加上述 focused tests。配置、runtime、doctor、pool 的生产代码保持原样；现有注册及适配器已提供接入点。若实际发现设计假设不成立，先定位具体矛盾，再处理限定在新适配器/注册中的缺口，不静默扩展生产改动面。
 
 通用 round_robin/fill_first、公平性、速率按尝试计费、并发、等待预算、取消、proxy/TLS 等继续由既有测试矩阵证明。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 重跑 Step 2 命令；预期配置、装配、doctor 和四个凭证池接缝 PASS。随后执行全套回归。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 只在测试内复用已有配置/transport helper，合成请求的 endpoint、header、结果断言保持清晰。不为测试新增生产 API，也不扩大共用测试 helper 的职责。重跑受影响测试；有代码重构时再执行全套回归。
 
@@ -458,7 +458,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_confi
 - Read: tests/acceptance/test_gateway_workflows.py
 - Production: 预期无需额外修改
 
-- [ ] **Step 1: Write the failing test / focused reuse regression**
+- [x] **Step 1: Write the failing test / focused reuse regression**
 
 新增 test_langsearch_search_requires_explicit_fetch，使用现有 _gateway、_filtering_cli、_successful_path、_completion 及 RuntimePaths 测试 fixture。
 
@@ -480,7 +480,7 @@ Action / Expected：
 5. LangSearch 搜索请求计数没有增加，也没有 LangSearch Fetch 请求；已就绪结果保持既有缓存语义。
 6. context manager 退出后本测试创建的 socket 与客户端按既有 helper 完成清理。
 
-- [ ] **Step 2: Run test to verify it fails or confirm existing behavior**
+- [x] **Step 2: Run test to verify it fails or confirm existing behavior**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test_credential_pool_fetch_state.py -k langsearch -v
@@ -488,11 +488,11 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test
 
 预期：此前适配器与注册正确时，该接入验收直接通过。若 body 或能力边界断言失败，将其作为适配器/注册的真实缺陷，不更改 URLStore、搜索编排或 Fetch 状态机。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 复用现有离线 acceptance support，新增上述测试与一个局部合成响应即可。不要建立另一套 daemon、CLI 或 MCP 测试协议，不调用任何真实 Fetch 或 LLM 服务。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test_credential_pool_fetch_state.py tests/orchestrators/test_keyword_provider_filtering.py tests/orchestrators/test_keyword_search_state.py tests/orchestrators/test_url_fetch_flow.py -v
@@ -500,7 +500,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test
 
 预期：LangSearch 搜索只准入元数据，显式 Fetch 由现有支持者执行；既有选择、状态与正文流程 PASS。随后执行全套回归，其中包含现有 CLI 和 MCP 测试。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 保持业务断言位于测试本身；仅复用现有响应、生命周期与 CLI helper，不新增核心测试开关。重跑受影响测试；有代码重构时再执行全套回归。
 
@@ -515,7 +515,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test
 - Read: tests/acceptance/test_gateway_workflows.py、src/agent_search_gateway/cli.py
 - Production: 无修改
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 先给 smoke 本身写离线验证，复用已有“integration 模块内可注入 _run；unit 模块调用 _run”的模式，令 _run 接收环境映射、明确的 RuntimePaths 和可注入 HTTP client factory。在 unit 用例中始终传 MockTransport；不读取真实用户凭证、不访问网络。
 
@@ -531,7 +531,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/acceptance/test
 
 先让缺少 smoke runner 或尚无正向检索判定暴露正确失败；只有测试框架/接口的最小声明不足以算完成行为。不要将未实现模块的 collection 错误记为完成 RED；先使测试能够定位可调用 runner，再用实际断言证明缺口。
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_live_langsearch_validation.py -v
@@ -539,7 +539,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_live_
 
 预期：尚未实现的 smoke 证据/预算/隔离行为导致明确断言失败。integration 模块的 opt-in 标记不应阻止 unit 模块离线验证 runner。
 
-- [ ] **Step 3: Describe the minimal implementation**
+- [x] **Step 3: Describe the minimal implementation**
 
 采用现有 WEB_SEARCH_RUN_INTEGRATION == "1" 模块级 skip guard。test_live_langsearch_search 使用 pytest tmp_path 构造 RuntimePaths(tmp_path / "config.toml", tmp_path / "daemon.sock", tmp_path / "results")；不重设 HOME、不使用用户默认 socket、不停止现有 daemon、不改用户配置。
 
@@ -584,7 +584,7 @@ env WEB_SEARCH_RUN_INTEGRATION=1 uv run --extra mcp pytest tests/integration/tes
 
 该测试内部的生产 CLI 调用必须使用 --provider langsearch；不手工启动默认配置中的全提供商 fan-out。
 
-- [ ] **Step 4: Run test to verify it passes (and full suite)**
+- [x] **Step 4: Run test to verify it passes (and full suite)**
 
 先离线：
 
@@ -596,7 +596,7 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_live_
 
 实网成功标准：确有成功上游调用，至少一个正常准入的 URL 命中，标题/摘要经既有映射与 staging 使用，正文为空，未调用其他供应商，独立 daemon 退出完成。仅“命令退出 0”或“响应合法为空”不足以声称正向检索验证成功。
 
-- [ ] **Step 5: Refactor (keep tests green)**
+- [x] **Step 5: Refactor (keep tests green)**
 
 复用已有生命周期和输出解析方式；不要为一个 smoke 引入通用测试框架、持久状态或新生产配置。离线验证保持可重复。若只调整报告文案，不重复消耗实网额度；只有影响请求或验收语义的修改才重跑对应 live check。
 
@@ -604,8 +604,8 @@ env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest tests/unit/test_live_
 
 这是实现完成后的验收清单，不代表本计划编写阶段已经执行这些命令。
 
-- [ ] 确认全部 Task 1–7 行为测试和 spec 映射完成，未把初始为绿的基础设施回归伪报为 RED。
-- [ ] 完成与现有 CI 对齐的离线验证：
+- [x] 确认全部 Task 1–7 行为测试和 spec 映射完成，未把初始为绿的基础设施回归伪报为 RED。
+- [x] 完成与现有 CI 对齐的离线验证：
 
 ~~~bash
 env WEB_SEARCH_RUN_INTEGRATION=0 uv run --extra mcp pytest -v
@@ -619,13 +619,13 @@ uv build
 
 全套已经在同一个最终代码状态通过时，不为了清单重复执行；引用该次结果。uv audit 如遇数据库/网络不可用，应准确报告，不改锁文件来隐藏问题。
 
-- [ ] 检查文档构建产物 site/index.html 和 site/api/agent_search_gateway.html 存在，首页没有未替换的 {{PROJECT_VERSION}}。这是既有 CI 的构建验收，不手工编辑生成的 site 文件。
-- [ ] 检查构建 wheel 包含 agent_search_gateway/providers/web/langsearch.py，现有 package / secret-scan / 跨 Python 与 OS 矩阵继续由 .github/workflows/ci.yml 执行；不更改 CI。需要本地复现 wheel 安装时只使用隔离 UV_TOOL_DIR / UV_TOOL_BIN_DIR，不能覆盖用户安装。
-- [ ] 实网 smoke 记录成功证据或明确阻碍。凭证未配置、网络不可用、额度耗尽、一直空结果分别说明；不声称未运行的检查通过。
-- [ ] 审阅与 9c9361c 的差异：生产文件只有 langsearch.py 和 defaults.py；后者只有 import/末尾注册。无其他 adapter、核心、依赖或锁文件变化。
-- [ ] 确认 README/config/rate 表、注册顺序、26 Web / 33 服务、LANGSEARCH_API_KEY、5/1 成员窗口和默认禁用一致；没有隐含并发上限。
-- [ ] 按任务完成边界提交实现所需文件，仅暂存本次明确路径，不使用会包含其他 Agent 工作的全量暂存。此计划不授权发布、合并或清理其他工作树。
-- [ ] 本地验收后在原工作树交付绝对路径、commit 与检查结果；不复制到其他环境。
+- [x] 检查文档构建产物 site/index.html 和 site/api/agent_search_gateway.html 存在，首页没有未替换的 {{PROJECT_VERSION}}。这是既有 CI 的构建验收，不手工编辑生成的 site 文件。
+- [x] 检查构建 wheel 包含 agent_search_gateway/providers/web/langsearch.py，现有 package / secret-scan / 跨 Python 与 OS 矩阵继续由 .github/workflows/ci.yml 执行；不更改 CI。需要本地复现 wheel 安装时只使用隔离 UV_TOOL_DIR / UV_TOOL_BIN_DIR，不能覆盖用户安装。
+- [x] 实网 smoke 记录成功证据或明确阻碍。凭证未配置、网络不可用、额度耗尽、一直空结果分别说明；不声称未运行的检查通过。
+- [x] 审阅与 9c9361c 的差异：生产文件只有 langsearch.py 和 defaults.py；后者只有 import/末尾注册。无其他 adapter、核心、依赖或锁文件变化。
+- [x] 确认 README/config/rate 表、注册顺序、26 Web / 33 服务、LANGSEARCH_API_KEY、5/1 成员窗口和默认禁用一致；没有隐含并发上限。
+- [x] 按任务完成边界提交实现所需文件，仅暂存本次明确路径，不使用会包含其他 Agent 工作的全量暂存。此计划不授权发布、合并或清理其他工作树。
+- [x] 本地验收后在原工作树交付绝对路径、commit 与检查结果；不复制到其他环境。
 
 ## Spec 覆盖与类型自检
 
@@ -662,3 +662,50 @@ uv build
 - 自检重点：API code 必须是整数 200；message/msg 仅选合法字符串；错误字符串 "200" 不能成为成功；候选数组合法但无幸存项不能触发 fallback；适配器不得改写 URL；实网不能沿用 2 秒离线 CLI helper；禁用模板的速率配置须另行启用后验证。
 - 现有 test_default_registry_adds_one_baiduqianfan_search_only_provider 与速率表全集约束已纳入 Task 1，避免新增注册后留下已知失败。
 - 本计划无需改动现有 spec，也不依赖额外设计确认。若实现过程中发现与基线不同的并发修改，以当前源码重新定位，保留已确认的最小生产修改边界。
+
+## 执行记录（2026-11-28）
+
+**状态：Task 1–7 的实现及离线验收完成；真实 LangSearch 检索尚未验证。** 实网专用测试已执行，但 LocalHost 的命令环境与常规登录环境均未提供非空的 LANGSEARCH_API_KEY，测试在创建客户端前跳过，真实上游请求数为 0。这里的完成复选框包含“记录实网阻碍”，不表示实网检索已经通过。
+
+### 逐项提交与验证
+
+| 任务 | 提交 | 完成证据 |
+|---|---|---|
+| Task 1 | 036dcde | 请求、注册和文档契约经过真实 RED/GREEN；聚焦 76 passed；全套 6088 passed / 20 skipped。 |
+| Task 2 | be8680f | 9 个无效业务码先失败再通过；已有根对象、嵌套层级与空结果检查初始为绿；全套 6120 passed / 20 skipped。 |
+| Task 3 | ccc7a60 | 缺失元数据、混合坏记录和缺失计数事件先失败再通过；8 条记录准确分为 2 accepted / 6 rejected；全套 6131 passed / 20 skipped。 |
+| Task 4 | 6935dfc | 分类、字段选择及诊断异常隔离经过 RED/GREEN；聚焦 486 passed；最终全套 6155 passed / 20 skipped。 |
+| Task 5 | f47a7c4 | 既有配置、运行时、凭证池及 doctor 接入回归首次即绿，聚焦 819 passed；全套 6184 passed / 20 skipped；无生产改动。 |
+| Task 6 | 9359512 | 默认选择和显式选择两种 socket/CLI 验收首次即绿；搜索 NEED_FETCH、Jina 显式 Fetch 和 READY 缓存均验证；全套 6186 passed / 20 skipped。 |
+| Task 7 | 9a631eb | 17 项离线 smoke 验证通过；组合检查 55 passed / 1 skipped；最终全套 6203 passed / 21 skipped；专用实网测试因缺少凭证跳过。 |
+
+Task 1–7 按顺序由独立实现子代理完成并自审。独立只读审阅检查了 Task 1–4 的生产实现、共享 helper 边界和测试断言，未发现可操作缺陷。
+
+### 最终质量门
+
+以下结果对应实现提交 9a631eb 的同一生产代码与测试状态；后续仅回写本执行记录，没有重复运行已经通过的全套测试。
+
+| 检查 | 结果 |
+|---|---|
+| 离线 pytest（Python 3.12.3，启用 MCP extra） | 6203 passed，21 skipped，54.84 秒，退出码 0。 |
+| Ruff format --check src tests scripts | 269 files already formatted，退出码 0。 |
+| Ruff check . | All checks passed，退出码 0。 |
+| mypy src tests scripts | 265 个文件无问题，退出码 0。 |
+| uv audit --locked --preview-features audit-command | 49 个包未发现已知漏洞或不良项目状态，退出码 0。 |
+| 文档构建 | 退出码 0；site/index.html 与 site/api/agent_search_gateway.html 存在，首页没有未替换的版本占位符。 |
+| uv build | wheel 与 sdist 构建成功；wheel 内的 agent_search_gateway/providers/web/langsearch.py 与当前源码字节一致。 |
+| 差异检查 | git diff --check 通过；相对 9c9361c 的生产改动只有 langsearch.py 与 defaults.py，后者仅增加 import 和末尾注册。pyproject.toml、uv.lock 未变。 |
+
+示例保持默认禁用，凭证引用为 LANGSEARCH_API_KEY，启用后的成员窗口为 5 requests / 1 second；服务数量为 26 Web / 33 合计，没有隐含并发上限。真实运行时测试已验证多凭证只暴露一个逻辑 provider、空结果不切换凭证、HTTP 重试耗尽与业务失败沿用既有 fallback、所有客户端正常关闭。
+
+### 实网限制与复验命令
+
+执行过的专用命令：
+
+~~~bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run --extra mcp pytest tests/integration/test_live_langsearch.py -v -rs -rP
+~~~
+
+结果为 1 skipped。对 LocalHost 普通命令、登录环境和登录环境中的同名工具路由变量均仅检查非空状态，未打印凭证。真实 HTTP 发送为 0，因而没有阳性实网检索证据。
+
+当 LANGSEARCH_API_KEY 已实际传入 LocalHost 执行环境后，可原样重跑该命令。测试会使用独立配置、daemon、socket 和结果目录，内部 CLI 明确选择 langsearch；只有成功上游调用、可准入 URL、有效元数据、空正文以及资源清理同时成立才会通过。所有离线 smoke 测试均使用合成凭证和 MockTransport；其中的模拟 HTTP 200 与 URL 准入证据没有被当作实网成功。
