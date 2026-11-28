@@ -838,6 +838,23 @@ requests. The two APIs may share a free allowance, and calls may incur charges.
 Both branches must successfully parse their results. A verified empty result is
 valid for either branch.
 
+To check LangSearch with `LANGSEARCH_API_KEY` set, run this single file:
+
+```bash
+env WEB_SEARCH_RUN_INTEGRATION=1 uv run --extra mcp pytest tests/integration/test_live_langsearch.py -v -rs -rP
+```
+
+Avoid running the entire `tests/integration` directory with this opt-in enabled,
+because other live checks can call additional providers. The test starts a private
+daemon with temporary socket and result paths, runs `keyword-search` with
+`--provider langsearch`, and closes its clients and socket on exit. It requests
+10 results without page bodies. A pass requires a successful LangSearch HTTP
+request and at least one admitted HTTP(S) URL whose title or snippet supplies
+the abstract. Each returned URL must still need Fetch and have empty body fields.
+A valid empty response permits one alternate query. Two empty responses leave
+positive retrieval unverified and fail the check. A missing key skips it.
+The 90-second search budget includes retries and any upstream retry delay.
+
 For the keyless You.com free MCP check, select its dedicated case:
 
 ```bash
