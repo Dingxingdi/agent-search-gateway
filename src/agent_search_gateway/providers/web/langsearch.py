@@ -5,6 +5,7 @@ from ..contracts import KeywordSearchHit
 from .common import (
     JsonRequester,
     endpoint,
+    failure,
     non_empty_string,
     require_list,
     require_object,
@@ -35,6 +36,9 @@ class LangSearchAdapter:
             json_body={"query": query, "count": 10},
         )
         root = require_object(payload, self.name, "search", "response")
+        code = root.get("code")
+        if not isinstance(code, int) or isinstance(code, bool) or code != 200:
+            raise failure(self.name, "search", "code must be the integer 200")
         data = require_object(root.get("data"), self.name, "search", "data")
         pages = require_object(data.get("webPages"), self.name, "search", "data.webPages")
         results = require_list(pages.get("value"), self.name, "search", "data.webPages.value")

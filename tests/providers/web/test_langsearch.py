@@ -4,6 +4,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from agent_search_gateway.errors import ErrorCode, ExecutionFailure
 from agent_search_gateway.models import RetryPolicy
 from agent_search_gateway.observability import SecretValue
 from agent_search_gateway.providers.contracts import (
@@ -16,6 +17,103 @@ from agent_search_gateway.providers.http import HttpJsonExecutor
 from tests.support.http import RecordingJsonExecutor
 
 _FIXTURE = Path(__file__).parents[2] / "fixtures/providers/langsearch/search.json"
+_MISSING = object()
+
+
+@pytest.mark.parametrize(
+    ("path", "value", "reason"),
+    [
+        pytest.param((), None, "response must be an object", id="root-null"),
+        pytest.param((), [], "response must be an object", id="root-list"),
+        pytest.param((), "response", "response must be an object", id="root-string"),
+        pytest.param((), 200, "response must be an object", id="root-number"),
+        pytest.param(("code",), _MISSING, "code must be the integer 200", id="code-missing"),
+        pytest.param(("code",), None, "code must be the integer 200", id="code-null"),
+        pytest.param(("code",), True, "code must be the integer 200", id="code-true"),
+        pytest.param(("code",), False, "code must be the integer 200", id="code-false"),
+        pytest.param(("code",), "200", "code must be the integer 200", id="code-success-string"),
+        pytest.param(("code",), 200.0, "code must be the integer 200", id="code-float"),
+        pytest.param(("code",), {}, "code must be the integer 200", id="code-object"),
+        pytest.param(("code",), 429, "code must be the integer 200", id="code-error-integer"),
+        pytest.param(("code",), "429", "code must be the integer 200", id="code-error-string"),
+        *[
+            pytest.param(path, value, f"{label} must be an object", id=f"{label}-{kind}")
+            for path, label in [
+                (("data",), "data"),
+                (("data", "webPages"), "data.webPages"),
+            ]
+            for kind, value in [
+                ("missing", _MISSING),
+                ("null", None),
+                ("list", []),
+                ("string", "invalid"),
+                ("number", 200),
+                ("boolean", True),
+            ]
+        ],
+        *[
+            pytest.param(
+                ("data", "webPages", "value"),
+                value,
+                "data.webPages.value must be an array",
+                id=f"value-{kind}",
+            )
+            for kind, value in [
+                ("missing", _MISSING),
+                ("null", None),
+                ("object", {}),
+                ("string", "invalid"),
+                ("number", 200),
+                ("boolean", True),
+            ]
+        ],
+    ],
+)
+async def test_langsearch_rejects_invalid_success_envelope(
+    path: tuple[str, ...], value: object, reason: str
+) -> None:
+    payload: object = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    if path:
+        parent = payload
+        for key in path[:-1]:
+            assert isinstance(parent, dict)
+            parent = parent[key]
+        assert isinstance(parent, dict)
+        if value is _MISSING:
+            del parent[path[-1]]
+        else:
+            parent[path[-1]] = value
+    else:
+        payload = value
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor([payload]),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    with pytest.raises(ExecutionFailure) as caught:
+        await adapter.search("query")
+
+    assert caught.value.code == ErrorCode.ALL_PROVIDERS_FAILED
+    assert str(caught.value) == f"langsearch/search: {reason}"
+
+
+async def test_langsearch_accepts_empty_results() -> None:
+    payload = json.loads(_FIXTURE.read_text(encoding="utf-8"))
+    payload["data"]["webPages"]["value"] = []
+    registration = build_default_registry().require("langsearch")
+    adapter = registration.factory(
+        name="langsearch",
+        api_url="https://api.langsearch.com",
+        secret=SecretValue("example"),
+        http_executor=RecordingJsonExecutor([payload]),
+    )
+    assert isinstance(adapter, KeywordSearchProvider)
+
+    assert await adapter.search("query") == []
 
 
 @pytest.mark.parametrize(
