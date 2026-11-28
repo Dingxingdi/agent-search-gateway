@@ -8,9 +8,11 @@ The first public release is `v0.1.0`.
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-11-28
+
 ### Added
 
-- Add the opt-in LangSearch REST provider for keyword searches. It returns links, titles and snippets.
+- Added the opt-in LangSearch REST provider for keyword searches. It returns links, titles and snippets.
 
 ## [3.1.0] - 2026-11-27
 
